@@ -96,3 +96,162 @@ dtm = pd.DataFrame({'y':y, 'variable':xvar, 'value':x})
 # dtm.value = None
 '''
 
+
+
+def calculate_vif(df):
+    """Calculate VIF for the dataframe."""
+    # Add constant to the dataframe for intercept
+    df_with_const = add_constant(df)
+    vif_data = pd.DataFrame()
+    vif_data["Variable"] = df_with_const.columns
+    vif_data["VIF"] = [variance_inflation_factor(df_with_const.values, i) for i in range(df_with_const.shape[1])]
+    return vif_data
+
+def remove_high_vif_vars(df, vif_threshold):
+    """
+    Remove variables with VIF above the threshold iteratively.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame with all variables.
+    vif_threshold : float
+        The VIF threshold above which variables will be considered for removal.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with variables having VIF above the threshold removed.
+    """
+    # Copy the dataframe to avoid modifying the original
+    df_clean = df.copy()
+    variables = df_clean.columns.tolist()
+
+    while True:
+        # Calculate VIF for current variables
+        df_vif = calculate_vif(df_clean[variables])
+        
+        # Identify variables with high VIF
+        high_vif_vars = df_vif[df_vif["VIF"] > vif_threshold]
+        
+        if high_vif_vars.empty:
+            # Exit loop if no variables exceed the VIF threshold
+            break
+        
+        # Remove the variable with the highest VIF
+        var_to_remove = high_vif_vars.sort_values(by="VIF", ascending=False).iloc[0]["Variable"]
+        
+        if var_to_remove in variables:
+            variables.remove(var_to_remove)
+            df_clean = df_clean[variables]
+        else:
+            break
+
+    # Print removed variables
+    removed_vars = set(df.columns) - set(variables)
+    if removed_vars:
+        print(f"Removed variables: {removed_vars}")
+
+    return df_clean
+# Example DataFrame
+data = {
+    'A': [1, 2, 3, 4, 5],
+    'B': [5, 6, 7, 8, 7],
+    'C': [2, 4, 6, 8, 10],
+    'D': [10, 12, 14, 16, 18],
+    'E': [1, 2, 3, 49, 5],
+}
+df = pd.DataFrame(data)
+# Remove multicollinearity
+df_cleaned = calculate_vif(df)
+print(df_cleaned)
+
+
+import pandas as pd
+import numpy as np
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.tools.tools import add_constant
+
+def remove_multicollinearity(df, vif_threshold=10, corr_threshold=0.8):
+    """
+    Remove variables from the dataframe to reduce multicollinearity.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame with all variables.
+    vif_threshold : float
+        The VIF threshold above which variables will be considered for removal.
+    corr_threshold : float
+        The correlation coefficient threshold above which variables will be considered highly correlated.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with multicollinear variables removed.
+    """
+    # Function to calculate VIF
+    def calculate_vif(df):
+        # Add constant to the dataframe for intercept
+        df = add_constant(df)
+        vif_data = pd.DataFrame()
+        vif_data["Variable"] = df.columns
+        vif_data["VIF"] = [variance_inflation_factor(df.values, i) for i in range(df.shape[1])]
+        return vif_data
+
+    # Calculate correlation matrix
+    corr_matrix = df.corr().abs()
+
+    # Find pairs of highly correlated variables
+    high_corr_vars = set()
+    for i in range(len(corr_matrix.columns)):
+        for j in range(i):
+            if abs(corr_matrix.iloc[i, j]) > corr_threshold:
+                high_corr_vars.add(corr_matrix.columns[i])
+                high_corr_vars.add(corr_matrix.columns[j])
+
+    # Start with all variables
+    variables = df.columns.tolist()
+    removed_vars = set()
+
+    while True:
+        # Calculate VIF for current variables
+        df_vif = calculate_vif(df[variables])
+        high_vif_vars = df_vif[df_vif["VIF"] > vif_threshold]["Variable"].tolist()
+        
+        # Combine high correlation and high VIF variables
+        vars_to_remove = set(high_corr_vars).intersection(variables)
+        vars_to_remove.update(high_vif_vars)
+        
+        if not vars_to_remove:
+            break
+
+        # Remove variables with the highest VIF
+        if vars_to_remove:
+            var_to_remove = df_vif.loc[df_vif["Variable"].isin(vars_to_remove), "VIF"].idxmax()
+            if var_to_remove in variables:
+                variables.remove(var_to_remove)
+                removed_vars.add(var_to_remove)
+                high_corr_vars.discard(var_to_remove)
+        else:
+            break
+
+    # Print removed variables
+    if removed_vars:
+        print(f"Removed variables: {removed_vars}")
+
+    return df[variables]
+
+
+# Example DataFrame
+data = {
+    'A': [1, 2, 3, 4, 5],
+    'B': [5, 6, 7, 8, 7],
+    'C': [2, 4, 6, 8, 10],
+    'D': [10, 12, 14, 16, 18]
+}
+df = pd.DataFrame(data)
+# Remove multicollinearity
+df_cleaned = remove_multicollinearity(df, vif_threshold=10, corr_threshold=0.8)
+print(df_cleaned)
+
