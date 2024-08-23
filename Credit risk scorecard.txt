@@ -1,71 +1,329 @@
-import pandas as pd
-import statsmodels.api as sm
-from sklearn.datasets import load_iris
+Certainly! To document the technical assumptions for the SAS code related to financials, you can structure the document into clear sections, ensuring that each assumption is well-documented and understandable. Below is a suggested format and content to capture the technical assumptions based on the provided code comments.
 
-def backwardElimination(df, target_column, sl):
-    """
-    Perform backward elimination for logistic regression based on p-values.
+---
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        The dataset including features and target.
-    target_column : str
-        The name of the target variable column in the DataFrame.
-    sl : float
-        The significance level for p-values. Variables with p-values greater than this threshold are removed.
+# Technical Assumptions for Financial Data Processing in SAS
 
-    Returns
-    -------
-    pandas.DataFrame
-        The DataFrame containing only the features that remained after backward elimination.
-    """
-    # Extract target variable and features
-    Y = df[target_column]
-    X = df.drop(columns=[target_column])
+### **1. Audit Method Priority Setting**
+- **Assumption:** The priority order for the audit method is determined based on guidance from HBAP (Hongkong and Shanghai Banking Corporation Asia Pacific) and HBUK (Hongkong and Shanghai Banking Corporation United Kingdom). This hierarchy is assumed to be stable and reliable for determining the priority of financial statements.
+- **Rationale:** This ensures that the most relevant financial statements are selected based on the prescribed audit method, improving the accuracy of the financial analysis.
 
-    # Add constant to the model (intercept)
-    X = sm.add_constant(X)
+### **2. Exchange Rate Extraction from TM1**
+- **Assumption:** The TM1 table is a reliable source for exchange rates (FX rates) and can be used as a fallback when the Conformed Financials table lacks the necessary exchange rate data.
+- **Rationale:** This provides a backup method to ensure that all financial data can be converted to USD, maintaining consistency across the dataset.
 
-    # Perform backward elimination
-    while True:
-        try:
-            regressor_OLS = sm.Logit(Y, X).fit()
-        except sm.tools.sm_exceptions.PerfectSeparationError:
-            # Handle perfect separation error
-            print("Perfect separation detected; stopping backward elimination.")
-            break
+### **3. Merging Financials and Rating Tables**
+- **Assumption:** Financial and rating data can be directly merged based on rating events, and this merge is assumed to be accurate when financial statements are prioritized by audit method and statement type.
+- **Rationale:** This allows for a structured and hierarchical approach to data merging, ensuring that the most relevant and accurate financial statements are used.
 
-        pvalues = regressor_OLS.pvalues
-        max_pvalue = pvalues.max()
+### **4. Handling Missing Exchange Rates**
+- **Assumption:** When original exchange rates are unavailable, merging with the exchange rate from the TM1 table is assumed to provide the correct conversion rates.
+- **Rationale:** This ensures that financial statements are always converted to USD, even in the absence of direct exchange rate data in the financials table.
 
-        if max_pvalue > sl:
-            # Remove the variable with the highest p-value
-            worst_var = pvalues.idxmax()
-            X = X.drop(columns=[worst_var])
-        else:
-            break
+### **5. Statement Sorting and Prioritization**
+- **Assumption:** Financial statements are sorted and prioritized by the following order:
+  1. Audit Method
+  2. Annual Statements by Statement Type
+  3. Non-hidden Statements (based on Hidden Flag)
+  4. Latest Statement ID
+  5. Latest RAS Archive ID
+- **Rationale:** This ordering is assumed to be the most logical sequence for ensuring the most relevant and accurate financial statements are selected for further processing.
 
-    # Drop constant column if needed
-    if 'const' in X.columns:
-        X = X.drop(columns=['const'])
+### **6. Handling Missing Source Currency Codes**
+- **Assumption:** Missing source currency codes for CARM UK and DE are tactically assigned as GBP and EUR, respectively.
+- **Rationale:** This is a temporary fix to allow for continued processing and should be reviewed or refined in future iterations.
 
-    # Print summary of final model
-    if not X.empty:
-        print(regressor_OLS.summary())
-    else:
-        print("No variables remaining after backward elimination.")
+### **7. Financial Data Filtering**
+- **Assumption:** Financial records that could not be merged or have significant issues (e.g., old statements, non-annual statements) are filtered out to ensure data quality.
+- **Rationale:** This filtering helps to maintain a clean and relevant dataset, removing any potentially erroneous or outdated financial information.
 
-    return X
+### **8. Direct Match Flagging**
+- **Assumption:** Flags are created to identify the type of merge for each financial statement, with a priority given to direct matches based on rating events.
+- **Rationale:** This allows for easy identification of the type and quality of data merges, aiding in the evaluation and validation of the data.
 
-# Load the Iris dataset
-iris = load_iris()
-iris_df = pd.DataFrame(data=iris.data, columns=iris.feature_names)
-iris_df['species'] = iris.target
+### **9. Propagating Turnover Data**
+- **Assumption:** Turnover data is propagated at the GCDU ID and cohort year level, with specific rules for handling missing Global IDs by using a dummy GID (CARM customer ID).
+- **Rationale:** This ensures that turnover data is accurately and consistently applied across the dataset, even in cases of missing or incomplete information.
 
-# Convert to binary classification: 'Iris-setosa' vs. others
-iris_df['species'] = iris_df['species'].apply(lambda x: 1 if x == 0 else 0)
+### **10. Creating and Merging Turnover Lookup Tables**
+- **Assumption:** Turnover lookup tables are created at the GCDU ID and cohort level, and these are merged to aggregate turnover information.
+- **Rationale:** This process enables accurate aggregation and comparison of turnover data across different levels of granularity, ensuring that the most accurate turnover values are used.
 
-# Perform backward elimination
-X_opt = backwardElimination(iris_df, target_column='species', sl=0.05)
-print(X_opt.head())
+---
+
+### **Format for Sharing the Document**
+
+When sharing this document, ensure it is presented in a clear, concise, and structured manner. You can use the following format:
+
+- **Title:** Clearly state the purpose of the document at the top.
+- **Introduction (optional):** Briefly describe the overall goal of the SAS code and the significance of the assumptions.
+- **Assumptions:** List each assumption under a numbered heading, with a brief description and rationale for why this assumption was made.
+- **Conclusion (optional):** Summarize any important points or next steps for reviewing or validating these assumptions.
+
+You may want to share this document in a format such as PDF or Word, depending on your audience, to ensure it maintains its formatting and is easy to read.
+
+---
+
+This format and content should help you effectively communicate the technical assumptions related to your SAS code for financial data processing.
+
+
+#############################################################################################################3
+
+Below is a detailed list of technical assumptions for the SAS code steps related to processing financial facilities, including splitting, cleansing, and aggregating data.
+
+---
+
+# Technical Assumptions for Facility Data Processing in SAS
+
+### **1. Splitting Facilities by Borrowing Group**
+- **Assumption:** Facilities associated with a Borrowing Group will contain only one Customer ID in the facility table, which represents the primary customer. To obtain the complete set of Customer IDs within the Borrowing Group, a separate join with the Borrowing Group Details table on APL is necessary.
+- **Rationale:** This approach is required to accurately reflect all customer relationships within a Borrowing Group, ensuring that subsequent data processing considers the complete list of associated customers.
+
+### **2. Removal of Sub-Limit Facilities**
+- **Assumption:** Sub-limit facilities, introduced by credit officers as part of the overall facility in CARM, do not impact the total credit limit or Active Credit Obligation and are therefore removed during data cleansing.
+- **Rationale:** This step is essential for maintaining data accuracy in the IRB PD models, ensuring that only facilities affecting the total limit are included in the analysis.
+
+### **3. Full Set of CARM Customer IDs from Borrowing Group Table**
+- **Assumption:** For any facility linked to a Borrowing Group, the full set of associated Customer IDs should be retrieved from the Borrowing Group Details table on APL, rather than relying solely on the Customer ID in the facility table.
+- **Rationale:** This ensures a comprehensive view of all customers involved in the facility, which is crucial for accurate financial and risk assessment.
+
+### **4. Creation of RSL and HLT Flags**
+- **Assumption:** Flags are created for RSL (Specialized Lending) and HLT (High Leverage Transaction) based on specific criteria. Corresponding columns for Category A, B, and S limits are also created, distinguishing between committed and uncommitted parts.
+- **Rationale:** This flagging process is assumed to be critical for differentiating facilities based on risk categories, allowing for targeted analysis of different facility types.
+
+### **5. Aggregation of Limit Columns**
+- **Assumption:** The various limit columns are aggregated by CARM Customer ID, Relationship ID, Approval Date, and Credit Serial Number. This aggregated data is stored in a permanent database for further use.
+- **Rationale:** Aggregation is necessary for creating a consolidated view of facility limits across different dimensions, facilitating easier reporting and analysis.
+
+### **6. Site-Specific Data Considerations**
+- **Assumption:** The processing of facilities takes into account site-specific data considerations, such as region-based differences in facility risk categories (e.g., RLMU Risk Category for UK facilities where Facility_Risk_Category does not exist).
+- **Rationale:** This ensures that the data processing logic is adaptable to regional differences, maintaining consistency in the analysis across different sites.
+
+### **7. Exclusion of PPP Facilities in the U.S.**
+- **Assumption:** PPP (Paycheck Protection Program) facilities in the U.S. are excluded before running the limit process, based on specific criteria detailed in communications (e.g., email from Soham Majumder to Spandan Kumar on 31st July 2024). The exclusion is based on comparing the snapshot date with the facility approval date, and it impacts only a small number of facilities.
+- **Rationale:** This exclusion is necessary to align with U.S. regulatory requirements and to ensure that the analysis is not skewed by facilities that do not fit the standard lending categories.
+
+### **8. Data Integrity and Correctness**
+- **Assumption:** Throughout the process, the data integrity is maintained by filtering out non-essential facilities (e.g., sub-limits, PPP facilities) and ensuring that all relevant customer IDs and limits are accurately captured and aggregated.
+- **Rationale:** This overall assumption underpins the entire process, ensuring that the final dataset used for analysis and modeling is accurate, relevant, and free from errors or irrelevant data points.
+
+---
+
+### **Format for Sharing the Document**
+
+You can share this document using the following structure:
+- **Title:** Clearly state the document's purpose.
+- **Introduction (optional):** Briefly introduce the overall goal of the SAS code and why documenting these assumptions is crucial.
+- **Assumptions:** List each technical assumption under a numbered heading, with an explanation and rationale.
+- **Conclusion (optional):** Summarize any important points or next steps.
+
+This structured approach should help you effectively communicate the assumptions underlying your data processing steps in SAS.
+
+#############################################################################################
+
+Below is a detailed list of technical assumptions for the SAS code steps related to creating and processing cohort data, including exclusions, joins, and flag creation for default indicators.
+
+---
+
+# Technical Assumptions for Cohort Data Processing in SAS
+
+### **1. Creation of Blank Cohort Structure**
+- **Assumption:** A blank cohort structure is created initially to generate the RDS structure. This structure will be populated with relevant data from subsequent steps.
+- **Rationale:** The blank structure serves as a template to ensure that all necessary data elements are consistently represented in the final dataset, allowing for accurate and structured data processing.
+
+### **2. Exclusion of Non-Relevant Records**
+- **Assumption:** Records associated with "SECURITY DEPOSITOR" and "DUMMY" obligors are excluded from the Involved Party table. This exclusion is critical to reduce code runtime and focus on records that are material to the analysis.
+- **Rationale:** Security Depositors and Dummy Obligors do not represent entities with credit risk. Removing them ensures that the dataset is streamlined for IRB PD model development, avoiding unnecessary processing of irrelevant data.
+
+### **3. Joining Involved Party, Ratings, and Facility Data**
+- **Assumption:** The Involved Party data is joined with Ratings and Facility (LIMITS) data to create a comprehensive dataset. This join is performed after filtering out irrelevant obligors.
+- **Rationale:** Combining these datasets allows for a more holistic view of each obligor, incorporating critical information like ratings and facility limits, which are essential for assessing credit risk and other financial metrics.
+
+### **4. Handling Default Dates**
+- **Assumption:** The first default date for each CUSTOMER ID is identified and checked against approval dates. In cases where the default date precedes the first approval date, records are created without valid approval information to ensure that no defaults are missed.
+- **Rationale:** This assumption ensures that the cohort data captures all instances of default, even when the approval data is incomplete or unavailable, thereby preventing any loss of critical information.
+
+### **5. Retention of Latest Assessments**
+- **Assumption:** The latest non-cancelled, non-declined assessment before each cohort date is retained. The assessment must have occurred before the cohort date, and only the most recent valid assessment is kept.
+- **Rationale:** Keeping the most up-to-date and valid assessments ensures that the cohort data reflects the most accurate and relevant information for each obligor, which is crucial for reliable credit risk analysis.
+
+### **6. Creation of Default Flags at Customer Level**
+- **Assumption:** After joining default data at the CARM CUSTOMER ID level, two flags are created: 'DEFAULT' to indicate if an obligor is in default, and 'INTODEF' to mark the first cohort where an entity defaults.
+- **Rationale:** These flags are essential for tracking default events within the cohort data, enabling clear identification of when and how often an entity defaults, which is critical for credit risk modeling.
+
+### **7. Creation of Default Flags at GCDU ID Level**
+- **Assumption:** Similarly, default flags are created at the GCDU ID level, with 'DEFAULT_gid' indicating a default event and 'INTODEF_gid' marking the first cohort of default at the GCDU ID level.
+- **Rationale:** This step mirrors the process at the CUSTOMER ID level, ensuring that defaults are tracked and flagged at a more granular group level (GCDU ID), which may be necessary for certain types of risk assessments.
+
+### **8. Integration of Borrowing Group Information**
+- **Assumption:** The borrowing group information is joined with the cohort data, and the final cohort dataset is stored in a permanent database.
+- **Rationale:** Incorporating borrowing group data ensures that all related entities are considered in the cohort analysis, which is critical for understanding the full scope of risk associated with an obligor or group of obligors.
+
+### **9. Storage of Final Cohort Data**
+- **Assumption:** The processed cohort data, with all relevant flags and information, is stored in a permanent dataset for future analysis and reporting.
+- **Rationale:** This assumption ensures that the final, cleaned, and structured data is preserved for ongoing and future analysis, supporting the long-term objectives of the IRB PD model development and other financial assessments.
+
+---
+
+### **Format for Sharing the Document**
+
+You can structure this document as follows:
+- **Title:** Clear and descriptive title indicating the purpose of the document.
+- **Introduction (optional):** A brief overview of the data processing steps and the importance of documenting the assumptions.
+- **Assumptions:** List each technical assumption under a numbered heading, with a detailed explanation and rationale.
+- **Conclusion (optional):** Summarize key points or outline next steps.
+
+This format will help communicate the underlying assumptions of your cohort data processing steps effectively.
+
+#####################################################################################################33
+Here is a structured list of technical assumptions for the steps involved in creating the final default data, addressing regional reconciliation issues, and processing defaults based on various dates:
+
+---
+
+# Technical Assumptions for Final Default Data Creation
+
+### **1. Getting MDL and German Default Data**
+- **Assumption:** The MDL and German default data are retrieved as the primary source for default information. This includes collecting all relevant data from these datasets for further processing.
+- **Rationale:** MDL provides a comprehensive view of defaults, while German data ensures that all local defaults are accounted for, setting the stage for accurate reconciliation and processing.
+
+### **2. Resolving Regional Nuances**
+- **Assumption:** Regional issues specific to HBAP and Argentina are resolved by applying known corrections and adjustments. 
+  - **Argentina:** Correct erroneous defaults reported before 2021 as per specified email communication.
+  - **HBAP:** Integrate additional defaults from HBAP CPM not present in MDL, as indicated in the email communication.
+- **Rationale:** Addressing these regional nuances ensures the default data is accurate and complete, reflecting true default occurrences across different regions.
+
+### **3. Handling Local IDs in France and Mexico**
+- **Assumption:** Local IDs (STAMM, BP_ID) in France and Mexico are mapped to CARM CUSTOMER IDs using available mapping tables (GRADE).
+  - **France:** Use the HBFR ID mapping table to align local IDs with CARM CUSTOMER IDs.
+  - **Mexico:** Address mapping issues where not all records have a CARM CUSTOMER ID, and ensure only valid mappings are included.
+- **Rationale:** Local IDs need to be accurately translated into CARM CUSTOMER IDs to ensure consistency in the default data. Mapping tables facilitate this process by providing the necessary correlations.
+
+### **4. Splitting Data by Default and Resolution Dates**
+- **Assumption:** The data is split into cases with single versus multiple default and resolution date combinations for each CUSTOMER ID. Multiple date combinations are flagged for further scrutiny to distinguish between continuous defaults and separate redefaults.
+- **Rationale:** This step is crucial for understanding the nature of default events and ensuring accurate classification of defaults, which impacts subsequent analysis and reporting.
+
+### **5. Comparing Dates and Clubbing Defaults**
+- **Assumption:** For CUSTOMER IDs with multiple default and resolution dates, the dates are compared and clubbed where appropriate, taking into account the probation period. The macro used may need to be run multiple times due to its reliance on the 'Lag' function.
+- **Rationale:** Accurate handling of multiple default dates ensures that defaults within the probation period are correctly consolidated, providing a clear picture of the default status for each CUSTOMER ID.
+
+### **6. Creating the Final Default List**
+- **Assumption:** A final list of defaulted records is created by collapsing single and multiple default cases into a consolidated view at the CUSTOMER ID level.
+- **Rationale:** Consolidating defaults at the CUSTOMER ID level helps streamline the default data, making it easier to manage and analyze.
+
+### **7. Integrating GCDU ID**
+- **Assumption:** The GCDU ID is added to the processed default list at the CARM CUSTOMER ID level.
+- **Rationale:** Including GCDU ID ensures that all relevant identifiers are captured, providing a complete dataset for further analysis and use.
+
+### **8. Transposing Default Data**
+- **Assumption:** A transposed version of the CUSTOMER ID data is created, showing all default and resolution dates in columns. This allows for understanding the frequency and pattern of defaults.
+- **Rationale:** Transposing the data facilitates the analysis of default patterns and helps in creating columns for cohort creation, providing a comprehensive view of default occurrences.
+
+---
+
+This format provides a clear outline of each assumption with corresponding rationale, ensuring the data processing and reconciliation tasks are well-documented and justified.
+##############################################################################################################3
+
+Here are the detailed technical assumptions for processing default data across CARM CUSTOMER IDs within a GCDU ID:
+
+---
+
+# Technical Assumptions for Default Data Processing within GCDU ID
+
+### **Purpose:**
+To accurately determine the default and resolution dates for a GCDU ID by handling cases where different CUSTOMER IDs within the same GCDU ID might have conflicting default and resolution dates. This ensures that defaults are correctly consolidated, especially when a single default event affects multiple CUSTOMER IDs within the same GCDU ID.
+
+### **Steps and Technical Assumptions:**
+
+### **1. Roll Up Defaults to GCDU ID Level**
+- **Assumption:** Collect all default records where GCDU ID is populated and aggregate these records at the GCDU ID level.
+  - **Detail:** Retain all distinct default and resolution dates from the CARM CUSTOMER IDs under each GCDU ID.
+  - **Rationale:** Ensures comprehensive collection of all default events related to each GCDU ID, providing a basis for accurate date consolidation.
+
+### **2. Flag Distressed Restructuring Cases**
+- **Assumption:** Create a flag to identify GCDU IDs that have at least one CUSTOMER ID with Distressed Restructuring as a default reason.
+  - **Detail:** Use this flag to differentiate between default cases requiring a 1-year probation period (Distressed Restructuring) versus a 3-month probation period for other types of defaults.
+  - **Rationale:** Different probation periods need to be applied based on the type of default, which requires identification of default reasons at the GCDU ID level.
+
+### **3. Split Data by Default and Resolution Dates**
+- **Assumption:** Segment the data into cases with single versus multiple default and resolution dates under each GCDU ID.
+  - **Detail:** This helps differentiate between scenarios where all dates are the same (single case) and those with multiple distinct dates (multiple cases).
+  - **Rationale:** Multiple default and resolution dates need further analysis to determine if they represent separate default events or are part of a single ongoing default event.
+
+### **4. Compare and Consolidate Dates**
+- **Assumption:** For GCDU IDs with multiple default and resolution dates, compare dates to identify and club defaults within the probation period.
+  - **Detail:** Use the 'Lag' function iteratively to handle defaults within the probation period. The process may need to run for many iterations due to the function's limitation of looking back only one line item.
+  - **Rationale:** Accurate consolidation of default events is essential to reflect the true default status of each GCDU ID. Some GCDU IDs may have complex date patterns but are not treated specially if they are Security Depositors as per SIC Code.
+
+### **5. Create Final Default List**
+- **Assumption:** Generate a final list of defaulted records at the GCDU ID level by collapsing single and multiple default cases.
+  - **Detail:** Consolidate default information to provide a clear view of defaults at the GCDU ID level.
+  - **Rationale:** Simplifies the default data for final reporting and analysis, ensuring all relevant default cases are included.
+
+### **6. Create Transposed Default Data**
+- **Assumption:** Produce a transposed version of the data where all default and resolution dates for each GCDU ID are shown in separate columns.
+  - **Detail:** This helps visualize the maximum number of default and resolution events for each GCDU ID.
+  - **Rationale:** Provides a comprehensive view of default occurrences, useful for creating similar columns in cohort creation code and for further analysis.
+
+### **Special Considerations:**
+- **Security Depositors:** Some GCDU IDs (e.g., G295263649, G631604649) may have excessive default and resolution date combinations due to their nature as Security Depositors. These cases are handled separately, and no additional macro iterations are applied.
+- **Validation:** Ensure that the macro and process work correctly by testing with representative examples, such as G246789424 for Distressed Restructuring and G085271723 for other default types.
+
+---
+
+These assumptions outline the detailed steps and considerations required for accurately processing default data within GCDU IDs, addressing the complexity of default events and ensuring the correct application of probation periods and date consolidations.
+
+##############################################################################################################
+
+Here is a detailed list of technical assumptions for the SAS code steps related to obtaining and processing CARM Customer IDs using the UNDRCUST table and handling various ID types from the Germany customer segment and consolidated defaults tables:
+
+---
+
+# Technical Assumptions for Obtaining and Processing CARM Customer IDs
+
+### **Purpose**
+The goal is to map and obtain the CARM Customer ID for observations where the Germany customer segment and consolidated defaults tables have either no CARM Customer ID or have an alternate local ID (STAMM) instead of CARM Customer ID. This is achieved using mappings from the UNDRCUST table.
+
+### **1. Mapping Customer ID Using STAMM**
+- **Assumption:** The STAMM ID is used to obtain the corresponding CARM Customer ID from the UNDRCUST table. Entries with blank STAMM values are excluded from this mapping process.
+- **Rationale:** The STAMM ID provides a local identifier that can be mapped to the CARM Customer ID. Excluding blank entries ensures that only valid mappings are considered, improving the accuracy and efficiency of the data processing.
+
+### **2. Deduplication of STAMM IDs**
+- **Assumption:** Duplicate entries in the UNDRCUST table based on STAMM IDs are removed. This step ensures that each STAMM ID maps to a unique CARM Customer ID.
+- **Rationale:** Deduplication is crucial to avoid multiple mappings for a single STAMM ID, which could lead to inconsistencies in the final dataset. Although only ~1.6% of obligors are affected, deduplication maintains data integrity.
+
+### **3. Creation of `carm_customer_id_v2` Field**
+- **Assumption:** A new field, `carm_customer_id_v2`, is created to store either the original CARM Customer ID or the one obtained through the UNDRCUST table if the original is not available.
+- **Rationale:** This field consolidates the CARM Customer ID information, providing a comprehensive identifier for observations that either have the original CARM ID or need to use the mapped ID from the UNDRCUST table.
+
+### **4. Handling Default Processing with Various IDs**
+- **Assumption:** The Germany Consolidated Defaults table contains IDs such as STAMM and BP ID. A mapping is prepared for STAMM-CARM Customer ID and BP_ID-CARM Customer ID to obtain the CARM Customer ID.
+- **Rationale:** This ensures that all forms of local IDs are properly mapped to the CARM Customer ID, addressing cases where different types of IDs are used.
+
+### **5. Creation of Mapping Tables**
+- **Assumption:** Tables are created to map all possible combinations of STAMM-CARM Customer ID and BP ID-CARM Customer ID, and duplicates are removed. Observations with blank IDs are excluded from these mappings.
+- **Rationale:** Mapping tables facilitate the conversion of local IDs to CARM Customer IDs. Removing duplicates and blank IDs ensures the accuracy and completeness of the mappings.
+
+### **6. Incremental Customer ID Matching**
+- **Assumption:** Incremental CARM Customer IDs are obtained by matching STAMM and BP IDs. This involves matching STAMM level and BP ID level IDs to ensure complete coverage.
+- **Rationale:** Incremental matching is necessary to handle cases where initial mappings are not sufficient, ensuring that all local IDs are mapped to CARM Customer IDs.
+
+### **7. Creation of Consolidated CARM Customer ID Column**
+- **Assumption:** A new consolidated CARM Customer ID column is created, which prioritizes the actual CARM Customer ID over local IDs such as BP_ID and STAMM.
+- **Rationale:** This column consolidates all available CARM Customer ID information, providing a single, authoritative identifier for each record.
+
+### **8. Permanent Storage of Results**
+- **Assumption:** The final dataset with the consolidated CARM Customer IDs is saved into a permanent dataset without overwriting existing data.
+- **Rationale:** Permanent storage ensures that the results are preserved for future use and analysis, while not disrupting or overwriting any existing datasets.
+
+---
+
+### **Format for Sharing the Document**
+
+You can structure this document as follows:
+- **Title:** Clear title indicating the purpose of the document.
+- **Introduction (optional):** Brief overview of the objective and importance of obtaining and processing CARM Customer IDs.
+- **Assumptions:** List each technical assumption under a numbered heading, with a detailed explanation and rationale.
+- **Conclusion (optional):** Summarize key points or outline next steps.
+
+This format will help effectively communicate the technical assumptions underlying the process for mapping and consolidating CARM Customer IDs.
+
