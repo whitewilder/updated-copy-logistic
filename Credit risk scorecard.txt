@@ -1,4 +1,114 @@
-# Example Data
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import mahalanobis
+from scipy.stats import chi2, zscore, genextreme
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.covariance import EllipticEnvelope
+from sklearn.cluster import DBSCAN
+from statsmodels.api import OLS
+from statsmodels.stats.outliers_influence import OLSInfluence
+
+class OutlierHandler:
+    def __init__(self):
+        pass
+
+    def winsorize(self, data, columns, lower_percentile=0.01, upper_percentile=0.99):
+        """
+        Winsorize data by capping extreme values at given percentiles for a list of columns.
+        """
+        for column in columns:
+            lower_bound = data[column].quantile(lower_percentile)
+            upper_bound = data[column].quantile(upper_percentile)
+            data[column] = np.clip(data[column], lower_bound, upper_bound)
+        return data
+
+    def mahalanobis_distance(self, data, columns, threshold=0.99):
+        """
+        Identify outliers using Mahalanobis distance for a list of columns.
+        """
+        subset = data[columns]
+        cov_matrix = np.cov(subset.T)
+        inv_cov_matrix = np.linalg.inv(cov_matrix)
+        mean_vector = subset.mean(axis=0)
+
+        distances = subset.apply(lambda row: mahalanobis(row, mean_vector, inv_cov_matrix), axis=1)
+        chi_squared_threshold = chi2.ppf(threshold, len(columns))
+        outliers = distances[distances > np.sqrt(chi_squared_threshold)].index
+        return outliers
+
+    def isolation_forest_outliers(self, data, columns, contamination=0.05):
+        """
+        Identify outliers using Isolation Forest for a list of columns.
+        """
+        model = IsolationForest(contamination=contamination, random_state=42)
+        data['outlier_flag'] = model.fit_predict(data[columns])
+        outliers = data[data['outlier_flag'] == -1].index
+        data.drop(columns=['outlier_flag'], inplace=True)
+        return outliers
+
+    def mad_outliers(self, data, columns, threshold=3):
+        """
+        Identify outliers using Median Absolute Deviation (MAD) for a list of columns.
+        """
+        outlier_indices = []
+        for column in columns:
+            median = data[column].median()
+            mad = np.median(np.abs(data[column] - median))
+            deviations = np.abs(data[column] - median) / mad
+            outliers = deviations[deviations > threshold].index
+            outlier_indices.extend(outliers)
+        return list(set(outlier_indices))
+
+    def elliptic_envelope_outliers(self, data, columns, contamination=0.05):
+        """
+        Identify outliers using Elliptic Envelope for a list of columns.
+        """
+        model = EllipticEnvelope(contamination=contamination, random_state=42)
+        model.fit(data[columns])
+        predictions = model.predict(data[columns])
+        outliers = data[predictions == -1].index
+        return outliers
+
+    def dbscan_outliers(self, data, columns, eps=0.5, min_samples=5):
+        """
+        Identify outliers using DBSCAN for a list of columns.
+        """
+        model = DBSCAN(eps=eps, min_samples=min_samples)
+        labels = model.fit_predict(data[columns])
+        outliers = data[labels == -1].index
+        return outliers
+
+    def cooks_distance_outliers(self, X, y, threshold=0.5):
+        """
+        Identify outliers using Cook's Distance.
+        """
+        model = OLS(y, X).fit()
+        influence = OLSInfluence(model)
+        cooks_d = influence.cooks_distance[0]
+        outliers = np.where(cooks_d > threshold)[0]
+        return outliers
+
+    def lof_outliers(self, data, columns, contamination=0.05):
+        """
+        Identify outliers using Local Outlier Factor (LOF) for a list of columns.
+        """
+        model = LocalOutlierFactor(n_neighbors=20, contamination=contamination)
+        outlier_flags = model.fit_predict(data[columns])
+        outliers = data[outlier_flags == -1].index
+        return outliers
+
+    def extreme_value_theory_outliers(self, data, columns, threshold=0.99):
+        """
+        Identify outliers using Extreme Value Theory (EVT) for a list of columns.
+        """
+        outlier_indices = []
+        for column in columns:
+            params = genextreme.fit(data[column])
+            extreme_threshold = genextreme.ppf(threshold, *params)
+            outliers = data[data[column] > extreme_threshold].index
+            outlier_indices.extend(outliers)
+        return list(set(outlier_indices))# Example Data
 data = pd.DataFrame({
     'X1': np.random.normal(0, 1, 100),
     'X2': np.random.normal(5, 2, 100),
