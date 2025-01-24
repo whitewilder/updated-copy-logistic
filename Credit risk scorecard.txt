@@ -1,51 +1,36 @@
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import mahalanobis
-from scipy.stats import chi2, zscore, genextreme
-from sklearn.ensemble import IsolationForest
-from sklearn.neighbors import LocalOutlierFactor
-from sklearn.covariance import EllipticEnvelope
-from sklearn.cluster import DBSCAN
-from statsmodels.api import OLS
-from statsmodels.stats.outliers_influence import OLSInfluence
+from scipy.stats import zscore
 
 class OutlierHandler:
     def __init__(self):
         pass
 
-    def winsorize(self, data, columns, lower_percentile=0.01, upper_percentile=0.99):
+    def iqr_method(self, data, columns, factor=1.5):
         """
-        Winsorize data by capping extreme values at given percentiles for a list of columns.
+        Identify outliers using the IQR method for a list of columns.
         """
+        outlier_indices = []
         for column in columns:
-            lower_bound = data[column].quantile(lower_percentile)
-            upper_bound = data[column].quantile(upper_percentile)
-            data[column] = np.clip(data[column], lower_bound, upper_bound)
-        return data
+            Q1 = data[column].quantile(0.25)
+            Q3 = data[column].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - factor * IQR
+            upper_bound = Q3 + factor * IQR
+            outliers = data[(data[column] < lower_bound) | (data[column] > upper_bound)]
+            outlier_indices.extend(outliers.index)
+        return list(set(outlier_indices))
 
-    def mahalanobis_distance(self, data, columns, threshold=0.99):
+    def z_score_method(self, data, columns, threshold=3):
         """
-        Identify outliers using Mahalanobis distance for a list of columns.
+        Identify outliers using the Z-score method for a list of columns.
         """
-        subset = data[columns]
-        cov_matrix = np.cov(subset.T)
-        inv_cov_matrix = np.linalg.inv(cov_matrix)
-        mean_vector = subset.mean(axis=0)
-
-        distances = subset.apply(lambda row: mahalanobis(row, mean_vector, inv_cov_matrix), axis=1)
-        chi_squared_threshold = chi2.ppf(threshold, len(columns))
-        outliers = distances[distances > np.sqrt(chi_squared_threshold)].index
-        return outliers
-
-    def isolation_forest_outliers(self, data, columns, contamination=0.05):
-        """
-        Identify outliers using Isolation Forest for a list of columns.
-        """
-        model = IsolationForest(contamination=contamination, random_state=42)
-        data['outlier_flag'] = model.fit_predict(data[columns])
-        outliers = data[data['outlier_flag'] == -1].index
-        data.drop(columns=['outlier_flag'], inplace=True)
-        return outliers
+        outlier_indices = []
+        for column in columns:
+            z_scores = zscore(data[column])
+            outliers = np.where(np.abs(z_scores) > threshold)[0]
+            outlier_indices.extend(outliers)
+        return list(set(outlier_indices))
 
     def mad_outliers(self, data, columns, threshold=3):
         """
@@ -60,93 +45,48 @@ class OutlierHandler:
             outlier_indices.extend(outliers)
         return list(set(outlier_indices))
 
-    def elliptic_envelope_outliers(self, data, columns, contamination=0.05):
+    def cap_or_floor_outliers(self, data, columns, method="iqr", cap_floor_type="both", **kwargs):
         """
-        Identify outliers using Elliptic Envelope for a list of columns.
+        Cap or floor the outliers in a given column based on the IQR or Z-score method.
         """
-        model = EllipticEnvelope(contamination=contamination, random_state=42)
-        model.fit(data[columns])
-        predictions = model.predict(data[columns])
-        outliers = data[predictions == -1].index
-        return outliers
-
-    def dbscan_outliers(self, data, columns, eps=0.5, min_samples=5):
-        """
-        Identify outliers using DBSCAN for a list of columns.
-        """
-        model = DBSCAN(eps=eps, min_samples=min_samples)
-        labels = model.fit_predict(data[columns])
-        outliers = data[labels == -1].index
-        return outliers
-
-    def cooks_distance_outliers(self, X, y, threshold=0.5):
-        """
-        Identify outliers using Cook's Distance.
-        """
-        model = OLS(y, X).fit()
-        influence = OLSInfluence(model)
-        cooks_d = influence.cooks_distance[0]
-        outliers = np.where(cooks_d > threshold)[0]
-        return outliers
-
-    def lof_outliers(self, data, columns, contamination=0.05):
-        """
-        Identify outliers using Local Outlier Factor (LOF) for a list of columns.
-        """
-        model = LocalOutlierFactor(n_neighbors=20, contamination=contamination)
-        outlier_flags = model.fit_predict(data[columns])
-        outliers = data[outlier_flags == -1].index
-        return outliers
-
-    def extreme_value_theory_outliers(self, data, columns, threshold=0.99):
-        """
-        Identify outliers using Extreme Value Theory (EVT) for a list of columns.
-        """
-        outlier_indices = []
         for column in columns:
-            params = genextreme.fit(data[column])
-            extreme_threshold = genextreme.ppf(threshold, *params)
-            outliers = data[data[column] > extreme_threshold].index
-            outlier_indices.extend(outliers)
-        return list(set(outlier_indices))# Example Data
-data = pd.DataFrame({
-    'X1': np.random.normal(0, 1, 100),
-    'X2': np.random.normal(5, 2, 100),
-    'X3': np.random.normal(10, 5, 100)
-})
+            if method == "iqr":
+                Q1 = data[column].quantile(0.25)
+                Q3 = data[column].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - kwargs.get("factor", 1.5) * IQR
+                upper_bound = Q3 + kwargs.get("factor", 1.5) * IQR
+            elif method == "z_score":
+                mean = data[column].mean()
+                std = data[column].std()
+                threshold = kwargs.get("threshold", 3)
+                lower_bound = mean - threshold * std
+                upper_bound = mean + threshold * std
+            else:
+                raise ValueError("Invalid method. Choose 'iqr' or 'z_score'.")
 
-# Initialize the OutlierHandler
-handler = OutlierHandler()
+            # Apply capping/flooring
+            if cap_floor_type in ["cap", "both"]:
+                data[column] = np.where(data[column] > upper_bound, upper_bound, data[column])
+            if cap_floor_type in ["floor", "both"]:
+                data[column] = np.where(data[column] < lower_bound, lower_bound, data[column])
+        return data
 
-# Winsorize Columns
-data = handler.winsorize(data, ['X1', 'X2'], lower_percentile=0.01, upper_percentile=0.99)
+    def quantify_outliers(self, data, columns, method="iqr", **kwargs):
+        """
+        Quantify the number of outliers in a list of columns and return a summary DataFrame.
+        """
+        summary = []
+        for column in columns:
+            if method == "iqr":
+                outlier_indices = self.iqr_method(data, [column], **kwargs)
+            elif method == "z_score":
+                outlier_indices = self.z_score_method(data, [column], **kwargs)
+            else:
+                raise ValueError("Invalid method. Choose 'iqr' or 'z_score'.")
 
-# Mahalanobis Distance Outliers
-outliers_mahalanobis = handler.mahalanobis_distance(data, ['X1', 'X2', 'X3'])
+            n_outliers = len(outlier_indices)
+            percentage = (n_outliers / len(data)) * 100
+            summary.append({"Column": column, "Outliers": n_outliers, "Percentage": percentage})
 
-# Isolation Forest Outliers
-outliers_isolation = handler.isolation_forest_outliers(data, ['X1', 'X2', 'X3'])
-
-# MAD Outliers
-outliers_mad = handler.mad_outliers(data, ['X1', 'X2', 'X3'])
-
-# Elliptic Envelope Outliers
-outliers_elliptic = handler.elliptic_envelope_outliers(data, ['X1', 'X2', 'X3'])
-
-# DBSCAN Outliers
-outliers_dbscan = handler.dbscan_outliers(data, ['X1', 'X2', 'X3'])
-
-# Local Outlier Factor (LOF) Outliers
-outliers_lof = handler.lof_outliers(data, ['X1', 'X2', 'X3'])
-
-# Extreme Value Theory Outliers
-outliers_evt = handler.extreme_value_theory_outliers(data, ['X1', 'X2'])
-
-# Print Results
-print("Outliers (Mahalanobis):", outliers_mahalanobis)
-print("Outliers (Isolation Forest):", outliers_isolation)
-print("Outliers (MAD):", outliers_mad)
-print("Outliers (Elliptic Envelope):", outliers_elliptic)
-print("Outliers (DBSCAN):", outliers_dbscan)
-print("Outliers (LOF):", outliers_lof)
-print("Outliers (EVT):", outliers_evt)
+        return pd.DataFrame(summary)
