@@ -1,30 +1,72 @@
+import random
 import itertools
+from multiprocessing import Pool, Manager, cpu_count
+from functools import lru_cache
 
-# Example lists (replace these with your actual variable lists)
-leverage_list = ['leverage_var1', 'leverage_var2', 'leverage_var3', 'leverage_var4', 'leverage_var5', 'leverage_var6', 'leverage_var7', 'leverage_var8', 'leverage_var9', 'leverage_var10', 'leverage_var11', 'leverage_var12']
-profitability_list = ['profitability_var1', 'profitability_var2', 'profitability_var3', 'profitability_var4', 'profitability_var5', 'profitability_var6', 'profitability_var7', 'profitability_var8', 'profitability_var9', 'profitability_var10', 'profitability_var11', 'profitability_var12', 'profitability_var13', 'profitability_var14', 'profitability_var15']
-size_list = ['size_var1', 'size_var2', 'size_var3', 'size_var4', 'size_var5']
+# Mock your actual model function - replace with your real implementation
+def runmodel(varlist):
+    """Mock model function returning significant variables"""
+    return random.sample(varlist, k=random.randint(1, len(varlist)))
 
-# Proportional selection (adjust based on your calculation)
-leverage_selection_count = 5
-profitability_selection_count = 6
-size_selection_count = 2
+def generate_subsets(n_vars, max_samples=1000, seen=None):
+    """Generate unique subsets with intelligent sampling"""
+    variables = list(range(n_vars))
 
-# Function to select combinations
-def select_combinations(variable_list, selection_count):
-    return list(itertools.combinations(variable_list, selection_count))
+    # Always include full set
+    seen.add(tuple(variables))
+    yield variables
 
-# Select combinations
-leverage_combinations = select_combinations(leverage_list, leverage_selection_count)
-profitability_combinations = select_combinations(profitability_list, profitability_selection_count)
-size_combinations = select_combinations(size_list, size_selection_count)
+    # Add random subsets
+    for _ in range(max_samples):
+        subset_size = random.randint(1, n_vars)  # Vary subset size randomly
+        subset = tuple(sorted(random.sample(variables, subset_size)))
+        if subset not in seen:
+            seen.add(subset)
+            yield list(subset)
 
-# Combine selected combinations into one list
-final_selections = []
-final_selections.extend(leverage_combinations)
-final_selections.extend(profitability_combinations)
-final_selections.extend(size_combinations)
+def evaluate_subsets(subsets):
+    """Evaluate multiple subsets in a batch for efficiency"""
+    results = []
+    for subset in subsets:
+        if not subset:
+            results.append((0, []))
+        else:
+            try:
+                significant = runmodel(subset)
+                results.append((len(significant), significant))
+            except:
+                results.append((0, []))
+    return results
 
-# Example output: first 5 combinations
-for selection in final_selections[:5]:
-    print(selection)
+def parallel_backward_selection(n_vars=21, max_samples=1000, max_workers=None, batch_size=10):
+    """Optimized backward elimination using parallel processing"""
+    max_workers = max_workers or cpu_count()
+    best = (0, [])
+
+    manager = Manager()
+    seen = manager.dict()  # Shared memory for tracking subsets
+
+    subsets = generate_subsets(n_vars, max_samples, seen)
+    
+    with Pool(max_workers) as pool:
+        while True:
+            batch = list(itertools.islice(subsets, batch_size))  # Get batch of subsets
+            if not batch:
+                break
+            results = pool.map(evaluate_subsets, [batch])  # Run in parallel
+            
+            for batch_result in results:
+                for score, subset in batch_result:
+                    if score > best[0]:
+                        best = (score, subset)
+                        print(f"New best: {score} vars - {subset}")
+                        if score == n_vars:  # Early exit if perfect subset found
+                            pool.terminate()
+                            return best[1]
+    
+    return best[1]
+
+if __name__ == '__main__':
+    # Optimized selection
+    final_subset = parallel_backward_selection(n_vars=21, max_samples=1000)
+    print("Optimal subset found:", final_subset)
