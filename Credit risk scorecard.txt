@@ -1,75 +1,49 @@
 import random
-import itertools
 import pandas as pd
-from multiprocessing import Pool, Manager, cpu_count
+from multiprocessing import Pool, cpu_count
 
-# Example RunModel function (replace this with your actual model)
+# Example RunModel function (replace with actual model)
 def runmodel(df, feature_list):
     """
     Mock function that simulates training a model with selected features
-    and returns a Gini score. Replace this with your actual model logic.
+    and returns a Gini score. Replace this with actual logic.
     """
     if not feature_list:  # If empty list, return worst score
         return 0
-    return round(random.uniform(0.5, 0.9), 4)  # Simulating Gini scores between 0.5 - 0.9
+    return round(random.uniform(0.5, 0.9), 4)  # Simulating Gini scores
 
-def generate_subsets(variables, max_samples=1000, seen=None):
+def evaluate_subset(args):
     """
-    Generate unique subsets of variables with intelligent sampling.
+    Function to evaluate a single subset in parallel.
     """
-    seen.add(tuple(variables))  # Always start with full set
-    yield variables
+    df, variables = args
+    selected_features = random.sample(variables, 10)  # Randomly pick 10 features
+    gini_score = runmodel(df, selected_features)
+    return (gini_score, selected_features)
 
-    for _ in range(max_samples):
-        subset_size = random.randint(1, len(variables))  # Random subset size
-        subset = tuple(sorted(random.sample(variables, subset_size)))
-        if subset not in seen:
-            seen.add(subset)
-            yield list(subset)
-
-def evaluate_subsets(args):
+def parallel_feature_selection(df, variables, num_trials=100):
     """
-    Evaluate multiple subsets in a batch for efficiency.
+    Optimized function to select 10 random features multiple times 
+    and find the best Gini score using parallel processing.
     """
-    df, subsets = args
-    results = []
-    for subset in subsets:
-        gini_score = runmodel(df, subset)
-        results.append((gini_score, subset))
-    return results
-
-def parallel_backward_selection(df, variables, max_samples=1000, max_workers=None, batch_size=10):
-    """
-    Optimized backward elimination using parallel processing to find the subset with the best Gini score.
-    """
-    max_workers = max_workers or cpu_count()
-    best = (0, [])  # Store best (Gini score, subset)
-
-    manager = Manager()
-    seen = manager.dict()  # Shared memory to track unique subsets
-
-    subsets = generate_subsets(variables, max_samples, seen)
+    max_workers = min(cpu_count(), 4)  # Use up to 4 cores to prevent laptop overheating
+    best = (0, [])
 
     with Pool(max_workers) as pool:
-        while True:
-            batch = list(itertools.islice(subsets, batch_size))
-            if not batch:
-                break
-            results = pool.map(evaluate_subsets, [(df, batch)])  # Parallel execution
+        results = pool.map(evaluate_subset, [(df, variables)] * num_trials)  # Run in parallel
 
-            for batch_result in results:
-                for gini_score, subset in batch_result:
-                    if gini_score > best[0]:  # Update best subset if Gini is higher
-                        best = (gini_score, subset)
-                        print(f"New best Gini: {gini_score} - {subset}")
-    
+    for gini_score, subset in results:
+        if gini_score > best[0]:  # Update best subset if Gini is higher
+            best = (gini_score, subset)
+            print(f"New best Gini: {gini_score} - {subset}")
+
     return best[1]
 
+# Example usage
 if __name__ == '__main__':
-    # Example usage:
-    feature_names = [f"var{i}" for i in range(1, 22)]  # Example 21 variables
+    feature_names = [f"var{i}" for i in range(1, 101)]  # Example 100 variables
     df = pd.DataFrame({name: random.random() for name in feature_names})  # Mock DataFrame
 
-    # Find optimal subset
-    final_subset = parallel_backward_selection(df, feature_names, max_samples=1000)
-    print("Optimal subset found:", final_subset)
+    # Run parallel feature selection
+    best_subset = parallel_feature_selection(df, feature_names, num_trials=100)
+    print("Best subset found:", best_subset)
