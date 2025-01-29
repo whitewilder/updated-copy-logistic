@@ -1,92 +1,30 @@
-import numpy as np
-import pandas as pd
-from scipy.stats import zscore
+import itertools
 
-class OutlierHandler:
-    def __init__(self):
-        pass
+# Example lists (replace these with your actual variable lists)
+leverage_list = ['leverage_var1', 'leverage_var2', 'leverage_var3', 'leverage_var4', 'leverage_var5', 'leverage_var6', 'leverage_var7', 'leverage_var8', 'leverage_var9', 'leverage_var10', 'leverage_var11', 'leverage_var12']
+profitability_list = ['profitability_var1', 'profitability_var2', 'profitability_var3', 'profitability_var4', 'profitability_var5', 'profitability_var6', 'profitability_var7', 'profitability_var8', 'profitability_var9', 'profitability_var10', 'profitability_var11', 'profitability_var12', 'profitability_var13', 'profitability_var14', 'profitability_var15']
+size_list = ['size_var1', 'size_var2', 'size_var3', 'size_var4', 'size_var5']
 
-    def iqr_method(self, data, columns, factor=1.5):
-        """
-        Identify outliers using the IQR method for a list of columns.
-        """
-        outlier_indices = []
-        for column in columns:
-            Q1 = data[column].quantile(0.25)
-            Q3 = data[column].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - factor * IQR
-            upper_bound = Q3 + factor * IQR
-            outliers = data[(data[column] < lower_bound) | (data[column] > upper_bound)]
-            outlier_indices.extend(outliers.index)
-        return list(set(outlier_indices))
+# Proportional selection (adjust based on your calculation)
+leverage_selection_count = 5
+profitability_selection_count = 6
+size_selection_count = 2
 
-    def z_score_method(self, data, columns, threshold=3):
-        """
-        Identify outliers using the Z-score method for a list of columns.
-        """
-        outlier_indices = []
-        for column in columns:
-            z_scores = zscore(data[column])
-            outliers = np.where(np.abs(z_scores) > threshold)[0]
-            outlier_indices.extend(outliers)
-        return list(set(outlier_indices))
+# Function to select combinations
+def select_combinations(variable_list, selection_count):
+    return list(itertools.combinations(variable_list, selection_count))
 
-    def mad_outliers(self, data, columns, threshold=3):
-        """
-        Identify outliers using Median Absolute Deviation (MAD) for a list of columns.
-        """
-        outlier_indices = []
-        for column in columns:
-            median = data[column].median()
-            mad = np.median(np.abs(data[column] - median))
-            deviations = np.abs(data[column] - median) / mad
-            outliers = deviations[deviations > threshold].index
-            outlier_indices.extend(outliers)
-        return list(set(outlier_indices))
+# Select combinations
+leverage_combinations = select_combinations(leverage_list, leverage_selection_count)
+profitability_combinations = select_combinations(profitability_list, profitability_selection_count)
+size_combinations = select_combinations(size_list, size_selection_count)
 
-    def cap_or_floor_outliers(self, data, columns, method="iqr", cap_floor_type="both", **kwargs):
-        """
-        Cap or floor the outliers in a given column based on the IQR or Z-score method.
-        """
-        for column in columns:
-            if method == "iqr":
-                Q1 = data[column].quantile(0.25)
-                Q3 = data[column].quantile(0.75)
-                IQR = Q3 - Q1
-                lower_bound = Q1 - kwargs.get("factor", 1.5) * IQR
-                upper_bound = Q3 + kwargs.get("factor", 1.5) * IQR
-            elif method == "z_score":
-                mean = data[column].mean()
-                std = data[column].std()
-                threshold = kwargs.get("threshold", 3)
-                lower_bound = mean - threshold * std
-                upper_bound = mean + threshold * std
-            else:
-                raise ValueError("Invalid method. Choose 'iqr' or 'z_score'.")
+# Combine selected combinations into one list
+final_selections = []
+final_selections.extend(leverage_combinations)
+final_selections.extend(profitability_combinations)
+final_selections.extend(size_combinations)
 
-            # Apply capping/flooring
-            if cap_floor_type in ["cap", "both"]:
-                data[column] = np.where(data[column] > upper_bound, upper_bound, data[column])
-            if cap_floor_type in ["floor", "both"]:
-                data[column] = np.where(data[column] < lower_bound, lower_bound, data[column])
-        return data
-
-    def quantify_outliers(self, data, columns, method="iqr", **kwargs):
-        """
-        Quantify the number of outliers in a list of columns and return a summary DataFrame.
-        """
-        summary = []
-        for column in columns:
-            if method == "iqr":
-                outlier_indices = self.iqr_method(data, [column], **kwargs)
-            elif method == "z_score":
-                outlier_indices = self.z_score_method(data, [column], **kwargs)
-            else:
-                raise ValueError("Invalid method. Choose 'iqr' or 'z_score'.")
-
-            n_outliers = len(outlier_indices)
-            percentage = (n_outliers / len(data)) * 100
-            summary.append({"Column": column, "Outliers": n_outliers, "Percentage": percentage})
-
-        return pd.DataFrame(summary)
+# Example output: first 5 combinations
+for selection in final_selections[:5]:
+    print(selection)
