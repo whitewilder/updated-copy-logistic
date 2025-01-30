@@ -1,41 +1,75 @@
-import random
-import pandas as pd
-from joblib import Parallel, delayed
+def gini_coefficient(y_true, y_pred):
+    """Calculate Gini coefficient from predicted probabilities."""
+    auc = roc_auc_score(y_true, y_pred)
+    return 2 * auc - 1
 
-# Example RunModel function (replace with actual model)
-def runmodel(df, feature_list):
+def forward_selection_gini(data, target, max_features=None):
     """
-    Simulates training a model with selected features and returns a Gini score.
-    Replace this with actual model logic.
+    Perform forward selection to maximize the Gini coefficient.
+    
+    Parameters:
+    - data: pandas DataFrame (features)
+    - target: pandas Series (binary target variable)
+    - max_features: int (max number of features to select)
+    
+    Returns:
+    - selected_features: list of chosen features
+    - gini_progress: list of Gini values after each step
     """
-    if not feature_list:  # If empty list, return worst score
-        return 0
-    return round(random.uniform(0.5, 0.9), 4)  # Simulating Gini scores
+    selected_features = []
+    remaining_features = list(data.columns)
+    best_gini = 0
+    gini_progress = []
 
-def evaluate_subset(df, variables):
-    """
-    Selects 10 random features, evaluates Gini score.
-    """
-    selected_features = random.sample(variables, 10)  # Randomly pick 10 features
-    gini_score = runmodel(df, selected_features)
-    return gini_score, selected_features
+    while remaining_features:
+        gini_candidates = []
+        
+        for feature in remaining_features:
+            temp_features = selected_features + [feature]
+            X = sm.add_constant(data[temp_features])  # Add intercept
+            model = sm.Logit(target, X).fit(disp=0)   # Fit logistic regression
+            y_pred = model.predict(X)
+            gini = gini_coefficient(target, y_pred)
+            gini_candidates.append((feature, gini))
+        
+        # Select feature that maximizes Gini
+        gini_candidates.sort(key=lambda x: x[1], reverse=True)
+        best_feature, new_gini = gini_candidates[0]
+        
+        if new_gini > best_gini:
+            selected_features.append(best_feature)
+            remaining_features.remove(best_feature)
+            best_gini = new_gini
+            gini_progress.append(best_gini)
+            print(f"Added {best_feature}, Gini: {new_gini:.4f}")
+        else:
+            break  # Stop if no improvement
+        
+        if max_features and len(selected_features) >= max_features:
+            break  # Stop if max features reached
 
-def parallel_feature_selection(df, variables, num_trials=100):
-    """
-    Runs multiple feature selections in parallel to find the best subset based on Gini score.
-    """
-    results = Parallel(n_jobs=-1)(delayed(evaluate_subset)(df, variables) for _ in range(num_trials))
+    return selected_features, gini_progress
 
-    # Find the best subset
-    best = max(results, key=lambda x: x[0])  # Select the one with highest Gini score
-    print(f"Best Gini Score: {best[0]} | Features: {best[1]}")
-    return best[1]
+# Example Usage
+# Load your dataset
+# df = pd.read_csv("your_data.csv")
 
-# Example usage
-if __name__ == '__main__':
-    feature_names = [f"var{i}" for i in range(1, 101)]  # Example 100 variables
-    df = pd.DataFrame({name: random.random() for name in feature_names})  # Mock DataFrame
+# Separate features and target
+# X = df.drop(columns=["target"])
+# y = df["target"]
 
-    # Run parallel feature selection
-    best_subset = parallel_feature_selection(df, feature_names, num_trials=100)
-    print("Best subset found:", best_subset)
+# Run forward selection
+# selected_vars, gini_vals = forward_selection_gini(X, y)
+
+# Plot Gini uplift
+def plot_gini_uplift(gini_vals):
+    """Plot Gini uplift as each variable is added."""
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, len(gini_vals) + 1), gini_vals, marker='o', linestyle='-')
+    plt.xlabel("Number of Variables")
+    plt.ylabel("Gini Coefficient")
+    plt.title("Gini Uplift per Variable Addition")
+    plt.grid()
+    plt.show()
+
+# plot_gini_uplift(gini_vals)
