@@ -1,75 +1,71 @@
-def gini_coefficient(y_true, y_pred):
-    """Calculate Gini coefficient from predicted probabilities."""
-    auc = roc_auc_score(y_true, y_pred)
-    return 2 * auc - 1
+import numpy as np
+import pandas as pd
+from itertools import combinations
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 
-def forward_selection_gini(data, target, max_features=None):
+def compute_r2(df):
+    """Calculate R^2 using median and default rate."""
+    model = LinearRegression()
+    model.fit(df[['median_val']], df['default_rate'])
+    return r2_score(df['default_rate'], model.predict(df[['median_val']]))
+
+
+def merge_closest_bins(df):
+    """Find and merge the two bins that maximize R^2."""
+    best_r2 = -np.inf
+    best_combination = None
+    best_new_df = None
+
+    for bin1, bin2 in combinations(df.index, 2):  # Try all pairs of bins
+        temp_df = df.copy()
+        temp_df.loc[bin1, 'median_val'] = (df.loc[bin1, 'median_val'] + df.loc[bin2, 'median_val']) / 2
+        temp_df.loc[bin1, 'default_rate'] = (df.loc[bin1, 'default_rate'] + df.loc[bin2, 'default_rate']) / 2
+        temp_df = temp_df.drop(bin2).reset_index(drop=True)  # Remove merged bin
+        
+        new_r2 = compute_r2(temp_df)
+        if new_r2 > best_r2:
+            best_r2 = new_r2
+            best_combination = (bin1, bin2)
+            best_new_df = temp_df
+
+    return best_new_df, best_r2
+
+
+def optimize_bins(data, bin_column, target_column, min_bins=5):
     """
-    Perform forward selection to maximize the Gini coefficient.
-    
+    Iteratively merges bins to maximize R^2.
+
     Parameters:
-    - data: pandas DataFrame (features)
-    - target: pandas Series (binary target variable)
-    - max_features: int (max number of features to select)
-    
+        data (pd.DataFrame): Data containing bin labels and default rates.
+        bin_column (str): Column name representing bin labels.
+        target_column (str): Column name representing default rate.
+        min_bins (int): Minimum bins to stop merging.
+
     Returns:
-    - selected_features: list of chosen features
-    - gini_progress: list of Gini values after each step
+        pd.DataFrame: Optimally merged bins with updated medians and default rates.
     """
-    selected_features = []
-    remaining_features = list(data.columns)
-    best_gini = 0
-    gini_progress = []
+    
+    # Compute initial median and default rate for each bin
+    grouped = data.groupby(bin_column).agg(
+        median_val=(bin_column, 'median'),
+        default_rate=(target_column, 'mean')
+    ).reset_index()
 
-    while remaining_features:
-        gini_candidates = []
-        
-        for feature in remaining_features:
-            temp_features = selected_features + [feature]
-            X = sm.add_constant(data[temp_features])  # Add intercept
-            model = sm.Logit(target, X).fit(disp=0)   # Fit logistic regression
-            y_pred = model.predict(X)
-            gini = gini_coefficient(target, y_pred)
-            gini_candidates.append((feature, gini))
-        
-        # Select feature that maximizes Gini
-        gini_candidates.sort(key=lambda x: x[1], reverse=True)
-        best_feature, new_gini = gini_candidates[0]
-        
-        if new_gini > best_gini:
-            selected_features.append(best_feature)
-            remaining_features.remove(best_feature)
-            best_gini = new_gini
-            gini_progress.append(best_gini)
-            print(f"Added {best_feature}, Gini: {new_gini:.4f}")
-        else:
-            break  # Stop if no improvement
-        
-        if max_features and len(selected_features) >= max_features:
-            break  # Stop if max features reached
+    # Compute initial R^2
+    r2_list = [compute_r2(grouped)]
+    
+    # Iteratively merge bins to maximize R^2
+    while len(grouped) > min_bins:
+        new_grouped, new_r2 = merge_closest_bins(grouped)
+        if new_r2 <= r2_list[-1]:  # Stop if R^2 decreases
+            break
+        grouped = new_grouped
+        r2_list.append(new_r2)
 
-    return selected_features, gini_progress
+    print(f"Final number of bins: {len(grouped)}, Final R^2: {r2_list[-1]:.4f}")
+    return grouped
 
-# Example Usage
-# Load your dataset
-# df = pd.read_csv("your_data.csv")
-
-# Separate features and target
-# X = df.drop(columns=["target"])
-# y = df["target"]
-
-# Run forward selection
-# selected_vars, gini_vals = forward_selection_gini(X, y)
-
-# Plot Gini uplift
-def plot_gini_uplift(gini_vals):
-    """Plot Gini uplift as each variable is added."""
-    plt.figure(figsize=(8, 5))
-    plt.plot(range(1, len(gini_vals) + 1), gini_vals, marker='o', linestyle='-')
-    plt.xlabel("Number of Variables")
-    plt.ylabel("Gini Coefficient")
-    plt.title("Gini Uplift per Variable Addition")
-    plt.grid()
-    plt.show()
-
-# plot_gini_uplift(gini_vals)
+# Example Usage:
+# df = pd.DataFrame({'bin': range(1, 21), 'default_rate': np.random.rand(20) * 0.1})
+# result = optimize_bins(df, 'bin', 'default_rate', min_bins=5)
