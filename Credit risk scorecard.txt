@@ -1,63 +1,67 @@
 import numpy as np
 import pandas as pd
-from itertools import combinations
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 
 def compute_r2(df):
-    """Calculate R^2 using median and default rate."""
+    """Compute R^2 between median and default rate."""
     model = LinearRegression()
-    model.fit(df[['median_val']], df['default_rate'])
-    return r2_score(df['default_rate'], model.predict(df[['median_val']]))
+    model.fit(df[['median']], df['default_rate'])
+    return r2_score(df['default_rate'], model.predict(df[['median']]))
 
 
-def merge_closest_bins(df):
-    """Find and merge the two bins that maximize R^2."""
+def merge_adjacent_bins(df):
+    """Find and merge adjacent bins that maximize R^2."""
     best_r2 = -np.inf
-    best_combination = None
+    best_merge_idx = None
     best_new_df = None
 
-    for bin1, bin2 in combinations(df.index, 2):  # Try all pairs of bins
+    for i in range(len(df) - 1):  # Only adjacent bins
         temp_df = df.copy()
-        temp_df.loc[bin1, 'median_val'] = (df.loc[bin1, 'median_val'] + df.loc[bin2, 'median_val']) / 2
-        temp_df.loc[bin1, 'default_rate'] = (df.loc[bin1, 'default_rate'] + df.loc[bin2, 'default_rate']) / 2
-        temp_df = temp_df.drop(bin2).reset_index(drop=True)  # Remove merged bin
+        
+        # Merge bin i and bin i+1
+        temp_df.loc[i, 'median'] = (df.loc[i, 'median'] + df.loc[i + 1, 'median']) / 2
+        temp_df.loc[i, 'default_rate'] = (df.loc[i, 'default_rate'] + df.loc[i + 1, 'default_rate']) / 2
+        temp_df = temp_df.drop(i + 1).reset_index(drop=True)
         
         new_r2 = compute_r2(temp_df)
         if new_r2 > best_r2:
             best_r2 = new_r2
-            best_combination = (bin1, bin2)
+            best_merge_idx = i
             best_new_df = temp_df
 
     return best_new_df, best_r2
 
 
-def optimize_bins(data, bin_column, target_column, min_bins=5):
+def optimize_bins(train, variable, target, min_bins=5):
     """
-    Iteratively merges bins to maximize R^2.
+    Optimally merges adjacent bins to maximize R^2.
 
     Parameters:
-        data (pd.DataFrame): Data containing bin labels and default rates.
-        bin_column (str): Column name representing bin labels.
-        target_column (str): Column name representing default rate.
+        train (pd.DataFrame): Dataset containing variable & target.
+        variable (str): Name of the continuous variable to bin.
+        target (str): Target column.
         min_bins (int): Minimum bins to stop merging.
 
     Returns:
-        pd.DataFrame: Optimally merged bins with updated medians and default rates.
+        pd.DataFrame: Optimally merged bins with updated medians & default rates.
     """
     
-    # Compute initial median and default rate for each bin
-    grouped = data.groupby(bin_column).agg(
-        median_val=(bin_column, 'median'),
-        default_rate=(target_column, 'mean')
-    ).reset_index()
+    # Step 1: Create 15 bins using qcut
+    train['bin'] = pd.qcut(train[variable], q=15, duplicates='drop')
 
-    # Compute initial R^2
+    # Step 2: Compute median and default rate for each bin
+    grouped = train.groupby('bin').agg(
+        median=(variable, 'median'),
+        default_rate=(target, 'mean')
+    ).reset_index(drop=True)
+
+    # Step 3: Compute initial R^2
     r2_list = [compute_r2(grouped)]
     
-    # Iteratively merge bins to maximize R^2
+    # Step 4: Iteratively merge adjacent bins to maximize R^2
     while len(grouped) > min_bins:
-        new_grouped, new_r2 = merge_closest_bins(grouped)
+        new_grouped, new_r2 = merge_adjacent_bins(grouped)
         if new_r2 <= r2_list[-1]:  # Stop if R^2 decreases
             break
         grouped = new_grouped
@@ -67,5 +71,4 @@ def optimize_bins(data, bin_column, target_column, min_bins=5):
     return grouped
 
 # Example Usage:
-# df = pd.DataFrame({'bin': range(1, 21), 'default_rate': np.random.rand(20) * 0.1})
-# result = optimize_bins(df, 'bin', 'default_rate', min_bins=5)
+# result = optimize_bins(train, 'variable_name', 'target', min_bins=5)
