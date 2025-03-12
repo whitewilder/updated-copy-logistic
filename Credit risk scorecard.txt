@@ -1,74 +1,74 @@
 import numpy as np
-import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
+from scipy.optimize import minimize
+from scipy.special import expit  # Logit function
+from sklearn.datasets import make_classification
+from sklearn.preprocessing import StandardScaler
 
-def compute_r2(df):
-    """Compute R^2 between median and default rate."""
-    model = LinearRegression()
-    model.fit(df[['median']], df['default_rate'])
-    return r2_score(df['default_rate'], model.predict(df[['median']]))
-
-
-def merge_adjacent_bins(df):
-    """Find and merge adjacent bins that maximize R^2."""
-    best_r2 = -np.inf
-    best_merge_idx = None
-    best_new_df = None
-
-    for i in range(len(df) - 1):  # Only adjacent bins
-        temp_df = df.copy()
-        
-        # Merge bin i and bin i+1
-        temp_df.loc[i, 'median'] = (df.loc[i, 'median'] + df.loc[i + 1, 'median']) / 2
-        temp_df.loc[i, 'default_rate'] = (df.loc[i, 'default_rate'] + df.loc[i + 1, 'default_rate']) / 2
-        temp_df = temp_df.drop(i + 1).reset_index(drop=True)
-        
-        new_r2 = compute_r2(temp_df)
-        if new_r2 > best_r2:
-            best_r2 = new_r2
-            best_merge_idx = i
-            best_new_df = temp_df
-
-    return best_new_df, best_r2
-
-
-def optimize_bins(train, variable, target, min_bins=5):
+def constrained_logit_percentage(X, y, var1_idx, var2_idx, var1_percent=0.15, var2_percent=0.05):
     """
-    Optimally merges adjacent bins to maximize R^2.
+    Fit a logistic regression model with constraints on specific variable contributions.
 
     Parameters:
-        train (pd.DataFrame): Dataset containing variable & target.
-        variable (str): Name of the continuous variable to bin.
-        target (str): Target column.
-        min_bins (int): Minimum bins to stop merging.
+    - X: Input feature matrix (n_samples, n_features).
+    - y: Target labels (n_samples,).
+    - var1_idx: Index of the first variable to constrain.
+    - var2_idx: Index of the second variable to constrain.
+    - var1_percent: Desired percentage contribution for the first variable.
+    - var2_percent: Desired percentage contribution for the second variable.
 
     Returns:
-        pd.DataFrame: Optimally merged bins with updated medians & default rates.
+    - coefficients: Fitted coefficients for the logistic regression model.
     """
-    
-    # Step 1: Create 15 bins using qcut
-    train['bin'] = pd.qcut(train[variable], q=15, duplicates='drop')
+    n_samples, n_features = X.shape
 
-    # Step 2: Compute median and default rate for each bin
-    grouped = train.groupby('bin').agg(
-        median=(variable, 'median'),
-        default_rate=(target, 'mean')
-    ).reset_index(drop=True)
+    def log_loss(coef):
+        """Compute the logistic loss."""
+        linear_pred = X @ coef
+        return -np.sum(y * np.log(expit(linear_pred)) + (1 - y) * np.log(1 - expit(linear_pred)))
 
-    # Step 3: Compute initial R^2
-    r2_list = [compute_r2(grouped)]
-    
-    # Step 4: Iteratively merge adjacent bins to maximize R^2
-    while len(grouped) > min_bins:
-        new_grouped, new_r2 = merge_adjacent_bins(grouped)
-        if new_r2 <= r2_list[-1]:  # Stop if R^2 decreases
-            break
-        grouped = new_grouped
-        r2_list.append(new_r2)
+    def constraint_var1(coef):
+        """Constraint for var1 percentage contribution."""
+        return np.abs(coef[var1_idx] / np.sum(np.abs(coef)) - var1_percent)
 
-    print(f"Final number of bins: {len(grouped)}, Final R^2: {r2_list[-1]:.4f}")
-    return grouped
+    def constraint_var2(coef):
+        """Constraint for var2 percentage contribution."""
+        return np.abs(coef[var2_idx] / np.sum(np.abs(coef)) - var2_percent)
 
-# Example Usage:
-# result = optimize_bins(train, 'variable_name', 'target', min_bins=5)
+    def constraint_sum(coef):
+        """Ensure the sum of absolute weights is 1 (100%)."""
+        return np.sum(np.abs(coef)) - 1.0
+
+    # Initial guess for coefficients
+    initial_coef = np.zeros(n_features)
+
+    # Define constraints
+    constraints = [
+        {'type': 'eq', 'fun': constraint_var1},
+        {'type': 'eq', 'fun': constraint_var2},
+        {'type': 'eq', 'fun': constraint_sum}
+    ]
+
+    # Optimize with constraints
+    result = minimize(log_loss, initial_coef, constraints=constraints, method='SLSQP')
+
+    if result.success:
+        return result.x
+    else:
+        raise ValueError("Optimization failed: " + result.message)
+
+# Example usage
+if __name__ == "__main__":
+    # Generate synthetic data
+    X, y = make_classification(n_samples=1000, n_features=5, random_state=42)
+    X = StandardScaler().fit_transform(X)  # Standardize features
+
+    # Assume var1 is the first feature and var2 is the second feature
+    var1_idx = 0
+    var2_idx = 1
+
+    # Fit the model with constraints
+    coefficients = constrained_logit_percentage(X, y, var1_idx, var2_idx, var1_percent=0.15, var2_percent=0.05)
+
+    print("Fitted coefficients:", coefficients)
+    print("Percentage contribution of var1:", np.abs(coefficients[var1_idx]) / np.sum(np.abs(coefficients)))
+    print("Percentage contribution of var2:", np.abs(coefficients[var2_idx]) / np.sum(np.abs(coefficients)))
