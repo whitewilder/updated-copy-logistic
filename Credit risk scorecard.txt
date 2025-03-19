@@ -1,99 +1,28 @@
-import numpy as np
-import pandas as pd
-import statsmodels.api as sm
-from scipy.optimize import minimize
-from scipy.special import expit
-from sklearn.preprocessing import StandardScaler
-
-class ConstrainedLogit:
-    def __init__(self, endog, exog, var_constraints=None):
-        """
-        Initialize the constrained logistic regression model.
+    @property
+    def params(self):
+        """Return fitted parameters as a Pandas Series, similar to statsmodels Logit."""
+        if self.result is None:
+            raise ValueError("Model is not fitted yet. Call 'fit()' first.")
         
-        Parameters:
-        endog : array-like
-            The dependent binary variable (0 or 1).
-        exog : array-like
-            The independent variables (features) with shape (n_samples, n_features).
-        var_constraints : dict (optional)
-            Dictionary specifying variable indices and their desired percentage contributions.
-            Example: {0: 0.15, 1: 0.05} (15% for var1, 5% for var2).
-        """
-        self.endog = np.asarray(endog)
-        self.exog = sm.add_constant(np.asarray(exog), prepend=True)
-        self.var_constraints = var_constraints if var_constraints else {}
-        self.n_samples, self.n_features = self.exog.shape
-        self.scaler = StandardScaler()
-        self.exog_std = sm.add_constant(self.scaler.fit_transform(exog), prepend=True)
-        self.result = None
+        coef_names = ['Intercept'] + [f'var{i}' for i in range(1, self.n_features)]
+        return pd.Series(self.result.x, index=coef_names, name="params")
 
-    def _log_loss(self, coef, X):
-        """Compute the logistic loss."""
-        linear_pred = np.dot(X, coef)
-        return -np.sum(self.endog * np.log(expit(linear_pred)) + (1 - self.endog) * np.log(1 - expit(linear_pred)))
-
-    def _constraint(self, coef, var_idx, target_percent):
-        """Calculate the constraint for variable contribution."""
-        linear_pred = np.dot(self.exog, coef)
-        total_contribution = np.mean(linear_pred)
-        return np.mean(self.exog[:, var_idx] * coef[var_idx]) - total_contribution * target_percent
-
-    def _get_constraints(self):
-        """Generate constraints for optimization."""
-        constraints = [
-            {'type': 'eq', 'fun': lambda coef, idx=idx, percent=percent: self._constraint(coef, idx + 1, percent)}
-            for idx, percent in self.var_constraints.items()
-        ]
-        return constraints
-
-    def _compute_hessian(self, coef):
-        """Compute the Hessian matrix for standard errors."""
-        pred = expit(np.dot(self.exog, coef))
-        W = np.diag(pred * (1 - pred))
-        return np.dot(self.exog.T, np.dot(W, self.exog))
-
-    def fit(self):
-        """Fit the constrained logistic regression model."""
-        initial_coef = np.zeros(self.n_features)
-        constraints = self._get_constraints()
-
-        # Minimize logistic loss with constraints
-        opt_result = minimize(self._log_loss, initial_coef, args=(self.exog_std,), constraints=constraints, method='SLSQP')
-        if not opt_result.success:
-            raise ValueError(f"Optimization failed: {opt_result.message}")
-
-        self.result = opt_result
-        return self
-
-    def summary(self):
-        """Generate a summary similar to statsmodels Logit."""
+    @property
+    def bse(self):
+        """Return standard errors as a Pandas Series, similar to statsmodels Logit."""
         if self.result is None:
             raise ValueError("Model is not fitted yet. Call 'fit()' first.")
 
-        coef = self.result.x
-        coef_names = ['Intercept'] + [f'var{i}' for i in range(1, self.n_features)]
-        std_errors = np.sqrt(np.diag(np.linalg.inv(self._compute_hessian(coef))))
-        
-        contributions = np.abs(coef[1:]) * 100 / np.sum(np.abs(coef[1:]))
-        contributions = np.insert(contributions, 0, 0)  # Intercept contribution is 0
+        std_errors = np.sqrt(np.diag(np.linalg.inv(self._compute_hessian(self.result.x))))
+        return pd.Series(std_errors, index=self.params.index, name="bse")
 
-        summary_df = pd.DataFrame({
-            'Variable': coef_names,
-            'Coefficient': coef,
-            'Std Error': std_errors,
-            'Contribution (%)': contributions
-        })
+    @property
+    def pvalues(self):
+        """Return p-values as a Pandas Series, similar to statsmodels Logit."""
+        if self.result is None:
+            raise ValueError("Model is not fitted yet. Call 'fit()' first.")
 
-        print(summary_df)
-        return summary_df
+        z_scores = self.params / self.bse
+        p_values = 2 * (1 - norm.cdf(np.abs(z_scores)))
+        return pd.Series(p_values, index=self.params.index, name="pvalues")
 
-# Example Usage:
-if __name__ == '__main__':
-    # Sample data
-    X = pd.DataFrame(np.random.randn(100, 3), columns=['var1', 'var2', 'var3'])
-    y = np.random.randint(0, 2, size=100)
-
-    # Constrain var1 to 15% and var2 to 5%
-    model = ConstrainedLogit(y, X, var_constraints={0: 0.15, 1: 0.05})
-    model.fit()
-    model.summary()
