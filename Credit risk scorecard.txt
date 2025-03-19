@@ -24,5 +24,54 @@
 
         z_scores = self.params / self.bse
         p_values = 2 * (1 - norm.cdf(np.abs(z_scores)))
-        return pd.Series(p_values, index=self.params.index, name="pvalues")
+        return pd.Series(p_values, index=self.params.index, name="pvalues")def summary(self, yname=None, xname=None, title=None, alpha=0.05):
+        if self.result is None:
+            raise ValueError("Model is not fitted yet. Call 'fit()' first.")
+
+        # Default names if not provided
+        if yname is None:
+            yname = "Dependent Variable"
+        if xname is None:
+            xname = ['Intercept'] + [f'var{i}' for i in range(1, self.n_features)]
+        if title is None:
+            title = "Constrained Logistic Regression Results"
+
+        # Compute confidence intervals
+        conf_int = norm.ppf(1 - alpha / 2) * self.bse
+        conf_lower = self.params - conf_int
+        conf_upper = self.params + conf_int
+
+        # Model statistics
+        log_likelihood = -self._log_loss(self.params.values)
+        pseudo_r2 = 1 - (log_likelihood / (-self.n_samples * np.log(0.5)))  # Approximate McFadden's Pseudo R²
+
+        # Summary structure
+        smry = Summary()
+        top_left = [
+            ('Dep. Variable:', yname),
+            ('Method:', 'Maximum Likelihood'),
+            ('No. Observations:', self.n_samples),
+            ('Pseudo R-squ.:', f"{pseudo_r2:.4f}"),
+            ('Log-Likelihood:', f"{log_likelihood:.4f}")
+        ]
+        smry.add_dict(top_left)
+
+        # Coefficient table
+        param_table = np.column_stack((
+            self.params.values,
+            self.bse.values,
+            self.pvalues.values,
+            conf_lower.values,
+            conf_upper.values
+        ))
+        smry.add_table_2cols(self, title=title, gleft=top_left, gright=[])
+
+        smry.add_table_params(param_table, xname, alpha=alpha, use_t=False)
+        return smry
+
+
+
+
+
+
 
