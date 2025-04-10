@@ -1,333 +1,132 @@
-
-
-
-import numpy as np
 import pandas as pd
-import scipy.optimize as opt
+import numpy as np
 
-class ConstrainedLogit:
+def monotonic_binning(df, feature_col, target_col, max_bins=10, min_bin_size=0.05):
     """
-    A constrained logit model implementation, allowing for linear constraints
-    on the coefficients.  Similar to statsmodels' Logit, but with added
-    constraint functionality.
-
-    Args:
-        endog (array-like): 1-d array of the endogenous response variable (dependent variable).
-        exog (array-like): A nobs x k array of the exogenous variables (independent variables).
-        constraints (array-like, optional):  A matrix defining the linear constraints.
-            The constraints are of the form R * beta = q, where:
-                - R is a (constraints x k) matrix, where 'constraints' is the number of
-                  constraints and 'k' is the number of parameters (columns in exog).
-                - beta is the (k x 1) vector of coefficients.
-                - q is a (constraints x 1) vector of constraint values.
-            If None, no constraints are applied.  Defaults to None.
-        constraint_rhs (array-like, optional): The right-hand side (q) of the constraints equation
-            (R * beta = q). Required if `constraints` is provided.  Must be a 1D array
-            with a length equal to the number of rows in `constraints`.
-        add_constant (bool, optional):  Whether to add a constant (intercept) to the
-            exogenous variables. Defaults to True.
-
-    Raises:
-        ValueError: If the shapes of `constraints` and `constraint_rhs` are incompatible.
-        TypeError: If input arrays are not of numeric type.
-        ValueError: If constraint_rhs is required but not provided.
-
-    Attributes:
-        endog (np.ndarray): The endogenous variable.
-        exog (np.ndarray): The exogenous variables.
-        k_exog (int): The number of exogenous variables (including the constant, if added).
-        constraints (np.ndarray or None): The constraint matrix R.
-        constraint_rhs (np.ndarray or None): The constraint right-hand side q.
-        beta_initial (np.ndarray):  Initial guess for coefficients.
-        results (scipy.optimize.OptimizeResult):  The optimization results object.
-
+    Creates bins with monotonic relationship to default rate using IV-based greedy approach
+    
+    Parameters:
+    df (pd.DataFrame): Input dataframe
+    feature_col (str): Name of the feature column to bin
+    target_col (str): Name of the target column (0/1 binary)
+    max_bins (int): Maximum number of bins to create
+    min_bin_size (float): Minimum percentage of data in each bin
+    
+    Returns:
+    dict: Contains bins, IV, and WOE values
     """
-    def __init__(self, endog, exog, constraints=None, constraint_rhs=None, add_constant=True):
-
-        # Convert to numpy arrays and check dtypes
-        self.endog = np.asarray(endog)
-        self.exog = np.asarray(exog)
-        if constraints is not None:
-          self.constraints = np.asarray(constraints)
-        else:
-            self.constraints = None
-        if constraint_rhs is not None:
-            self.constraint_rhs = np.asarray(constraint_rhs)
-        else:
-             self.constraint_rhs = None
-
-        if not np.issubdtype(self.endog.dtype, np.number):
-            raise TypeError("endog must be numeric")
-        if not np.issubdtype(self.exog.dtype, np.number):
-            raise TypeError("exog must be numeric")
-        if constraints is not None and not np.issubdtype(self.constraints.dtype, np.number):
-                raise TypeError("constraints must be numeric")
-        if constraint_rhs is not None and not np.issubdtype(self.constraint_rhs.dtype, np.number):
-                raise TypeError("constraint_rhs must be numeric")
-
-
-
-        if add_constant:
-            self.exog = np.column_stack((np.ones(len(endog)), self.exog))
-
-        self.k_exog = self.exog.shape[1]  # Number of parameters
-
-
-        # Check constraint shapes
-        if constraints is not None:
-            if constraint_rhs is None:
-                raise ValueError("constraint_rhs must be provided if constraints are specified.")
-            if self.constraints.shape[0] != len(self.constraint_rhs):
-                raise ValueError("Number of rows in constraints must match the length of constraint_rhs.")
-            if self.constraints.shape[1] != self.k_exog:
-                raise ValueError("Number of columns in constraints must match the number of parameters.")
-
-        self.beta_initial = np.zeros(self.k_exog)  # Initial guess for coefficients
-        self.results = None # Store optimization results
-
-    def _loglike(self, beta):
-        """
-        Log-likelihood function for the logit model.
-
-        Args:
-            beta (np.ndarray):  The coefficient vector.
-
-        Returns:
-            float: The negative log-likelihood value (for minimization).
-        """
-        q = np.dot(self.exog, beta)
-        p = 1 / (1 + np.exp(-q))  # Logistic function
-
-        # Handle cases where p is very close to 0 or 1 to avoid log(0)
-        p = np.clip(p, 1e-15, 1 - 1e-15)
-
-        ll = np.sum(self.endog * np.log(p) + (1 - self.endog) * np.log(1 - p))
-        return -ll  # Return negative log-likelihood for minimization
-
-
-    def _jacobian(self, beta):
-        """
-        Jacobian (gradient) of the log-likelihood function.
-
-        Args:
-            beta (np.ndarray): The coefficient vector.
-
-        Returns:
-            np.ndarray: The Jacobian vector.
-        """
-        q = np.dot(self.exog, beta)
-        p = 1 / (1 + np.exp(-q))
-        return -np.dot(self.exog.T, (self.endog - p))  # Negative for minimization
-
-    def _hessian(self, beta):
-        """
-        Hessian matrix of the log-likelihood function.
-
-        Args:
-            beta (np.ndarray): The coefficient vector.
-
-        Returns:
-            np.ndarray: The Hessian matrix.
-        """
-        q = np.dot(self.exog, beta)
-        p = 1 / (1 + np.exp(-q))
-        W = np.diag(p * (1 - p))
-        return np.dot(self.exog.T, np.dot(W, self.exog)) # Positive definite for minimization
-
-    def fit(self, start_params=None, method='BFGS', **kwargs):
-        """
-        Fits the constrained logit model.
-
-        Args:
-            start_params (array-like, optional):  Starting values for the
-                coefficients.  If None, uses zeros.  Defaults to None.
-            method (str, optional):  Optimization method to use.  See
-                `scipy.optimize.minimize` for options.  Defaults to 'BFGS'.
-            **kwargs:  Additional keyword arguments to pass to
-                `scipy.optimize.minimize`.
-
-        Returns:
-            self (ConstrainedLogit):  The fitted model instance.
-        """
-
-        if start_params is None:
-            start_params = self.beta_initial
-        else:
-          start_params = np.asarray(start_params)
-
-        if self.constraints is not None:
-            constraints = ({'type': 'eq',
-                            'fun': lambda beta: np.dot(self.constraints, beta) - self.constraint_rhs,
-                            'jac': lambda beta: self.constraints})
-
-            self.results = opt.minimize(self._loglike, start_params, method=method,
-                                      jac=self._jacobian, hess=self._hessian,
-                                      constraints=constraints, **kwargs)
-        else:
-             self.results = opt.minimize(self._loglike, start_params, method=method,
-                                        jac=self._jacobian, hess=self._hessian,
-                                         **kwargs)
-
-        return self
-
-
-    def predict(self, exog, add_constant=True):
-        """
-        Predicts probabilities based on the fitted model.
-
-        Args:
-          exog (array-like): The exogenous variables for which to predict.
-          add_constant (bool): Add constant to exog array
-
-        Returns:
-            np.ndarray:  Predicted probabilities.
-        """
-        if self.results is None:
-            raise RuntimeError("Model has not been fitted yet. Call .fit() first.")
-
-        exog = np.asarray(exog)
-
-        if add_constant:
-              exog = np.column_stack((np.ones(exog.shape[0]), exog))
-
-        if exog.shape[1] != self.k_exog:
-            raise ValueError("exog must have the same number of columns as the original exog data used to fit the model (including a constant, if added).")
+    
+    # Create a copy of the dataframe and sort by feature
+    temp_df = df[[feature_col, target_col]].copy()
+    temp_df = temp_df.dropna().sort_values(feature_col)
+    
+    # Calculate total events and non-events
+    total_events = temp_df[target_col].sum()
+    total_non_events = len(temp_df) - total_events
+    min_size = len(temp_df) * min_bin_size
+    
+    # Initial equal-frequency binning
+    temp_df['initial_bin'] = pd.qcut(temp_df[feature_col].rank(method='first'), 
+                                   q=max_bins, 
+                                   labels=False,
+                                   duplicates='drop')
+    
+    # Function to calculate IV and WOE for a binning
+    def calculate_bin_stats(df_grouped):
+        bin_stats = df_grouped.agg({
+            target_col: ['count', 'sum']
+        })
+        bin_stats.columns = ['count', 'events']
+        bin_stats['non_events'] = bin_stats['count'] - bin_stats['events']
         
-        q = np.dot(exog, self.results.x)
-        return 1 / (1 + np.exp(-q))
+        # Avoid division by zero
+        bin_stats['event_rate'] = bin_stats['events'] / bin_stats['count']
+        bin_stats['dist_events'] = bin_stats['events'] / total_events
+        bin_stats['dist_non_events'] = bin_stats['non_events'] / total_non_events
+        
+        # Calculate WOE and IV
+        bin_stats['woe'] = np.log((bin_stats['dist_events'] + 0.0001) / 
+                                (bin_stats['dist_non_events'] + 0.0001))
+        bin_stats['iv'] = (bin_stats['dist_events'] - bin_stats['dist_non_events']) * bin_stats['woe']
+        
+        return bin_stats
+    
+    # Greedy algorithm to merge bins
+    current_bins = temp_df.groupby('initial_bin')
+    bin_stats = calculate_bin_stats(current_bins)
+    
+    while len(bin_stats) > 1:
+        # Check if minimum bin size is satisfied
+        if bin_stats['count'].min() < min_size:
+            # Find smallest bin and merge with neighbor
+            min_bin = bin_stats['count'].idxmin()
+            neighbor = min_bin + 1 if min_bin == bin_stats.index[0] else min_bin - 1
+            
+            # Merge bins
+            temp_df.loc[temp_df['initial_bin'] == min_bin, 'initial_bin'] = neighbor
+            temp_df['initial_bin'] = temp_df['initial_bin'].rank(method='dense') - 1
+            
+            current_bins = temp_df.groupby('initial_bin')
+            bin_stats = calculate_bin_stats(current_bins)
+            continue
+            
+        # Check monotonicity
+        event_rates = bin_stats['event_rate']
+        is_monotonic = all(event_rates.diff()[1:] > 0) or all(event_rates.diff()[1:] < 0)
+        
+        if is_monotonic and len(bin_stats) <= max_bins:
+            break
+            
+        # Find adjacent bins with lowest IV gain when merged
+        iv_gains = []
+        for i in range(len(bin_stats)-1):
+            temp_df_merged = temp_df.copy()
+            temp_df_merged.loc[temp_df_merged['initial_bin'] == i, 'initial_bin'] = i+1
+            temp_df_merged['initial_bin'] = temp_df_merged['initial_bin'].rank(method='dense') - 1
+            
+            new_bins = temp_df_merged.groupby('initial_bin')
+            new_stats = calculate_bin_stats(new_bins)
+            iv_gain = bin_stats['iv'].sum() - new_stats['iv'].sum()
+            iv_gains.append((i, iv_gain))
+        
+        # Merge bins with minimum IV loss
+        if iv_gains:
+            merge_idx, _ = min(iv_gains, key=lambda x: x[1])
+            temp_df.loc[temp_df['initial_bin'] == merge_idx, 'initial_bin'] = merge_idx + 1
+            temp_df['initial_bin'] = temp_df['initial_bin'].rank(method='dense') - 1
+            
+            current_bins = temp_df.groupby('initial_bin')
+            bin_stats = calculate_bin_stats(current_bins)
+    
+    # Get bin boundaries
+    bin_boundaries = []
+    for bin_num in bin_stats.index:
+        bin_data = temp_df[temp_df['initial_bin'] == bin_num][feature_col]
+        bin_boundaries.append((bin_data.min(), bin_data.max()))
+    
+    # Prepare output
+    result = {
+        'bins': bin_boundaries,
+        'iv': bin_stats['iv'].sum(),
+        'woe': bin_stats['woe'].to_dict(),
+        'bin_stats': bin_stats
+    }
+    
+    return result
 
-    @property
-    def params(self):
-        """
-        Returns the fitted parameters (coefficients).
+# Example usage:
+"""
+# Sample dataframe
+df = pd.DataFrame({
+    'feature': np.random.normal(0, 1, 1000),
+    'target': np.random.binomial(1, 0.3, 1000)
+})
 
-        Returns:
-            np.ndarray: The fitted parameters.  Raises an error if the model hasn't been fitted.
-        """
-        if self.results is None:
-            raise RuntimeError("Model has not been fitted yet.  Call .fit() first.")
-        return self.results.x
-
-    @property
-    def bse(self):
-      """
-      Returns the standard errors of the coefficients.
-
-      Returns:
-          np.ndarray: standard errors. Raises an error if the model hasn't been fitted.
-      """
-      if self.results is None:
-          raise RuntimeError("Model has not been fitted yet. Call .fit() first.")
-      return np.sqrt(np.diag(np.linalg.inv(self.results.hess)))
-
-    def summary(self):
-        """
-        Prints a summary of the model results, similar to statsmodels.
-
-        Returns:
-            None: Prints the summary to the console.  Raises an error if the model hasn't been fitted.
-
-        """
-
-        if self.results is None:
-             raise RuntimeError("Model has not been fitted yet.  Call .fit() first.")
-
-        print("Constrained Logit Regression Results")
-        print("==============================================================================")
-        print(f"Dep. Variable:   endog (shape: {self.endog.shape})")  # Show shape
-        print(f"Model:            ConstrainedLogit")
-        print(f"Method:           Maximum Likelihood Estimation")
-        print(f"Converged:        {self.results.success}")
-        print(f"No. Observations: {len(self.endog)}")  # Use len(self.endog)
-        print(f"Df Residuals:     {len(self.endog) - self.k_exog}")  # Corrected degrees of freedom
-        print(f"Df Model:         {self.k_exog - 1}") #Corrected
-        print("==============================================================================")
-        header = ["", "coef", "std err", "z", "P>|z|", "[0.025", "0.975]"]
-        print("{:<15} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}".format(*header))
-        print("------------------------------------------------------------------------------")
-
-        # Calculate z-scores and p-values
-        z_scores = self.params / self.bse
-        p_values = (1 - norm.cdf(np.abs(z_scores))) * 2  # Two-tailed test
-
-        # Calculate confidence intervals
-        conf_int = np.column_stack([self.params - 1.96 * self.bse,
-                                   self.params + 1.96 * self.bse])
-
-        # Display results for each parameter
-        for i in range(self.k_exog):
-            if i == 0:
-               var_name = 'const'
-            else:
-               var_name = f'x{i}'
-
-            row = [var_name,
-                   f"{self.params[i]:.4f}",
-                   f"{self.bse[i]:.4f}",
-                   f"{z_scores[i]:.3f}",
-                   f"{p_values[i]:.3f}",
-                   f"{conf_int[i, 0]:.3f}",
-                   f"{conf_int[i, 1]:.3f}"]
-            print("{:<15} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}".format(*row))
-        print("==============================================================================")
-
-        if self.constraints is not None:
-            print("Constraints:")
-            print(self.constraints)
-            print("RHS:")
-            print(self.constraint_rhs)
-
-        print(f"\nLog-Likelihood: {-self._loglike(self.params):.4f}") #Show LogLike
-        print(f"AIC:             {-2*(-self._loglike(self.params)) + 2*self.k_exog:.4f}")  # Calculate and display AIC
-        print(f"BIC:             {-2*(-self._loglike(self.params)) + np.log(len(self.endog))*self.k_exog:.4f}")  # Calculate and display BIC
-
-# --- Example Usage ---
-from scipy.stats import norm
-if __name__ == '__main__':
-    # Generate synthetic data
-    np.random.seed(42)
-    nobs = 100
-    exog = np.random.rand(nobs, 3)  # 3 independent variables
-    true_beta = np.array([0.5, -1.2, 0.8])  # True coefficients
-    q = np.dot(exog, true_beta)
-    prob = 1 / (1 + np.exp(-q))
-    endog = np.random.binomial(1, prob)  # Generate binary outcomes
-
-    # Create a constraint:  beta[1] + beta[2] = 0  (sum of the last two coefficients is 0)
-    constraints = np.array([[0, 1, 1]])  # R matrix
-    constraint_rhs = np.array([0])     # q vector
-
-    # Fit the constrained model
-    model = ConstrainedLogit(endog, exog, constraints=constraints, constraint_rhs=constraint_rhs)
-    results = model.fit()
-
-    # Print results
-    print(results.message)
-    print("Estimated parameters:", results.x)
-    model.summary()
-
-    # Example predictions
-    new_exog = np.array([[0.2, 0.7, 0.1], [0.9, 0.3, 0.6]])
-    predictions = model.predict(new_exog)
-    print("\nPredictions for new data:", predictions)
-
-
-    # Example without constraints
-    model_no_constraints = ConstrainedLogit(endog, exog)
-    results_no_constraints = model_no_constraints.fit()
-    print("\nResults without constraints:")
-    model_no_constraints.summary()
-
-
-    # --- Example with Pandas DataFrame ---
-    data = pd.DataFrame(exog, columns=['var1', 'var2', 'var3'])
-    data['outcome'] = endog
-
-    # Fit with DataFrame
-    model_df = ConstrainedLogit(data['outcome'], data[['var1', 'var2', 'var3']],
-                                constraints=constraints, constraint_rhs=constraint_rhs)
-    results_df = model_df.fit()
-    print("\nResults with Pandas DataFrame:")
-    print(results_df.message)
-    print("Estimated parameters:", results_df.x)
-    model_df.summary()
+# Apply binning
+result = monotonic_binning(df, 'feature', 'target', max_bins=5)
+print("Bin boundaries:", result['bins'])
+print("Total IV:", result['iv'])
+print("WOE values:", result['woe'])
+print("Bin statistics:")
+print(result['bin_stats'])
+"""
