@@ -1,132 +1,41 @@
-import pandas as pd
-import numpy as np
+          from openpyxl import load_workbook, Workbook
+from openpyxl.drawing.image import Image as XLImage
+import tempfile
+import os
 
-def monotonic_binning(df, feature_col, target_col, max_bins=10, min_bin_size=0.05):
-    """
-    Creates bins with monotonic relationship to default rate using IV-based greedy approach
-    
-    Parameters:
-    df (pd.DataFrame): Input dataframe
-    feature_col (str): Name of the feature column to bin
-    target_col (str): Name of the target column (0/1 binary)
-    max_bins (int): Maximum number of bins to create
-    min_bin_size (float): Minimum percentage of data in each bin
-    
-    Returns:
-    dict: Contains bins, IV, and WOE values
-    """
-    
-    # Create a copy of the dataframe and sort by feature
-    temp_df = df[[feature_col, target_col]].copy()
-    temp_df = temp_df.dropna().sort_values(feature_col)
-    
-    # Calculate total events and non-events
-    total_events = temp_df[target_col].sum()
-    total_non_events = len(temp_df) - total_events
-    min_size = len(temp_df) * min_bin_size
-    
-    # Initial equal-frequency binning
-    temp_df['initial_bin'] = pd.qcut(temp_df[feature_col].rank(method='first'), 
-                                   q=max_bins, 
-                                   labels=False,
-                                   duplicates='drop')
-    
-    # Function to calculate IV and WOE for a binning
-    def calculate_bin_stats(df_grouped):
-        bin_stats = df_grouped.agg({
-            target_col: ['count', 'sum']
-        })
-        bin_stats.columns = ['count', 'events']
-        bin_stats['non_events'] = bin_stats['count'] - bin_stats['events']
-        
-        # Avoid division by zero
-        bin_stats['event_rate'] = bin_stats['events'] / bin_stats['count']
-        bin_stats['dist_events'] = bin_stats['events'] / total_events
-        bin_stats['dist_non_events'] = bin_stats['non_events'] / total_non_events
-        
-        # Calculate WOE and IV
-        bin_stats['woe'] = np.log((bin_stats['dist_events'] + 0.0001) / 
-                                (bin_stats['dist_non_events'] + 0.0001))
-        bin_stats['iv'] = (bin_stats['dist_events'] - bin_stats['dist_non_events']) * bin_stats['woe']
-        
-        return bin_stats
-    
-    # Greedy algorithm to merge bins
-    current_bins = temp_df.groupby('initial_bin')
-    bin_stats = calculate_bin_stats(current_bins)
-    
-    while len(bin_stats) > 1:
-        # Check if minimum bin size is satisfied
-        if bin_stats['count'].min() < min_size:
-            # Find smallest bin and merge with neighbor
-            min_bin = bin_stats['count'].idxmin()
-            neighbor = min_bin + 1 if min_bin == bin_stats.index[0] else min_bin - 1
-            
-            # Merge bins
-            temp_df.loc[temp_df['initial_bin'] == min_bin, 'initial_bin'] = neighbor
-            temp_df['initial_bin'] = temp_df['initial_bin'].rank(method='dense') - 1
-            
-            current_bins = temp_df.groupby('initial_bin')
-            bin_stats = calculate_bin_stats(current_bins)
-            continue
-            
-        # Check monotonicity
-        event_rates = bin_stats['event_rate']
-        is_monotonic = all(event_rates.diff()[1:] > 0) or all(event_rates.diff()[1:] < 0)
-        
-        if is_monotonic and len(bin_stats) <= max_bins:
-            break
-            
-        # Find adjacent bins with lowest IV gain when merged
-        iv_gains = []
-        for i in range(len(bin_stats)-1):
-            temp_df_merged = temp_df.copy()
-            temp_df_merged.loc[temp_df_merged['initial_bin'] == i, 'initial_bin'] = i+1
-            temp_df_merged['initial_bin'] = temp_df_merged['initial_bin'].rank(method='dense') - 1
-            
-            new_bins = temp_df_merged.groupby('initial_bin')
-            new_stats = calculate_bin_stats(new_bins)
-            iv_gain = bin_stats['iv'].sum() - new_stats['iv'].sum()
-            iv_gains.append((i, iv_gain))
-        
-        # Merge bins with minimum IV loss
-        if iv_gains:
-            merge_idx, _ = min(iv_gains, key=lambda x: x[1])
-            temp_df.loc[temp_df['initial_bin'] == merge_idx, 'initial_bin'] = merge_idx + 1
-            temp_df['initial_bin'] = temp_df['initial_bin'].rank(method='dense') - 1
-            
-            current_bins = temp_df.groupby('initial_bin')
-            bin_stats = calculate_bin_stats(current_bins)
-    
-    # Get bin boundaries
-    bin_boundaries = []
-    for bin_num in bin_stats.index:
-        bin_data = temp_df[temp_df['initial_bin'] == bin_num][feature_col]
-        bin_boundaries.append((bin_data.min(), bin_data.max()))
-    
-    # Prepare output
-    result = {
-        'bins': bin_boundaries,
-        'iv': bin_stats['iv'].sum(),
-        'woe': bin_stats['woe'].to_dict(),
-        'bin_stats': bin_stats
-    }
-    
-    return result
+def copy_sheet_images(source_path, target_wb, sheet_suffix=""):
+    wb = load_workbook(source_path)
+    for sheet in wb.worksheets:
+        new_sheet = target_wb.create_sheet(title=sheet.title + sheet_suffix)
 
-# Example usage:
-"""
-# Sample dataframe
-df = pd.DataFrame({
-    'feature': np.random.normal(0, 1, 1000),
-    'target': np.random.binomial(1, 0.3, 1000)
-})
+        # Copy cell values (optional)
+        for row in sheet.iter_rows():
+            for cell in row:
+                new_sheet.cell(row=cell.row, column=cell.column, value=cell.value)
 
-# Apply binning
-result = monotonic_binning(df, 'feature', 'target', max_bins=5)
-print("Bin boundaries:", result['bins'])
-print("Total IV:", result['iv'])
-print("WOE values:", result['woe'])
-print("Bin statistics:")
-print(result['bin_stats'])
-"""
+        # Copy images
+        if hasattr(sheet, "_images"):
+            for i, img in enumerate(sheet._images):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                    tmp.write(img._data())
+                    tmp_path = tmp.name
+
+                new_img = XLImage(tmp_path)
+                new_img.anchor = img.anchor
+                new_sheet.add_image(new_img)
+                os.remove(tmp_path)
+
+# Create new workbook
+wb3 = Workbook()
+# Remove default sheet
+default_sheet = wb3.active
+wb3.remove(default_sheet)
+
+# Copy from Excel1.xlsx
+copy_sheet_images("Excel1.xlsx", wb3, sheet_suffix="_1")
+
+# Copy from Excel2.xlsx
+copy_sheet_images("Excel2.xlsx", wb3, sheet_suffix="_2")
+
+# Save combined workbook
+wb3.save("Excel3.xlsx")
