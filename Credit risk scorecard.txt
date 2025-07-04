@@ -1,41 +1,317 @@
-          from openpyxl import load_workbook, Workbook
-from openpyxl.drawing.image import Image as XLImage
-import tempfile
-import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+import io
+from PIL import Image
+import warnings
+warnings.filterwarnings('ignore')
 
-def copy_sheet_images(source_path, target_wb, sheet_suffix=""):
-    wb = load_workbook(source_path)
-    for sheet in wb.worksheets:
-        new_sheet = target_wb.create_sheet(title=sheet.title + sheet_suffix)
+class ProfessionalPPTGenerator:
+    def __init__(self):
+        self.prs = Presentation()
+        self.setup_theme()
+        
+    def setup_theme(self):
+        """Set up professional color theme and styling"""
+        # Professional color palette
+        self.colors = {
+            'primary': '#2E3440',      # Dark blue-gray
+            'secondary': '#5E81AC',    # Professional blue
+            'accent': '#88C0D0',       # Light blue
+            'success': '#A3BE8C',      # Soft green
+            'warning': '#EBCB8B',      # Warm yellow
+            'error': '#BF616A',        # Soft red
+            'background': '#ECEFF4',   # Light gray
+            'text': '#2E3440',         # Dark text
+            'grid': '#D8DEE9'          # Light grid
+        }
+        
+        # Set matplotlib style
+        plt.style.use('seaborn-v0_8-whitegrid')
+        sns.set_palette([self.colors['secondary'], self.colors['accent'], 
+                        self.colors['success'], self.colors['warning'], 
+                        self.colors['error']])
+        
+    def create_elegant_plot(self, plot_type, data, title, **kwargs):
+        """Create elegant, minimalist plots"""
+        fig, ax = plt.subplots(figsize=(12, 8))
+        fig.patch.set_facecolor('white')
+        
+        # Common styling
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(self.colors['grid'])
+        ax.spines['bottom'].set_color(self.colors['grid'])
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        ax.set_axisbelow(True)
+        
+        if plot_type == 'line':
+            self._create_line_plot(ax, data, **kwargs)
+        elif plot_type == 'bar':
+            self._create_bar_plot(ax, data, **kwargs)
+        elif plot_type == 'scatter':
+            self._create_scatter_plot(ax, data, **kwargs)
+        elif plot_type == 'heatmap':
+            self._create_heatmap_plot(ax, data, **kwargs)
+        elif plot_type == 'pie':
+            self._create_pie_plot(ax, data, **kwargs)
+        
+        # Title styling
+        ax.set_title(title, fontsize=20, fontweight='bold', 
+                    color=self.colors['text'], pad=20)
+        
+        # Axis labels styling
+        ax.tick_params(colors=self.colors['text'], labelsize=12)
+        
+        plt.tight_layout()
+        return fig
+    
+    def _create_line_plot(self, ax, data, x_col, y_col, **kwargs):
+        """Create elegant line plot"""
+        ax.plot(data[x_col], data[y_col], linewidth=3, 
+               marker='o', markersize=8, markerfacecolor='white',
+               markeredgewidth=2, color=self.colors['secondary'])
+        ax.set_xlabel(x_col, fontsize=14, fontweight='bold', color=self.colors['text'])
+        ax.set_ylabel(y_col, fontsize=14, fontweight='bold', color=self.colors['text'])
+    
+    def _create_bar_plot(self, ax, data, x_col, y_col, **kwargs):
+        """Create elegant bar plot"""
+        bars = ax.bar(data[x_col], data[y_col], 
+                     color=self.colors['secondary'], alpha=0.8, width=0.6)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                   f'{height:.1f}', ha='center', va='bottom', 
+                   fontsize=11, fontweight='bold', color=self.colors['text'])
+        
+        ax.set_xlabel(x_col, fontsize=14, fontweight='bold', color=self.colors['text'])
+        ax.set_ylabel(y_col, fontsize=14, fontweight='bold', color=self.colors['text'])
+    
+    def _create_scatter_plot(self, ax, data, x_col, y_col, **kwargs):
+        """Create elegant scatter plot"""
+        ax.scatter(data[x_col], data[y_col], s=100, alpha=0.7,
+                  color=self.colors['secondary'], edgecolors='white', linewidth=2)
+        ax.set_xlabel(x_col, fontsize=14, fontweight='bold', color=self.colors['text'])
+        ax.set_ylabel(y_col, fontsize=14, fontweight='bold', color=self.colors['text'])
+    
+    def _create_heatmap_plot(self, ax, data, **kwargs):
+        """Create elegant heatmap"""
+        sns.heatmap(data, ax=ax, cmap='Blues', annot=True, fmt='.2f',
+                   cbar_kws={'shrink': 0.8}, annot_kws={'fontsize': 10})
+        ax.set_title('')  # Remove seaborn default title
+    
+    def _create_pie_plot(self, ax, data, labels_col, values_col, **kwargs):
+        """Create elegant pie chart"""
+        colors = [self.colors['secondary'], self.colors['accent'], 
+                 self.colors['success'], self.colors['warning'], self.colors['error']]
+        
+        wedges, texts, autotexts = ax.pie(data[values_col], labels=data[labels_col],
+                                         autopct='%1.1f%%', startangle=90,
+                                         colors=colors[:len(data)], 
+                                         textprops={'fontsize': 12, 'fontweight': 'bold'})
+        
+        # Style the percentage text
+        for autotext in autotexts:
+            autotext.set_color('white')
+            autotext.set_fontweight('bold')
+    
+    def create_professional_table(self, data, title):
+        """Create a professional-looking table"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.axis('tight')
+        ax.axis('off')
+        
+        # Create table
+        table = ax.table(cellText=data.values, colLabels=data.columns,
+                        cellLoc='center', loc='center')
+        
+        # Style the table
+        table.auto_set_font_size(False)
+        table.set_fontsize(12)
+        table.scale(1.2, 2)
+        
+        # Header styling
+        for i in range(len(data.columns)):
+            table[(0, i)].set_facecolor(self.colors['secondary'])
+            table[(0, i)].set_text_props(weight='bold', color='white')
+        
+        # Alternate row colors
+        for i in range(1, len(data) + 1):
+            for j in range(len(data.columns)):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor(self.colors['background'])
+                else:
+                    table[(i, j)].set_facecolor('white')
+        
+        # Title
+        fig.suptitle(title, fontsize=20, fontweight='bold', 
+                    color=self.colors['text'], y=0.95)
+        
+        plt.tight_layout()
+        return fig
+    
+    def save_plot_to_image(self, fig, filename):
+        """Save matplotlib figure to image file"""
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=300, bbox_inches='tight',
+                   facecolor='white', edgecolor='none')
+        buf.seek(0)
+        return buf
+    
+    def add_title_slide(self, title, subtitle=""):
+        """Add a professional title slide"""
+        slide_layout = self.prs.slide_layouts[0]  # Title slide layout
+        slide = self.prs.slides.add_slide(slide_layout)
+        
+        title_shape = slide.shapes.title
+        subtitle_shape = slide.placeholders[1]
+        
+        title_shape.text = title
+        subtitle_shape.text = subtitle
+        
+        # Style the title
+        title_shape.text_frame.paragraphs[0].font.size = Pt(44)
+        title_shape.text_frame.paragraphs[0].font.bold = True
+        title_shape.text_frame.paragraphs[0].font.color.rgb = RGBColor(46, 52, 64)
+        
+        # Style the subtitle
+        subtitle_shape.text_frame.paragraphs[0].font.size = Pt(24)
+        subtitle_shape.text_frame.paragraphs[0].font.color.rgb = RGBColor(94, 129, 172)
+    
+    def add_plot_slide(self, fig, title, content_text=""):
+        """Add a slide with a plot"""
+        slide_layout = self.prs.slide_layouts[5]  # Blank layout
+        slide = self.prs.slides.add_slide(slide_layout)
+        
+        # Add title
+        title_shape = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), 
+                                              Inches(9), Inches(1))
+        title_frame = title_shape.text_frame
+        title_frame.text = title
+        title_frame.paragraphs[0].font.size = Pt(32)
+        title_frame.paragraphs[0].font.bold = True
+        title_frame.paragraphs[0].font.color.rgb = RGBColor(46, 52, 64)
+        
+        # Add plot
+        img_stream = self.save_plot_to_image(fig, 'temp_plot.png')
+        slide.shapes.add_picture(img_stream, Inches(1), Inches(1.5), 
+                               Inches(8), Inches(6))
+        
+        # Add content text if provided
+        if content_text:
+            content_shape = slide.shapes.add_textbox(Inches(0.5), Inches(7.5), 
+                                                   Inches(9), Inches(1))
+            content_frame = content_shape.text_frame
+            content_frame.text = content_text
+            content_frame.paragraphs[0].font.size = Pt(16)
+            content_frame.paragraphs[0].font.color.rgb = RGBColor(46, 52, 64)
+        
+        plt.close(fig)  # Close the figure to free memory
+    
+    def add_table_slide(self, data, title, content_text=""):
+        """Add a slide with a table"""
+        fig = self.create_professional_table(data, title)
+        self.add_plot_slide(fig, title, content_text)
+    
+    def save_presentation(self, filename):
+        """Save the presentation"""
+        self.prs.save(filename)
+        print(f"Presentation saved as {filename}")
 
-        # Copy cell values (optional)
-        for row in sheet.iter_rows():
-            for cell in row:
-                new_sheet.cell(row=cell.row, column=cell.column, value=cell.value)
+# Example usage and demo
+def create_sample_presentation():
+    """Create a sample presentation with various plots and tables"""
+    
+    # Initialize the generator
+    ppt_gen = ProfessionalPPTGenerator()
+    
+    # Add title slide
+    ppt_gen.add_title_slide("Professional Data Analysis", 
+                           "Elegant Visualizations and Tables")
+    
+    # Sample data
+    np.random.seed(42)
+    
+    # 1. Line plot data
+    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun']
+    sales = [150, 180, 160, 220, 250, 280]
+    line_data = pd.DataFrame({'Month': months, 'Sales': sales})
+    
+    fig1 = ppt_gen.create_elegant_plot('line', line_data, 'Monthly Sales Trend', 
+                                      x_col='Month', y_col='Sales')
+    ppt_gen.add_plot_slide(fig1, "Sales Performance", 
+                          "Consistent growth trend observed throughout the period")
+    
+    # 2. Bar plot data
+    products = ['Product A', 'Product B', 'Product C', 'Product D']
+    revenue = [45000, 38000, 52000, 41000]
+    bar_data = pd.DataFrame({'Product': products, 'Revenue': revenue})
+    
+    fig2 = ppt_gen.create_elegant_plot('bar', bar_data, 'Product Revenue Comparison',
+                                      x_col='Product', y_col='Revenue')
+    ppt_gen.add_plot_slide(fig2, "Product Performance", 
+                          "Product C leads in revenue generation")
+    
+    # 3. Scatter plot data
+    x_vals = np.random.randn(50) * 10 + 50
+    y_vals = x_vals * 0.8 + np.random.randn(50) * 5
+    scatter_data = pd.DataFrame({'Experience': x_vals, 'Salary': y_vals})
+    
+    fig3 = ppt_gen.create_elegant_plot('scatter', scatter_data, 'Experience vs Salary',
+                                      x_col='Experience', y_col='Salary')
+    ppt_gen.add_plot_slide(fig3, "HR Analytics", 
+                          "Positive correlation between experience and salary")
+    
+    # 4. Pie chart data
+    categories = ['Marketing', 'Development', 'Sales', 'Support']
+    budgets = [30, 40, 20, 10]
+    pie_data = pd.DataFrame({'Category': categories, 'Budget': budgets})
+    
+    fig4 = ppt_gen.create_elegant_plot('pie', pie_data, 'Budget Distribution',
+                                      labels_col='Category', values_col='Budget')
+    ppt_gen.add_plot_slide(fig4, "Budget Allocation", 
+                          "Development receives the largest budget allocation")
+    
+    # 5. Heatmap data
+    corr_data = pd.DataFrame(np.random.randn(5, 5), 
+                           columns=['A', 'B', 'C', 'D', 'E'],
+                           index=['A', 'B', 'C', 'D', 'E'])
+    corr_data = corr_data.corr()
+    
+    fig5 = ppt_gen.create_elegant_plot('heatmap', corr_data, 'Correlation Matrix')
+    ppt_gen.add_plot_slide(fig5, "Data Correlations", 
+                          "Correlation analysis reveals key relationships")
+    
+    # 6. Professional table
+    table_data = pd.DataFrame({
+        'Metric': ['Revenue', 'Profit', 'Growth Rate', 'ROI'],
+        'Q1': ['$125K', '$45K', '15%', '12%'],
+        'Q2': ['$142K', '$52K', '18%', '14%'],
+        'Q3': ['$156K', '$58K', '22%', '16%'],
+        'Q4': ['$168K', '$63K', '25%', '18%']
+    })
+    
+    ppt_gen.add_table_slide(table_data, "Quarterly Performance Summary",
+                           "Strong performance across all metrics")
+    
+    # Save the presentation
+    ppt_gen.save_presentation("professional_presentation.pptx")
+    
+    print("Sample presentation created successfully!")
+    print("Features included:")
+    print("- Professional color scheme")
+    print("- Minimalist design")
+    print("- Multiple chart types")
+    print("- Elegant tables")
+    print("- Consistent styling")
 
-        # Copy images
-        if hasattr(sheet, "_images"):
-            for i, img in enumerate(sheet._images):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    tmp.write(img._data())
-                    tmp_path = tmp.name
-
-                new_img = XLImage(tmp_path)
-                new_img.anchor = img.anchor
-                new_sheet.add_image(new_img)
-                os.remove(tmp_path)
-
-# Create new workbook
-wb3 = Workbook()
-# Remove default sheet
-default_sheet = wb3.active
-wb3.remove(default_sheet)
-
-# Copy from Excel1.xlsx
-copy_sheet_images("Excel1.xlsx", wb3, sheet_suffix="_1")
-
-# Copy from Excel2.xlsx
-copy_sheet_images("Excel2.xlsx", wb3, sheet_suffix="_2")
-
-# Save combined workbook
-wb3.save("Excel3.xlsx")
+if __name__ == "__main__":
+    create_sample_presentation()
