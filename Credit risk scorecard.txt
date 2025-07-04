@@ -3,367 +3,383 @@ import seaborn as sns
 import pandas as pd
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
-import io
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import plotly.io as pio
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-class ProfessionalPDFGenerator:
-    def __init__(self):
-        self.setup_theme()
-        self.figures = []  # Store figures for PDF generation
+class ElegantPDFReport:
+    def __init__(self, filename="elegant_report.pdf"):
+        """
+        Initialize the PDF report generator
         
-    def setup_theme(self):
-        """Set up professional red and gray color theme"""
-        # Professional red and gray color palette
-        self.colors = {
-            'primary': '#2D3748',      # Dark gray
-            'secondary': '#DC2626',    # Professional red
-            'accent': '#EF4444',       # Bright red
-            'light_gray': '#F7FAFC',   # Very light gray
-            'medium_gray': '#718096',  # Medium gray
-            'dark_gray': '#4A5568',    # Dark gray
-            'background': '#FAFAFA',   # Off-white background
-            'text': '#2D3748',         # Dark text
-            'grid': '#E2E8F0',         # Light grid
-            'highlight': '#FED7D7'     # Light red highlight
-        }
+        Args:
+            filename (str): Name of the output PDF file
+        """
+        self.filename = filename
+        self.pdf_pages = None
         
-        # Set matplotlib style
-        plt.style.use('default')  # Start with default style
-        plt.rcParams['font.family'] = 'serif'
-        plt.rcParams['font.size'] = 11
-        plt.rcParams['axes.linewidth'] = 0.5
-        plt.rcParams['grid.linewidth'] = 0.5
-        plt.rcParams['grid.alpha'] = 0.2
+        # Set elegant style
+        plt.style.use('seaborn-v0_8-whitegrid')
+        sns.set_palette("husl")
         
-        # Custom color palette for plots
-        self.plot_colors = [
-            self.colors['secondary'],   # Main red
-            self.colors['dark_gray'],   # Dark gray
-            self.colors['accent'],      # Bright red
-            self.colors['medium_gray'], # Medium gray
-            '#B91C1C',                 # Dark red
-            '#6B7280'                  # Gray
-        ]
+        # Custom color palette
+        self.colors = ['#2E4057', '#048A81', '#F18F01', '#C73E1D', '#6A994E', '#7209B7']
         
-    def create_elegant_plot(self, plot_type, data, title, **kwargs):
-        """Create elegant, minimalist plots with red and gray theme"""
+    def __enter__(self):
+        """Context manager entry"""
+        self.pdf_pages = PdfPages(self.filename)
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit"""
+        if self.pdf_pages:
+            self.pdf_pages.close()
+    
+    def add_title_page(self, title="Data Analysis Report", subtitle=None, author="Data Analyst"):
+        """Add a title page to the PDF"""
+        fig, ax = plt.subplots(figsize=(11, 8.5))
+        ax.axis('off')
+        
+        # Title
+        ax.text(0.5, 0.7, title, fontsize=32, fontweight='bold', 
+                ha='center', va='center', transform=ax.transAxes)
+        
+        # Subtitle
+        if subtitle:
+            ax.text(0.5, 0.6, subtitle, fontsize=18, ha='center', 
+                    va='center', transform=ax.transAxes, style='italic')
+        
+        # Author and date
+        ax.text(0.5, 0.4, f"Prepared by: {author}", fontsize=14, 
+                ha='center', va='center', transform=ax.transAxes)
+        ax.text(0.5, 0.35, f"Generated: {datetime.now().strftime('%B %d, %Y')}", 
+                fontsize=12, ha='center', va='center', transform=ax.transAxes)
+        
+        # Add decorative line
+        ax.plot([0.2, 0.8], [0.25, 0.25], 'k-', linewidth=2, transform=ax.transAxes)
+        
+        self.pdf_pages.savefig(fig, bbox_inches='tight', dpi=300)
+        plt.close(fig)
+    
+    def add_matplotlib_plot(self, fig, title=None, description=None):
+        """
+        Add a matplotlib figure to the PDF
+        
+        Args:
+            fig: matplotlib figure object
+            title (str): Title for the plot page
+            description (str): Description text
+        """
+        if title or description:
+            # Create a new figure with title and description
+            main_fig = plt.figure(figsize=(11, 8.5))
+            gs = main_fig.add_gridspec(4, 1, height_ratios=[0.3, 0.1, 3, 0.3], hspace=0.3)
+            
+            # Title
+            if title:
+                ax_title = main_fig.add_subplot(gs[0])
+                ax_title.text(0.5, 0.5, title, fontsize=16, fontweight='bold', 
+                             ha='center', va='center', transform=ax_title.transAxes)
+                ax_title.axis('off')
+            
+            # Description
+            if description:
+                ax_desc = main_fig.add_subplot(gs[3])
+                ax_desc.text(0.5, 0.5, description, fontsize=10, ha='center', 
+                            va='center', transform=ax_desc.transAxes, wrap=True)
+                ax_desc.axis('off')
+            
+            # Copy the original figure to the main figure
+            ax_plot = main_fig.add_subplot(gs[2])
+            
+            # Get the axes from the original figure
+            orig_ax = fig.axes[0] if fig.axes else None
+            if orig_ax:
+                # Copy plot elements (this is a simplified approach)
+                for line in orig_ax.lines:
+                    ax_plot.plot(line.get_xdata(), line.get_ydata(), 
+                               color=line.get_color(), linewidth=line.get_linewidth())
+                
+                ax_plot.set_xlabel(orig_ax.get_xlabel())
+                ax_plot.set_ylabel(orig_ax.get_ylabel())
+                ax_plot.set_title(orig_ax.get_title())
+                ax_plot.grid(True, alpha=0.3)
+            
+            self.pdf_pages.savefig(main_fig, bbox_inches='tight', dpi=300)
+            plt.close(main_fig)
+        else:
+            self.pdf_pages.savefig(fig, bbox_inches='tight', dpi=300)
+        
+        plt.close(fig)
+    
+    def add_seaborn_plot(self, plot_func, data, title=None, description=None, **kwargs):
+        """
+        Add a seaborn plot to the PDF
+        
+        Args:
+            plot_func: seaborn plotting function
+            data: data for the plot
+            title (str): Title for the plot
+            description (str): Description text
+            **kwargs: additional arguments for the plot function
+        """
         fig, ax = plt.subplots(figsize=(10, 6))
-        fig.patch.set_facecolor('white')
         
-        # Apply plot based on type
-        if plot_type == 'line':
-            self._create_line_plot(ax, data, **kwargs)
-        elif plot_type == 'bar':
-            self._create_bar_plot(ax, data, **kwargs)
-        elif plot_type == 'scatter':
-            self._create_scatter_plot(ax, data, **kwargs)
-        elif plot_type == 'heatmap':
-            self._create_heatmap_plot(ax, data, **kwargs)
-        elif plot_type == 'pie':
-            self._create_pie_plot(ax, data, **kwargs)
+        # Create the seaborn plot
+        if hasattr(sns, plot_func.__name__):
+            plot_func(data=data, ax=ax, **kwargs)
+        else:
+            plot_func(ax=ax, **kwargs)
         
-        # Apply common styling after plot creation
-        self._apply_common_styling(ax, title)
+        # Enhance the plot
+        ax.grid(True, alpha=0.3)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
         
-        plt.tight_layout(pad=2.0)
+        if title:
+            ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
         
-        # Store figure for PDF generation
-        self.figures.append((fig, title, plot_type))
+        plt.tight_layout()
         
+        self.add_matplotlib_plot(fig, description=description)
+    
+    def add_plotly_plot(self, fig, title=None, description=None):
+        """
+        Add a plotly figure to the PDF
+        
+        Args:
+            fig: plotly figure object
+            title (str): Title for the plot
+            description (str): Description text
+        """
+        # Convert plotly figure to matplotlib
+        img_bytes = pio.to_image(fig, format='png', width=800, height=600, scale=2)
+        
+        # Create matplotlib figure to display the image
+        mpl_fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Load and display the image
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(img_bytes))
+        ax.imshow(img)
+        ax.axis('off')
+        
+        self.add_matplotlib_plot(mpl_fig, title=title, description=description)
+    
+    def add_custom_plot(self, plot_function, title=None, description=None, **kwargs):
+        """
+        Add a custom plot function to the PDF
+        
+        Args:
+            plot_function: function that creates and returns a matplotlib figure
+            title (str): Title for the plot
+            description (str): Description text
+            **kwargs: arguments for the plot function
+        """
+        fig = plot_function(**kwargs)
+        self.add_matplotlib_plot(fig, title=title, description=description)
+
+# Example usage and demo functions
+def create_sample_data():
+    """Create sample data for demonstration"""
+    np.random.seed(42)
+    
+    # Time series data
+    dates = pd.date_range('2023-01-01', periods=100, freq='D')
+    ts_data = pd.DataFrame({
+        'date': dates,
+        'value': np.cumsum(np.random.randn(100) * 0.5) + 100,
+        'category': np.random.choice(['A', 'B', 'C'], 100)
+    })
+    
+    # Categorical data
+    cat_data = pd.DataFrame({
+        'category': ['Product A', 'Product B', 'Product C', 'Product D', 'Product E'],
+        'sales': [23, 45, 56, 78, 32],
+        'profit': [12, 23, 34, 45, 16]
+    })
+    
+    # Correlation data
+    corr_data = pd.DataFrame(np.random.randn(100, 5), 
+                           columns=['Feature1', 'Feature2', 'Feature3', 'Feature4', 'Feature5'])
+    
+    return ts_data, cat_data, corr_data
+
+def demo_matplotlib_plots():
+    """Create demonstration matplotlib plots"""
+    ts_data, cat_data, corr_data = create_sample_data()
+    
+    # Line plot
+    def create_line_plot():
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(ts_data['date'], ts_data['value'], linewidth=2, color='#2E4057')
+        ax.set_title('Time Series Analysis', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Value')
+        ax.grid(True, alpha=0.3)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
         return fig
     
-    def _apply_common_styling(self, ax, title):
-        """Apply common styling to all plots"""
-        # Only apply spine styling to non-pie charts
-        if hasattr(ax, 'spines') and len(ax.spines) > 0:
-            # Check if it's not a pie chart (pie charts don't have traditional spines)
-            if 'top' in ax.spines:
-                ax.spines['top'].set_visible(False)
-                ax.spines['right'].set_visible(False)
-                ax.spines['left'].set_color(self.colors['grid'])
-                ax.spines['bottom'].set_color(self.colors['grid'])
-                ax.spines['left'].set_linewidth(0.5)
-                ax.spines['bottom'].set_linewidth(0.5)
-                
-                # Grid only for non-pie charts
-                ax.grid(True, alpha=0.2, linestyle='-', linewidth=0.5, color=self.colors['grid'])
-                ax.set_axisbelow(True)
-                
-                # Tick styling
-                ax.tick_params(colors=self.colors['medium_gray'], labelsize=10)
-        
-        # Title styling
-        ax.set_title(title, fontsize=16, fontweight='300', 
-                    color=self.colors['text'], pad=20, fontfamily='serif')
-        
-        ax.set_facecolor('white')
-    
-    def _create_line_plot(self, ax, data, x_col, y_col, **kwargs):
-        """Create elegant line plot"""
-        ax.plot(data[x_col], data[y_col], linewidth=3, 
-               marker='o', markersize=8, markerfacecolor='white',
-               markeredgewidth=2, color=self.colors['secondary'],
-               markeredgecolor=self.colors['secondary'])
-        
-        # Add subtle fill under the line
-        ax.fill_between(data[x_col], data[y_col], alpha=0.1, 
-                       color=self.colors['secondary'])
-        
-        ax.set_xlabel(x_col, fontsize=12, fontweight='300', 
-                     color=self.colors['text'], fontfamily='serif')
-        ax.set_ylabel(y_col, fontsize=12, fontweight='300', 
-                     color=self.colors['text'], fontfamily='serif')
-    
-    def _create_bar_plot(self, ax, data, x_col, y_col, **kwargs):
-        """Create elegant bar plot"""
-        bars = ax.bar(data[x_col], data[y_col], 
-                     color=self.colors['secondary'], alpha=0.9, width=0.6,
-                     edgecolor='white', linewidth=1)
+    # Bar plot
+    def create_bar_plot():
+        fig, ax = plt.subplots(figsize=(10, 6))
+        bars = ax.bar(cat_data['category'], cat_data['sales'], color='#048A81', alpha=0.8)
+        ax.set_title('Sales by Category', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Category')
+        ax.set_ylabel('Sales')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
         
         # Add value labels on bars
         for bar in bars:
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + height*0.02,
-                   f'{height:.0f}', ha='center', va='bottom', 
-                   fontsize=10, fontweight='400', color=self.colors['text'],
-                   fontfamily='serif')
-        
-        ax.set_xlabel(x_col, fontsize=12, fontweight='300', 
-                     color=self.colors['text'], fontfamily='serif')
-        ax.set_ylabel(y_col, fontsize=12, fontweight='300', 
-                     color=self.colors['text'], fontfamily='serif')
-    
-    def _create_scatter_plot(self, ax, data, x_col, y_col, **kwargs):
-        """Create elegant scatter plot"""
-        ax.scatter(data[x_col], data[y_col], s=100, alpha=0.8,
-                  color=self.colors['secondary'], edgecolors=self.colors['dark_gray'], 
-                  linewidth=1)
-        
-        ax.set_xlabel(x_col, fontsize=12, fontweight='300', 
-                     color=self.colors['text'], fontfamily='serif')
-        ax.set_ylabel(y_col, fontsize=12, fontweight='300', 
-                     color=self.colors['text'], fontfamily='serif')
-    
-    def _create_heatmap_plot(self, ax, data, **kwargs):
-        """Create elegant heatmap"""
-        # Create custom colormap
-        from matplotlib.colors import LinearSegmentedColormap
-        colors_list = ['white', self.colors['highlight'], self.colors['secondary']]
-        cmap = LinearSegmentedColormap.from_list('custom_red', colors_list, N=100)
-        
-        im = ax.imshow(data.values, cmap=cmap, aspect='auto')
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-        cbar.ax.tick_params(labelsize=9)
-        
-        # Set ticks and labels
-        ax.set_xticks(range(len(data.columns)))
-        ax.set_yticks(range(len(data.index)))
-        ax.set_xticklabels(data.columns, fontsize=10)
-        ax.set_yticklabels(data.index, fontsize=10)
-        
-        # Add text annotations
-        for i in range(len(data.index)):
-            for j in range(len(data.columns)):
-                text = ax.text(j, i, f'{data.iloc[i, j]:.2f}',
-                             ha="center", va="center", color="black", fontsize=9)
-        
-        # Remove spines for heatmap
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-    
-    def _create_pie_plot(self, ax, data, labels_col, values_col, **kwargs):
-        """Create elegant pie chart"""
-        colors = [self.colors['secondary'], self.colors['dark_gray'], 
-                 self.colors['accent'], self.colors['medium_gray'], 
-                 '#B91C1C', '#9CA3AF']
-        
-        wedges, texts, autotexts = ax.pie(data[values_col], labels=data[labels_col],
-                                         autopct='%1.1f%%', startangle=90,
-                                         colors=colors[:len(data)], 
-                                         textprops={'fontsize': 11, 'fontweight': '300',
-                                                   'fontfamily': 'serif'})
-        
-        # Style the percentage text
-        for autotext in autotexts:
-            autotext.set_color('white')
-            autotext.set_fontweight('400')
-        
-        # Equal aspect ratio ensures that pie is drawn as a circle
-        ax.axis('equal')
-    
-    def create_professional_table(self, data, title):
-        """Create a professional-looking table"""
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.axis('tight')
-        ax.axis('off')
-        
-        # Create table
-        table = ax.table(cellText=data.values, colLabels=data.columns,
-                        cellLoc='center', loc='center')
-        
-        # Style the table
-        table.auto_set_font_size(False)
-        table.set_fontsize(11)
-        table.scale(1.2, 2)
-        
-        # Header styling
-        for i in range(len(data.columns)):
-            table[(0, i)].set_facecolor(self.colors['secondary'])
-            table[(0, i)].set_text_props(weight='400', color='white', fontfamily='serif')
-            table[(0, i)].set_height(0.1)
-        
-        # Alternate row colors
-        for i in range(1, len(data) + 1):
-            for j in range(len(data.columns)):
-                if i % 2 == 0:
-                    table[(i, j)].set_facecolor(self.colors['light_gray'])
-                else:
-                    table[(i, j)].set_facecolor('white')
-                table[(i, j)].set_text_props(fontfamily='serif', fontweight='300')
-                table[(i, j)].set_height(0.08)
-        
-        # Title
-        fig.suptitle(title, fontsize=16, fontweight='300', 
-                    color=self.colors['text'], y=0.95, fontfamily='serif')
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height}', ha='center', va='bottom')
         
         plt.tight_layout()
-        
-        # Store figure for PDF generation
-        self.figures.append((fig, title, 'table'))
-        
         return fig
     
-    def generate_pdf_report(self, filename, report_title="Professional Data Report"):
-        """Generate an elegant PDF report with all plots"""
-        with PdfPages(filename) as pdf:
-            # Create title page
-            fig, ax = plt.subplots(figsize=(8.5, 11))
-            ax.axis('off')
-            fig.patch.set_facecolor('white')
-            
-            # Title page styling
-            ax.text(0.5, 0.7, report_title, transform=ax.transAxes, 
-                   fontsize=28, fontweight='300', ha='center', va='center',
-                   color=self.colors['text'], fontfamily='serif')
-            
-            ax.text(0.5, 0.6, 'Data Analysis & Visualization', transform=ax.transAxes,
-                   fontsize=16, fontweight='300', ha='center', va='center',
-                   color=self.colors['secondary'], fontfamily='serif')
-            
-            # Add a subtle line
-            ax.axhline(y=0.55, xmin=0.2, xmax=0.8, color=self.colors['secondary'], 
-                      linewidth=1.5, alpha=0.8)
-            
-            # Date
-            from datetime import datetime
-            current_date = datetime.now().strftime("%B %d, %Y")
-            ax.text(0.5, 0.3, current_date, transform=ax.transAxes,
-                   fontsize=12, fontweight='300', ha='center', va='center',
-                   color=self.colors['medium_gray'], fontfamily='serif')
-            
-            pdf.savefig(fig, bbox_inches='tight', dpi=300)
-            plt.close(fig)
-            
-            # Add all stored figures to PDF
-            for fig, title, plot_type in self.figures:
-                # Save the figure directly to PDF
-                pdf.savefig(fig, bbox_inches='tight', dpi=300)
-                plt.close(fig)  # Close after saving to PDF
-            
-        print(f"PDF report saved as {filename}")
-        print(f"Total pages: {len(self.figures) + 1} (including title page)")
+    return create_line_plot, create_bar_plot
 
-# Example usage and demo
-def create_sample_pdf_report():
-    """Create a sample PDF report with red and gray theme"""
+def demo_seaborn_plots():
+    """Create demonstration seaborn plots"""
+    ts_data, cat_data, corr_data = create_sample_data()
     
-    # Initialize the generator
-    pdf_gen = ProfessionalPDFGenerator()
+    # Correlation heatmap
+    def create_heatmap():
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.heatmap(corr_data.corr(), annot=True, cmap='coolwarm', center=0, 
+                   square=True, linewidths=0.5, cbar_kws={"shrink": .8}, ax=ax)
+        ax.set_title('Correlation Matrix', fontsize=14, fontweight='bold')
+        return fig
     
-    # Sample data
-    np.random.seed(42)
+    # Distribution plot
+    def create_distribution():
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.histplot(data=corr_data, x='Feature1', kde=True, ax=ax, color='#F18F01')
+        ax.set_title('Distribution Analysis', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        return fig
     
-    print("Creating sample data and plots...")
-    
-    # 1. Line plot data
-    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun']
-    sales = [150, 180, 160, 220, 250, 280]
-    line_data = pd.DataFrame({'Month': months, 'Sales (K)': sales})
-    
-    fig1 = pdf_gen.create_elegant_plot('line', line_data, 'Monthly Sales Trend', 
-                                      x_col='Month', y_col='Sales (K)')
-    print("✓ Line plot created")
-    
-    # 2. Bar plot data
-    products = ['Product A', 'Product B', 'Product C', 'Product D']
-    revenue = [450, 380, 520, 410]
-    bar_data = pd.DataFrame({'Product': products, 'Revenue (K)': revenue})
-    
-    fig2 = pdf_gen.create_elegant_plot('bar', bar_data, 'Product Revenue Analysis',
-                                      x_col='Product', y_col='Revenue (K)')
-    print("✓ Bar plot created")
-    
-    # 3. Scatter plot data
-    np.random.seed(42)
-    experience = np.random.normal(5, 2, 50)
-    experience = np.abs(experience)  # Ensure positive values
-    salary = experience * 8 + np.random.normal(0, 5, 50) + 40
-    scatter_data = pd.DataFrame({'Experience (Years)': experience, 'Salary (K)': salary})
-    
-    fig3 = pdf_gen.create_elegant_plot('scatter', scatter_data, 'Experience vs Compensation',
-                                      x_col='Experience (Years)', y_col='Salary (K)')
-    print("✓ Scatter plot created")
-    
-    # 4. Pie chart data
-    categories = ['Marketing', 'Development', 'Sales', 'Operations']
-    allocation = [25, 35, 25, 15]
-    pie_data = pd.DataFrame({'Department': categories, 'Budget %': allocation})
-    
-    fig4 = pdf_gen.create_elegant_plot('pie', pie_data, 'Budget Distribution',
-                                      labels_col='Department', values_col='Budget %')
-    print("✓ Pie chart created")
-    
-    # 5. Heatmap data
-    np.random.seed(42)
-    heatmap_data = pd.DataFrame(np.random.randn(5, 5), 
-                               columns=['Metric A', 'Metric B', 'Metric C', 'Metric D', 'Metric E'],
-                               index=['Q1', 'Q2', 'Q3', 'Q4', 'Q5'])
-    # Create correlation matrix
-    heatmap_data = heatmap_data.corr()
-    
-    fig5 = pdf_gen.create_elegant_plot('heatmap', heatmap_data, 'Correlation Matrix')
-    print("✓ Heatmap created")
-    
-    # 6. Professional table
-    table_data = pd.DataFrame({
-        'Quarter': ['Q1 2024', 'Q2 2024', 'Q3 2024', 'Q4 2024'],
-        'Revenue': ['$125K', '$142K', '$156K', '$168K'],
-        'Profit': ['$45K', '$52K', '$58K', '$63K'],
-        'Growth': ['15%', '18%', '22%', '25%'],
-        'ROI': ['12%', '14%', '16%', '18%']
-    })
-    
-    fig6 = pdf_gen.create_professional_table(table_data, "Quarterly Performance Summary")
-    print("✓ Table created")
-    
-    # Generate PDF report
-    print("\nGenerating PDF report...")
-    pdf_gen.generate_pdf_report("professional_report_red_gray.pdf", 
-                               "Professional Data Analysis Report")
-    
-    print("\n✅ PDF Report created successfully!")
-    print("📄 File: professional_report_red_gray.pdf")
-    print("\n🎨 Features:")
-    print("• Elegant red and gray color scheme")
-    print("• Minimalist design with serif fonts")
-    print("• Professional title page")
-    print("• All plot types: line, bar, scatter, pie, heatmap")
-    print("• Professional table formatting")
-    print("• High-resolution output (300 DPI)")
-    print("• Consistent styling throughout")
+    return create_heatmap, create_distribution
 
+def demo_plotly_plots():
+    """Create demonstration plotly plots"""
+    ts_data, cat_data, corr_data = create_sample_data()
+    
+    # Interactive scatter plot
+    def create_scatter():
+        fig = px.scatter(corr_data, x='Feature1', y='Feature2', 
+                        title='Interactive Scatter Plot',
+                        color='Feature3', size='Feature4',
+                        hover_data=['Feature5'])
+        fig.update_layout(template='plotly_white')
+        return fig
+    
+    # 3D surface plot
+    def create_3d_surface():
+        x = np.linspace(-5, 5, 50)
+        y = np.linspace(-5, 5, 50)
+        X, Y = np.meshgrid(x, y)
+        Z = np.sin(np.sqrt(X**2 + Y**2))
+        
+        fig = go.Figure(data=[go.Surface(x=X, y=Y, z=Z, colorscale='viridis')])
+        fig.update_layout(title='3D Surface Plot', template='plotly_white')
+        return fig
+    
+    return create_scatter, create_3d_surface
+
+# Main execution function
+def generate_sample_report():
+    """Generate a complete sample PDF report"""
+    
+    # Create the report
+    with ElegantPDFReport("elegant_analysis_report.pdf") as report:
+        # Add title page
+        report.add_title_page(
+            title="Comprehensive Data Analysis Report",
+            subtitle="Advanced Visualization Techniques",
+            author="Data Science Team"
+        )
+        
+        # Get sample plots
+        line_plot, bar_plot = demo_matplotlib_plots()
+        heatmap, distribution = demo_seaborn_plots()
+        scatter, surface = demo_plotly_plots()
+        
+        # Add matplotlib plots
+        report.add_custom_plot(
+            line_plot,
+            title="Time Series Analysis",
+            description="This plot shows the trend of our key metric over time, revealing seasonal patterns and overall growth trajectory."
+        )
+        
+        report.add_custom_plot(
+            bar_plot,
+            title="Category Performance",
+            description="Sales performance across different product categories, highlighting top performers and areas for improvement."
+        )
+        
+        # Add seaborn plots
+        report.add_custom_plot(
+            heatmap,
+            title="Feature Correlation Analysis",
+            description="Correlation matrix showing relationships between different features in our dataset."
+        )
+        
+        report.add_custom_plot(
+            distribution,
+            title="Feature Distribution",
+            description="Distribution analysis of key features showing central tendency and spread."
+        )
+        
+        # Add plotly plots
+        report.add_plotly_plot(
+            scatter(),
+            title="Multi-dimensional Scatter Analysis",
+            description="Interactive scatter plot revealing complex relationships between multiple variables."
+        )
+        
+        report.add_plotly_plot(
+            surface(),
+            title="3D Surface Visualization",
+            description="Three-dimensional surface plot demonstrating mathematical relationships in our data."
+        )
+    
+    print(f"Report generated successfully: elegant_analysis_report.pdf")
+
+# Usage example
 if __name__ == "__main__":
-    create_sample_pdf_report()
+    generate_sample_report()
+    
+    # Example of how to use with your own plots
+    """
+    # Your existing matplotlib figure
+    fig, ax = plt.subplots()
+    ax.plot([1, 2, 3], [1, 4, 2])
+    
+    # Your existing seaborn plot
+    sns_fig, sns_ax = plt.subplots()
+    sns.scatterplot(data=your_data, x='x_col', y='y_col', ax=sns_ax)
+    
+    # Your existing plotly figure
+    plotly_fig = px.line(your_data, x='x_col', y='y_col')
+    
+    # Create report with your plots
+    with ElegantPDFReport("your_report.pdf") as report:
+        report.add_title_page("Your Analysis Report")
+        report.add_matplotlib_plot(fig, title="Your Matplotlib Plot")
+        report.add_matplotlib_plot(sns_fig, title="Your Seaborn Plot")
+        report.add_plotly_plot(plotly_fig, title="Your Plotly Plot")
+    """
