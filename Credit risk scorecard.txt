@@ -315,3 +315,455 @@ def create_sample_presentation():
 
 if __name__ == "__main__":
     create_sample_presentation()
+
+##############
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from matplotlib.backends.backend_pdf import PdfPages
+import io
+from PIL import Image
+import warnings
+warnings.filterwarnings('ignore')
+
+class ProfessionalReportGenerator:
+    def __init__(self):
+        self.prs = Presentation()
+        self.setup_theme()
+        self.figures = []  # Store figures for PDF generation
+        
+    def setup_theme(self):
+        """Set up professional red and gray color theme"""
+        # Professional red and gray color palette
+        self.colors = {
+            'primary': '#2D3748',      # Dark gray
+            'secondary': '#DC2626',    # Professional red
+            'accent': '#EF4444',       # Bright red
+            'light_gray': '#F7FAFC',   # Very light gray
+            'medium_gray': '#718096',  # Medium gray
+            'dark_gray': '#4A5568',    # Dark gray
+            'background': '#FAFAFA',   # Off-white background
+            'text': '#2D3748',         # Dark text
+            'grid': '#E2E8F0',         # Light grid
+            'highlight': '#FED7D7'     # Light red highlight
+        }
+        
+        # Set matplotlib style
+        plt.style.use('seaborn-v0_8-whitegrid')
+        
+        # Custom color palette for plots
+        self.plot_colors = [
+            self.colors['secondary'],   # Main red
+            self.colors['dark_gray'],   # Dark gray
+            self.colors['accent'],      # Bright red
+            self.colors['medium_gray'], # Medium gray
+            '#B91C1C',                 # Dark red
+            '#6B7280'                  # Gray
+        ]
+        
+        sns.set_palette(self.plot_colors)
+        
+    def create_elegant_plot(self, plot_type, data, title, **kwargs):
+        """Create elegant, minimalist plots with red and gray theme"""
+        fig, ax = plt.subplots(figsize=(12, 8))
+        fig.patch.set_facecolor('white')
+        
+        # Common styling - minimalist approach
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(self.colors['grid'])
+        ax.spines['bottom'].set_color(self.colors['grid'])
+        ax.spines['left'].set_linewidth(0.5)
+        ax.spines['bottom'].set_linewidth(0.5)
+        
+        # Subtle grid
+        ax.grid(True, alpha=0.2, linestyle='-', linewidth=0.5, color=self.colors['grid'])
+        ax.set_axisbelow(True)
+        ax.set_facecolor('white')
+        
+        if plot_type == 'line':
+            self._create_line_plot(ax, data, **kwargs)
+        elif plot_type == 'bar':
+            self._create_bar_plot(ax, data, **kwargs)
+        elif plot_type == 'scatter':
+            self._create_scatter_plot(ax, data, **kwargs)
+        elif plot_type == 'heatmap':
+            self._create_heatmap_plot(ax, data, **kwargs)
+        elif plot_type == 'pie':
+            self._create_pie_plot(ax, data, **kwargs)
+        
+        # Title styling - elegant and minimal
+        ax.set_title(title, fontsize=22, fontweight='300', 
+                    color=self.colors['text'], pad=30, fontfamily='serif')
+        
+        # Axis labels styling
+        ax.tick_params(colors=self.colors['medium_gray'], labelsize=11)
+        
+        # Remove excessive padding
+        plt.tight_layout(pad=2.0)
+        
+        # Store figure for PDF generation
+        self.figures.append((fig, title))
+        
+        return fig
+    
+    def _create_line_plot(self, ax, data, x_col, y_col, **kwargs):
+        """Create elegant line plot"""
+        ax.plot(data[x_col], data[y_col], linewidth=3, 
+               marker='o', markersize=10, markerfacecolor='white',
+               markeredgewidth=2.5, color=self.colors['secondary'],
+               markeredgecolor=self.colors['secondary'])
+        
+        # Add subtle fill under the line
+        ax.fill_between(data[x_col], data[y_col], alpha=0.1, 
+                       color=self.colors['secondary'])
+        
+        ax.set_xlabel(x_col, fontsize=14, fontweight='300', 
+                     color=self.colors['text'], fontfamily='serif')
+        ax.set_ylabel(y_col, fontsize=14, fontweight='300', 
+                     color=self.colors['text'], fontfamily='serif')
+    
+    def _create_bar_plot(self, ax, data, x_col, y_col, **kwargs):
+        """Create elegant bar plot"""
+        bars = ax.bar(data[x_col], data[y_col], 
+                     color=self.colors['secondary'], alpha=0.9, width=0.6,
+                     edgecolor='white', linewidth=1)
+        
+        # Add value labels on bars - minimalist style
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + height*0.02,
+                   f'{height:.0f}', ha='center', va='bottom', 
+                   fontsize=11, fontweight='300', color=self.colors['text'],
+                   fontfamily='serif')
+        
+        ax.set_xlabel(x_col, fontsize=14, fontweight='300', 
+                     color=self.colors['text'], fontfamily='serif')
+        ax.set_ylabel(y_col, fontsize=14, fontweight='300', 
+                     color=self.colors['text'], fontfamily='serif')
+    
+    def _create_scatter_plot(self, ax, data, x_col, y_col, **kwargs):
+        """Create elegant scatter plot"""
+        ax.scatter(data[x_col], data[y_col], s=120, alpha=0.8,
+                  color=self.colors['secondary'], edgecolors=self.colors['dark_gray'], 
+                  linewidth=1.5)
+        
+        ax.set_xlabel(x_col, fontsize=14, fontweight='300', 
+                     color=self.colors['text'], fontfamily='serif')
+        ax.set_ylabel(y_col, fontsize=14, fontweight='300', 
+                     color=self.colors['text'], fontfamily='serif')
+    
+    def _create_heatmap_plot(self, ax, data, **kwargs):
+        """Create elegant heatmap"""
+        # Custom red-gray colormap
+        colors = ['white', self.colors['highlight'], self.colors['secondary']]
+        n_bins = 100
+        cmap = sns.blend_palette(colors, n_colors=n_bins, as_cmap=True)
+        
+        sns.heatmap(data, ax=ax, cmap=cmap, annot=True, fmt='.2f',
+                   cbar_kws={'shrink': 0.8}, annot_kws={'fontsize': 10, 'fontweight': '300'},
+                   linewidths=0.5, linecolor='white')
+        ax.set_title('')  # Remove seaborn default title
+    
+    def _create_pie_plot(self, ax, data, labels_col, values_col, **kwargs):
+        """Create elegant pie chart"""
+        colors = [self.colors['secondary'], self.colors['dark_gray'], 
+                 self.colors['accent'], self.colors['medium_gray'], 
+                 '#B91C1C', '#9CA3AF']
+        
+        wedges, texts, autotexts = ax.pie(data[values_col], labels=data[labels_col],
+                                         autopct='%1.1f%%', startangle=90,
+                                         colors=colors[:len(data)], 
+                                         textprops={'fontsize': 12, 'fontweight': '300',
+                                                   'fontfamily': 'serif'})
+        
+        # Style the percentage text
+        for autotext in autotexts:
+            autotext.set_color('white')
+            autotext.set_fontweight('400')
+    
+    def create_professional_table(self, data, title):
+        """Create a professional-looking table"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.axis('tight')
+        ax.axis('off')
+        
+        # Create table
+        table = ax.table(cellText=data.values, colLabels=data.columns,
+                        cellLoc='center', loc='center')
+        
+        # Style the table
+        table.auto_set_font_size(False)
+        table.set_fontsize(12)
+        table.scale(1.2, 2.5)
+        
+        # Header styling - red and white
+        for i in range(len(data.columns)):
+            table[(0, i)].set_facecolor(self.colors['secondary'])
+            table[(0, i)].set_text_props(weight='400', color='white', fontfamily='serif')
+            table[(0, i)].set_height(0.08)
+        
+        # Alternate row colors - minimal gray
+        for i in range(1, len(data) + 1):
+            for j in range(len(data.columns)):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor(self.colors['light_gray'])
+                else:
+                    table[(i, j)].set_facecolor('white')
+                table[(i, j)].set_text_props(fontfamily='serif', fontweight='300')
+                table[(i, j)].set_height(0.06)
+        
+        # Title
+        fig.suptitle(title, fontsize=22, fontweight='300', 
+                    color=self.colors['text'], y=0.95, fontfamily='serif')
+        
+        plt.tight_layout()
+        
+        # Store figure for PDF generation
+        self.figures.append((fig, title))
+        
+        return fig
+    
+    def save_plot_to_image(self, fig, filename):
+        """Save matplotlib figure to image file"""
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=300, bbox_inches='tight',
+                   facecolor='white', edgecolor='none', pad_inches=0.2)
+        buf.seek(0)
+        return buf
+    
+    def add_title_slide(self, title, subtitle=""):
+        """Add a professional title slide"""
+        slide_layout = self.prs.slide_layouts[0]
+        slide = self.prs.slides.add_slide(slide_layout)
+        
+        title_shape = slide.shapes.title
+        subtitle_shape = slide.placeholders[1]
+        
+        title_shape.text = title
+        subtitle_shape.text = subtitle
+        
+        # Style the title - elegant red and gray
+        title_shape.text_frame.paragraphs[0].font.size = Pt(48)
+        title_shape.text_frame.paragraphs[0].font.bold = False
+        title_shape.text_frame.paragraphs[0].font.color.rgb = RGBColor(45, 55, 72)  # Dark gray
+        
+        # Style the subtitle
+        subtitle_shape.text_frame.paragraphs[0].font.size = Pt(24)
+        subtitle_shape.text_frame.paragraphs[0].font.color.rgb = RGBColor(220, 38, 38)  # Red
+    
+    def add_plot_slide(self, fig, title, content_text=""):
+        """Add a slide with a plot"""
+        slide_layout = self.prs.slide_layouts[5]  # Blank layout
+        slide = self.prs.slides.add_slide(slide_layout)
+        
+        # Add title
+        title_shape = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), 
+                                              Inches(9), Inches(1))
+        title_frame = title_shape.text_frame
+        title_frame.text = title
+        title_frame.paragraphs[0].font.size = Pt(32)
+        title_frame.paragraphs[0].font.bold = False
+        title_frame.paragraphs[0].font.color.rgb = RGBColor(45, 55, 72)  # Dark gray
+        
+        # Add plot
+        img_stream = self.save_plot_to_image(fig, 'temp_plot.png')
+        slide.shapes.add_picture(img_stream, Inches(0.8), Inches(1.2), 
+                               Inches(8.4), Inches(6.3))
+        
+        # Add content text if provided
+        if content_text:
+            content_shape = slide.shapes.add_textbox(Inches(0.5), Inches(7.6), 
+                                                   Inches(9), Inches(0.8))
+            content_frame = content_shape.text_frame
+            content_frame.text = content_text
+            content_frame.paragraphs[0].font.size = Pt(16)
+            content_frame.paragraphs[0].font.color.rgb = RGBColor(113, 128, 150)  # Medium gray
+        
+        plt.close(fig)
+    
+    def add_table_slide(self, data, title, content_text=""):
+        """Add a slide with a table"""
+        fig = self.create_professional_table(data, title)
+        self.add_plot_slide(fig, title, content_text)
+    
+    def generate_pdf_report(self, filename, report_title="Professional Data Report"):
+        """Generate an elegant PDF report with all plots"""
+        with PdfPages(filename) as pdf:
+            # Create title page
+            fig, ax = plt.subplots(figsize=(11, 8.5))
+            ax.axis('off')
+            
+            # Title page styling
+            fig.patch.set_facecolor('white')
+            ax.text(0.5, 0.7, report_title, transform=ax.transAxes, 
+                   fontsize=36, fontweight='300', ha='center', va='center',
+                   color=self.colors['text'], fontfamily='serif')
+            
+            ax.text(0.5, 0.6, 'Data Analysis & Visualization', transform=ax.transAxes,
+                   fontsize=20, fontweight='300', ha='center', va='center',
+                   color=self.colors['secondary'], fontfamily='serif')
+            
+            # Add a subtle line
+            ax.axhline(y=0.55, xmin=0.2, xmax=0.8, color=self.colors['secondary'], 
+                      linewidth=2, alpha=0.8)
+            
+            # Date
+            from datetime import datetime
+            current_date = datetime.now().strftime("%B %d, %Y")
+            ax.text(0.5, 0.3, current_date, transform=ax.transAxes,
+                   fontsize=14, fontweight='300', ha='center', va='center',
+                   color=self.colors['medium_gray'], fontfamily='serif')
+            
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight', dpi=300)
+            plt.close(fig)
+            
+            # Add all stored figures to PDF
+            for fig, title in self.figures:
+                # Create a new figure for PDF with proper layout
+                pdf_fig = plt.figure(figsize=(11, 8.5))
+                pdf_fig.patch.set_facecolor('white')
+                
+                # Copy the original figure
+                ax_orig = fig.get_axes()[0]
+                ax_new = pdf_fig.add_subplot(111)
+                
+                # Copy all elements from original to new axis
+                for line in ax_orig.get_lines():
+                    ax_new.plot(line.get_xdata(), line.get_ydata(), 
+                               color=line.get_color(), linewidth=line.get_linewidth(),
+                               marker=line.get_marker(), markersize=line.get_markersize(),
+                               markerfacecolor=line.get_markerfacecolor(),
+                               markeredgecolor=line.get_markeredgecolor(),
+                               markeredgewidth=line.get_markeredgewidth())
+                
+                # Copy styling
+                ax_new.set_xlim(ax_orig.get_xlim())
+                ax_new.set_ylim(ax_orig.get_ylim())
+                ax_new.set_xlabel(ax_orig.get_xlabel(), fontsize=14, fontweight='300',
+                                 color=self.colors['text'], fontfamily='serif')
+                ax_new.set_ylabel(ax_orig.get_ylabel(), fontsize=14, fontweight='300',
+                                 color=self.colors['text'], fontfamily='serif')
+                ax_new.set_title(title, fontsize=22, fontweight='300',
+                                color=self.colors['text'], pad=30, fontfamily='serif')
+                
+                # Apply same styling as original
+                ax_new.spines['top'].set_visible(False)
+                ax_new.spines['right'].set_visible(False)
+                ax_new.spines['left'].set_color(self.colors['grid'])
+                ax_new.spines['bottom'].set_color(self.colors['grid'])
+                ax_new.spines['left'].set_linewidth(0.5)
+                ax_new.spines['bottom'].set_linewidth(0.5)
+                ax_new.grid(True, alpha=0.2, linestyle='-', linewidth=0.5, color=self.colors['grid'])
+                ax_new.set_axisbelow(True)
+                ax_new.tick_params(colors=self.colors['medium_gray'], labelsize=11)
+                
+                plt.tight_layout(pad=3.0)
+                pdf.savefig(pdf_fig, bbox_inches='tight', dpi=300)
+                plt.close(pdf_fig)
+            
+        print(f"PDF report saved as {filename}")
+    
+    def save_presentation(self, filename):
+        """Save the PowerPoint presentation"""
+        self.prs.save(filename)
+        print(f"PowerPoint presentation saved as {filename}")
+
+# Example usage and demo
+def create_sample_presentation():
+    """Create a sample presentation and PDF report with red and gray theme"""
+    
+    # Initialize the generator
+    report_gen = ProfessionalReportGenerator()
+    
+    # Add title slide
+    report_gen.add_title_slide("Professional Data Analysis", 
+                              "Elegant Red & Gray Theme")
+    
+    # Sample data
+    np.random.seed(42)
+    
+    # 1. Line plot data
+    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun']
+    sales = [150, 180, 160, 220, 250, 280]
+    line_data = pd.DataFrame({'Month': months, 'Sales (K)': sales})
+    
+    fig1 = report_gen.create_elegant_plot('line', line_data, 'Monthly Sales Trend', 
+                                         x_col='Month', y_col='Sales (K)')
+    report_gen.add_plot_slide(fig1, "Sales Performance", 
+                             "Consistent upward trend with seasonal variations")
+    
+    # 2. Bar plot data
+    products = ['Product A', 'Product B', 'Product C', 'Product D']
+    revenue = [450, 380, 520, 410]
+    bar_data = pd.DataFrame({'Product': products, 'Revenue (K)': revenue})
+    
+    fig2 = report_gen.create_elegant_plot('bar', bar_data, 'Product Revenue Analysis',
+                                         x_col='Product', y_col='Revenue (K)')
+    report_gen.add_plot_slide(fig2, "Product Performance", 
+                             "Product C demonstrates superior market performance")
+    
+    # 3. Scatter plot data
+    experience = np.random.normal(5, 2, 50)
+    salary = experience * 8 + np.random.normal(0, 5, 50) + 40
+    scatter_data = pd.DataFrame({'Experience (Years)': experience, 'Salary (K)': salary})
+    
+    fig3 = report_gen.create_elegant_plot('scatter', scatter_data, 'Experience vs Compensation',
+                                         x_col='Experience (Years)', y_col='Salary (K)')
+    report_gen.add_plot_slide(fig3, "HR Analytics", 
+                             "Strong correlation between experience and compensation")
+    
+    # 4. Pie chart data
+    categories = ['Marketing', 'Development', 'Sales', 'Operations']
+    allocation = [25, 35, 25, 15]
+    pie_data = pd.DataFrame({'Department': categories, 'Budget %': allocation})
+    
+    fig4 = report_gen.create_elegant_plot('pie', pie_data, 'Budget Distribution',
+                                         labels_col='Department', values_col='Budget %')
+    report_gen.add_plot_slide(fig4, "Budget Allocation", 
+                             "Development receives primary investment focus")
+    
+    # 5. Professional table
+    table_data = pd.DataFrame({
+        'Quarter': ['Q1 2024', 'Q2 2024', 'Q3 2024', 'Q4 2024'],
+        'Revenue': ['$125K', '$142K', '$156K', '$168K'],
+        'Profit': ['$45K', '$52K', '$58K', '$63K'],
+        'Growth': ['15%', '18%', '22%', '25%'],
+        'ROI': ['12%', '14%', '16%', '18%']
+    })
+    
+    report_gen.add_table_slide(table_data, "Quarterly Performance Summary",
+                              "Consistent growth across all key metrics")
+    
+    # Save both presentation and PDF report
+    report_gen.save_presentation("professional_presentation_red_gray.pptx")
+    report_gen.generate_pdf_report("professional_report_red_gray.pdf", 
+                                  "Professional Data Analysis Report")
+    
+    print("\n✅ Files created successfully!")
+    print("📊 PowerPoint: professional_presentation_red_gray.pptx")
+    print("📄 PDF Report: professional_report_red_gray.pdf")
+    print("\n🎨 Design Features:")
+    print("• Elegant red and gray color scheme")
+    print("• Minimalist, clean typography")
+    print("• Professional serif fonts")
+    print("• Subtle grids and spacing")
+    print("• High-resolution outputs (300 DPI)")
+    print("• Consistent styling across all elements")
+
+if __name__ == "__main__":
+    create_sample_presentation()
+
+
+
+
+
