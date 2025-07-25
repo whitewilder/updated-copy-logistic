@@ -1,385 +1,479 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
+# Regenerate data and rerun all checks cleanly
+
+# Generate mock data again
+np.random.seed(0)
+years = [2020, 2021, 2022, 2023]
+ids = [f"GCDU_{i}" for i in range(100)]
+generate_df = lambda version: pd.DataFrame({
+    'GCDU_ID': np.random.choice(ids, 300),
+    'Year': np.random.choice(years, 300),
+    'active_flag': np.random.choice([0, 1], 300),
+    'GLCS_flag': np.random.choice([0, 1], 300),
+    'Parent_flag': np.random.choice(['Parent', 'Sub', 'Standalone'], 300),
+    'Turnover': np.random.normal(800, 300, 300).clip(0),
+    'Source': np.random.choice(['Internal', 'External'], 300),
+    'CRR': np.random.choice([1, 2, 3, 4, 5, 6, 7, 8], 300),
+    'Default': np.random.choice([0, 1], 300),
+    'Default_date': pd.to_datetime(np.random.choice(pd.date_range('2019-01-01', '2023-12-31'), 300)),
+    'RWA': np.random.normal(1000, 400, 300).clip(0),
+    'EAD': np.random.normal(500, 200, 300).clip(0)
+})
+
+old_df = generate_df("v2")
+new_df = generate_df("v3")
+
+# Helper to safely write to Excel with 31-char sheet name limit
+def safe_sheet_name(name):
+    return name[:28] + "..." if len(name) > 31 else name
+
+def summarize_check(writer, sheet_name, summary_dict, detail_df=None):
+    sheet_name_safe = safe_sheet_name(sheet_name)
+    summary_df = pd.DataFrame(list(summary_dict.items()), columns=["Check", "Result"])
+    summary_df.to_excel(writer, sheet_name=sheet_name_safe, index=False)
+    if detail_df is not None:
+        detail_name_safe = safe_sheet_name(f"{sheet_name}_Details")
+        detail_df.to_excel(writer, sheet_name=detail_name_safe, index=False)
+
+# Start writing Excel output
+output_path = "/mnt/data/data_quality_summary.xlsx"
+writer = pd.ExcelWriter(output_path, engine="xlsxwriter")
+
+# 1.a GCDU ID going in/out of GLCS
+old_glcs = old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
+new_glcs = new_df[new_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
+lost_glcs = list(set(old_glcs) - set(new_glcs))
+gained_glcs = list(set(new_glcs) - set(old_glcs))
+turnover_missing_lost = new_df[new_df['GCDU_ID'].isin(lost_glcs) & new_df['Turnover'].isna()]
+summarize_check(writer, "1a_GLCS_Fluctuation", {
+    "GLCS Lost IDs": len(lost_glcs),
+    "GLCS Gained IDs": len(gained_glcs),
+    "GLCS Lost IDs with Missing Turnover": len(turnover_missing_lost)
+}, detail_df=turnover_missing_lost)
+
+# 1.b GCDU ID using GLCS scorecard but not GLCS flagged
+scored_but_not_glcs = new_df[(new_df['Source'] == 'Internal') & (new_df['GLCS_flag'] == 0)]
+summarize_check(writer, "1b_Scorecard_Not_GLCS", {
+    "Count": scored_but_not_glcs['GCDU_ID'].nunique()
+}, detail_df=scored_but_not_glcs)
+
+# 1.c Previously GLCS but now not
+prev_glcs = set(old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'])
+now_not_glcs = set(new_df[new_df['GLCS_flag'] == 0]['GCDU_ID'])
+unexpected_drop = list(prev_glcs & now_not_glcs)
+summarize_check(writer, "1c_GLCS_Drop_Unexpected", {
+    "Unexpected GLCS Drops": len(unexpected_drop)
+}, detail_df=new_df[new_df['GCDU_ID'].isin(unexpected_drop)])
+
+# 1.d Missing Turnover
+missing_turnover = new_df[new_df['Turnover'].isna()]
+summarize_check(writer, "1d_Missing_Turnover", {
+    "Missing Turnover Count": len(missing_turnover)
+}, detail_df=missing_turnover)
+
+# 1.e GLCS Parent with Missing/<550 Turnover
+parents_with_issues = new_df[
+    (new_df['Parent_flag'] == 'Parent') &
+    ((new_df['Turnover'].isna()) | (new_df['Turnover'] < 550))
+]
+summarize_check(writer, "1e_GLCS_Parent_Issue", {
+    "Count": len(parents_with_issues)
+}, detail_df=parents_with_issues)
+
+# 3.a Turnover difference in scoping vs risk driver
+turnover_compare = new_df[['GCDU_ID', 'Turnover']].merge(
+    old_df[['GCDU_ID', 'Turnover']], on='GCDU_ID', suffixes=('_new', '_old'))
+turnover_compare['diff'] = turnover_compare['Turnover_new'] - turnover_compare['Turnover_old']
+summarize_check(writer, "3a_Turnover_Compare", {
+    "Avg Turnover Diff": turnover_compare['diff'].mean(),
+    "Max Diff": turnover_compare['diff'].max(),
+    "Min Diff": turnover_compare['diff'].min()
+}, detail_df=turnover_compare)
+
+# 4.a Inactive Defaults
+inactive_defaults = new_df[(new_df['Default'] == 1) & (new_df['active_flag'] == 0)]
+summarize_check(writer, "4a_Inactive_Defaults", {
+    "Inactive Default Count": len(inactive_defaults)
+}, detail_df=inactive_defaults)
+
+# 4.b Defaults from CRR <= 4
+crr_defaults = new_df[(new_df['Default'] == 1) & (new_df['CRR'] <= 4)]
+summarize_check(writer, "4b_Defaults_CRR_4orLess", {
+    "Defaults from CRR ≤ 4": len(crr_defaults)
+}, detail_df=crr_defaults)
+
+# Save the file
+writer.close()
+
+output_path
+
+
+
 import pandas as pd
-import numpy as np
-from matplotlib.backends.backend_pdf import PdfPages
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import plotly.io as pio
-from datetime import datetime
-import warnings
-warnings.filterwarnings('ignore')
 
-class ElegantPDFReport:
-    def __init__(self, filename="elegant_report.pdf"):
-        """
-        Initialize the PDF report generator
-        
-        Args:
-            filename (str): Name of the output PDF file
-        """
-        self.filename = filename
-        self.pdf_pages = None
-        
-        # Set elegant style
-        plt.style.use('seaborn-v0_8-whitegrid')
-        sns.set_palette("husl")
-        
-        # Custom color palette
-        self.colors = ['#2E4057', '#048A81', '#F18F01', '#C73E1D', '#6A994E', '#7209B7']
-        
-    def __enter__(self):
-        """Context manager entry"""
-        self.pdf_pages = PdfPages(self.filename)
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit"""
-        if self.pdf_pages:
-            self.pdf_pages.close()
-    
-    def add_title_page(self, title="Data Analysis Report", subtitle=None, author="Data Analyst"):
-        """Add a title page to the PDF"""
-        fig, ax = plt.subplots(figsize=(11, 8.5))
-        ax.axis('off')
-        
-        # Title
-        ax.text(0.5, 0.7, title, fontsize=32, fontweight='bold', 
-                ha='center', va='center', transform=ax.transAxes)
-        
-        # Subtitle
-        if subtitle:
-            ax.text(0.5, 0.6, subtitle, fontsize=18, ha='center', 
-                    va='center', transform=ax.transAxes, style='italic')
-        
-        # Author and date
-        ax.text(0.5, 0.4, f"Prepared by: {author}", fontsize=14, 
-                ha='center', va='center', transform=ax.transAxes)
-        ax.text(0.5, 0.35, f"Generated: {datetime.now().strftime('%B %d, %Y')}", 
-                fontsize=12, ha='center', va='center', transform=ax.transAxes)
-        
-        # Add decorative line
-        ax.plot([0.2, 0.8], [0.25, 0.25], 'k-', linewidth=2, transform=ax.transAxes)
-        
-        self.pdf_pages.savefig(fig, bbox_inches='tight', dpi=300)
-        plt.close(fig)
-    
-    def add_matplotlib_plot(self, fig, title=None, description=None):
-        """
-        Add a matplotlib figure to the PDF
-        
-        Args:
-            fig: matplotlib figure object
-            title (str): Title for the plot page
-            description (str): Description text
-        """
-        if title or description:
-            # Create a new figure with title and description
-            main_fig = plt.figure(figsize=(11, 8.5))
-            gs = main_fig.add_gridspec(4, 1, height_ratios=[0.3, 0.1, 3, 0.3], hspace=0.3)
-            
-            # Title
-            if title:
-                ax_title = main_fig.add_subplot(gs[0])
-                ax_title.text(0.5, 0.5, title, fontsize=16, fontweight='bold', 
-                             ha='center', va='center', transform=ax_title.transAxes)
-                ax_title.axis('off')
-            
-            # Description
-            if description:
-                ax_desc = main_fig.add_subplot(gs[3])
-                ax_desc.text(0.5, 0.5, description, fontsize=10, ha='center', 
-                            va='center', transform=ax_desc.transAxes, wrap=True)
-                ax_desc.axis('off')
-            
-            # Copy the original figure to the main figure
-            ax_plot = main_fig.add_subplot(gs[2])
-            
-            # Get the axes from the original figure
-            orig_ax = fig.axes[0] if fig.axes else None
-            if orig_ax:
-                # Copy plot elements (this is a simplified approach)
-                for line in orig_ax.lines:
-                    ax_plot.plot(line.get_xdata(), line.get_ydata(), 
-                               color=line.get_color(), linewidth=line.get_linewidth())
-                
-                ax_plot.set_xlabel(orig_ax.get_xlabel())
-                ax_plot.set_ylabel(orig_ax.get_ylabel())
-                ax_plot.set_title(orig_ax.get_title())
-                ax_plot.grid(True, alpha=0.3)
-            
-            self.pdf_pages.savefig(main_fig, bbox_inches='tight', dpi=300)
-            plt.close(main_fig)
-        else:
-            self.pdf_pages.savefig(fig, bbox_inches='tight', dpi=300)
-        
-        plt.close(fig)
-    
-    def add_seaborn_plot(self, plot_func, data, title=None, description=None, **kwargs):
-        """
-        Add a seaborn plot to the PDF
-        
-        Args:
-            plot_func: seaborn plotting function
-            data: data for the plot
-            title (str): Title for the plot
-            description (str): Description text
-            **kwargs: additional arguments for the plot function
-        """
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Create the seaborn plot
-        if hasattr(sns, plot_func.__name__):
-            plot_func(data=data, ax=ax, **kwargs)
-        else:
-            plot_func(ax=ax, **kwargs)
-        
-        # Enhance the plot
-        ax.grid(True, alpha=0.3)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        
-        if title:
-            ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-        
-        plt.tight_layout()
-        
-        self.add_matplotlib_plot(fig, description=description)
-    
-    def add_plotly_plot(self, fig, title=None, description=None):
-        """
-        Add a plotly figure to the PDF
-        
-        Args:
-            fig: plotly figure object
-            title (str): Title for the plot
-            description (str): Description text
-        """
-        # Convert plotly figure to matplotlib
-        img_bytes = pio.to_image(fig, format='png', width=800, height=600, scale=2)
-        
-        # Create matplotlib figure to display the image
-        mpl_fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Load and display the image
-        from PIL import Image
-        import io
-        img = Image.open(io.BytesIO(img_bytes))
-        ax.imshow(img)
-        ax.axis('off')
-        
-        self.add_matplotlib_plot(mpl_fig, title=title, description=description)
-    
-    def add_custom_plot(self, plot_function, title=None, description=None, **kwargs):
-        """
-        Add a custom plot function to the PDF
-        
-        Args:
-            plot_function: function that creates and returns a matplotlib figure
-            title (str): Title for the plot
-            description (str): Description text
-            **kwargs: arguments for the plot function
-        """
-        fig = plot_function(**kwargs)
-        self.add_matplotlib_plot(fig, title=title, description=description)
+def run_data_quality_checks(old_df, new_df):
+    results = {}
+    details = {}
 
-# Example usage and demo functions
-def create_sample_data():
-    """Create sample data for demonstration"""
-    np.random.seed(42)
-    
-    # Time series data
-    dates = pd.date_range('2023-01-01', periods=100, freq='D')
-    ts_data = pd.DataFrame({
-        'date': dates,
-        'value': np.cumsum(np.random.randn(100) * 0.5) + 100,
-        'category': np.random.choice(['A', 'B', 'C'], 100)
-    })
-    
-    # Categorical data
-    cat_data = pd.DataFrame({
-        'category': ['Product A', 'Product B', 'Product C', 'Product D', 'Product E'],
-        'sales': [23, 45, 56, 78, 32],
-        'profit': [12, 23, 34, 45, 16]
-    })
-    
-    # Correlation data
-    corr_data = pd.DataFrame(np.random.randn(100, 5), 
-                           columns=['Feature1', 'Feature2', 'Feature3', 'Feature4', 'Feature5'])
-    
-    return ts_data, cat_data, corr_data
+    # === 1a: GLCS fluctuation ===
+    old_glcs = old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
+    new_glcs = new_df[new_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
+    lost_glcs = list(set(old_glcs) - set(new_glcs))
+    gained_glcs = list(set(new_glcs) - set(old_glcs))
+    turnover_missing_lost = new_df[new_df['GCDU_ID'].isin(lost_glcs) & new_df['Turnover'].isna()]
 
-def demo_matplotlib_plots():
-    """Create demonstration matplotlib plots"""
-    ts_data, cat_data, corr_data = create_sample_data()
-    
-    # Line plot
-    def create_line_plot():
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(ts_data['date'], ts_data['value'], linewidth=2, color='#2E4057')
-        ax.set_title('Time Series Analysis', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Value')
-        ax.grid(True, alpha=0.3)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        return fig
-    
-    # Bar plot
-    def create_bar_plot():
-        fig, ax = plt.subplots(figsize=(10, 6))
-        bars = ax.bar(cat_data['category'], cat_data['sales'], color='#048A81', alpha=0.8)
-        ax.set_title('Sales by Category', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Category')
-        ax.set_ylabel('Sales')
-        ax.grid(True, alpha=0.3, axis='y')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        
-        # Add value labels on bars
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{height}', ha='center', va='bottom')
-        
-        plt.tight_layout()
-        return fig
-    
-    return create_line_plot, create_bar_plot
+    results['1a_GLCS_Lost_Count'] = len(lost_glcs)
+    results['1a_GLCS_Gained_Count'] = len(gained_glcs)
+    results['1a_Lost_with_Missing_Turnover'] = len(turnover_missing_lost)
+    details['1a_Turnover_Missing_Lost'] = turnover_missing_lost
 
-def demo_seaborn_plots():
-    """Create demonstration seaborn plots"""
-    ts_data, cat_data, corr_data = create_sample_data()
-    
-    # Correlation heatmap
-    def create_heatmap():
-        fig, ax = plt.subplots(figsize=(8, 6))
-        sns.heatmap(corr_data.corr(), annot=True, cmap='coolwarm', center=0, 
-                   square=True, linewidths=0.5, cbar_kws={"shrink": .8}, ax=ax)
-        ax.set_title('Correlation Matrix', fontsize=14, fontweight='bold')
-        return fig
-    
-    # Distribution plot
-    def create_distribution():
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.histplot(data=corr_data, x='Feature1', kde=True, ax=ax, color='#F18F01')
-        ax.set_title('Distribution Analysis', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        return fig
-    
-    return create_heatmap, create_distribution
+    # === 1b: Scorecard used but not GLCS ===
+    scored_not_glcs = new_df[(new_df['Source'] == 'Internal') & (new_df['GLCS_flag'] == 0)]
+    results['1b_Scorecard_Not_GLCS_Count'] = scored_not_glcs['GCDU_ID'].nunique()
+    details['1b_Scorecard_Not_GLCS'] = scored_not_glcs
 
-def demo_plotly_plots():
-    """Create demonstration plotly plots"""
-    ts_data, cat_data, corr_data = create_sample_data()
-    
-    # Interactive scatter plot
-    def create_scatter():
-        fig = px.scatter(corr_data, x='Feature1', y='Feature2', 
-                        title='Interactive Scatter Plot',
-                        color='Feature3', size='Feature4',
-                        hover_data=['Feature5'])
-        fig.update_layout(template='plotly_white')
-        return fig
-    
-    # 3D surface plot
-    def create_3d_surface():
-        x = np.linspace(-5, 5, 50)
-        y = np.linspace(-5, 5, 50)
-        X, Y = np.meshgrid(x, y)
-        Z = np.sin(np.sqrt(X**2 + Y**2))
-        
-        fig = go.Figure(data=[go.Surface(x=X, y=Y, z=Z, colorscale='viridis')])
-        fig.update_layout(title='3D Surface Plot', template='plotly_white')
-        return fig
-    
-    return create_scatter, create_3d_surface
+    # === 1c: Previously GLCS, now not ===
+    unexpected_drop = list(set(old_df[old_df['GLCS_flag'] == 1]['GCDU_ID']) & 
+                           set(new_df[new_df['GLCS_flag'] == 0]['GCDU_ID']))
+    results['1c_Previously_GLCS_Now_Not'] = len(unexpected_drop)
+    details['1c_Previously_GLCS_Now_Not'] = new_df[new_df['GCDU_ID'].isin(unexpected_drop)]
 
-# Main execution function
-def generate_sample_report():
-    """Generate a complete sample PDF report"""
-    
-    # Create the report
-    with ElegantPDFReport("elegant_analysis_report.pdf") as report:
-        # Add title page
-        report.add_title_page(
-            title="Comprehensive Data Analysis Report",
-            subtitle="Advanced Visualization Techniques",
-            author="Data Science Team"
-        )
-        
-        # Get sample plots
-        line_plot, bar_plot = demo_matplotlib_plots()
-        heatmap, distribution = demo_seaborn_plots()
-        scatter, surface = demo_plotly_plots()
-        
-        # Add matplotlib plots
-        report.add_custom_plot(
-            line_plot,
-            title="Time Series Analysis",
-            description="This plot shows the trend of our key metric over time, revealing seasonal patterns and overall growth trajectory."
-        )
-        
-        report.add_custom_plot(
-            bar_plot,
-            title="Category Performance",
-            description="Sales performance across different product categories, highlighting top performers and areas for improvement."
-        )
-        
-        # Add seaborn plots
-        report.add_custom_plot(
-            heatmap,
-            title="Feature Correlation Analysis",
-            description="Correlation matrix showing relationships between different features in our dataset."
-        )
-        
-        report.add_custom_plot(
-            distribution,
-            title="Feature Distribution",
-            description="Distribution analysis of key features showing central tendency and spread."
-        )
-        
-        # Add plotly plots
-        report.add_plotly_plot(
-            scatter(),
-            title="Multi-dimensional Scatter Analysis",
-            description="Interactive scatter plot revealing complex relationships between multiple variables."
-        )
-        
-        report.add_plotly_plot(
-            surface(),
-            title="3D Surface Visualization",
-            description="Three-dimensional surface plot demonstrating mathematical relationships in our data."
-        )
-    
-    print(f"Report generated successfully: elegant_analysis_report.pdf")
+    # === 1d: Missing Turnover ===
+    missing_turnover = new_df[new_df['Turnover'].isna()]
+    results['1d_Missing_Turnover'] = len(missing_turnover)
+    details['1d_Missing_Turnover'] = missing_turnover
 
-# Usage example
-if __name__ == "__main__":
-    generate_sample_report()
-    
-    # Example of how to use with your own plots
-    """
-    # Your existing matplotlib figure
-    fig, ax = plt.subplots()
-    ax.plot([1, 2, 3], [1, 4, 2])
-    
-    # Your existing seaborn plot
-    sns_fig, sns_ax = plt.subplots()
-    sns.scatterplot(data=your_data, x='x_col', y='y_col', ax=sns_ax)
-    
-    # Your existing plotly figure
-    plotly_fig = px.line(your_data, x='x_col', y='y_col')
-    
-    # Create report with your plots
-    with ElegantPDFReport("your_report.pdf") as report:
-        report.add_title_page("Your Analysis Report")
-        report.add_matplotlib_plot(fig, title="Your Matplotlib Plot")
-        report.add_matplotlib_plot(sns_fig, title="Your Seaborn Plot")
-        report.add_plotly_plot(plotly_fig, title="Your Plotly Plot")
-    """
+    # === 1e: GLCS Parent with missing/<550M turnover ===
+    parent_issues = new_df[
+        (new_df['Parent_flag'] == 'Parent') & 
+        ((new_df['Turnover'].isna()) | (new_df['Turnover'] < 550))
+    ]
+    results['1e_GLCS_Parent_Issues'] = len(parent_issues)
+    details['1e_GLCS_Parent_Issues'] = parent_issues
+
+    # === 3a: Turnover value comparison between old and new ===
+    turnover_compare = new_df[['GCDU_ID', 'Turnover']].merge(
+        old_df[['GCDU_ID', 'Turnover']], on='GCDU_ID', suffixes=('_new', '_old'))
+    turnover_compare['diff'] = turnover_compare['Turnover_new'] - turnover_compare['Turnover_old']
+    results['3a_Turnover_Avg_Diff'] = turnover_compare['diff'].mean()
+    results['3a_Turnover_Max_Diff'] = turnover_compare['diff'].max()
+    results['3a_Turnover_Min_Diff'] = turnover_compare['diff'].min()
+    details['3a_Turnover_Diff'] = turnover_compare
+
+    # === 4a: Inactive Defaults ===
+    inactive_defaults = new_df[(new_df['Default'] == 1) & (new_df['active_flag'] == 0)]
+    results['4a_Inactive_Defaults'] = len(inactive_defaults)
+    details['4a_Inactive_Defaults'] = inactive_defaults
+
+    # === 4b: Defaults from CRR ≤ 4 ===
+    defaults_good_crr = new_df[(new_df['Default'] == 1) & (new_df['CRR'] <= 4)]
+    results['4b_Defaults_CRR<=4'] = len(defaults_good_crr)
+    details['4b_Defaults_CRR<=4'] = defaults_good_crr
+
+    return results, details
+
+
+section 4
+
+def check_default_and_aco_accuracy(df):
+    results = {}
+    details = {}
+
+    # 4.a Count of inactive defaults
+    inactive_defaults = df[(df['Default'] == 1) & (df['active_flag'] == 0)]
+    results['4a_Inactive_Defaults'] = len(inactive_defaults)
+    details['4a_Inactive_Defaults'] = inactive_defaults
+
+    # 4.b Count of defaults from CRR ≤ 4
+    defaults_good_crr = df[(df['Default'] == 1) & (df['CRR'] <= 4)]
+    results['4b_Defaults_from_CRR<=4'] = len(defaults_good_crr)
+    details['4b_Defaults_from_CRR<=4'] = defaults_good_crr
+
+    # 4.c Count of defaults without default dates
+    default_no_date = df[(df['Default'] == 1) & (df['Default_date'].isna())]
+    results['4c_Defaults_Without_Date'] = len(default_no_date)
+    details['4c_Defaults_Without_Date'] = default_no_date
+
+    # 4.d GCDU-level defaults with no CID-level default
+    # Assumes each GCDU_ID maps to one or more Customer_IDs
+    # Assumes a separate 'customer_df' with one row per Customer_ID
+    # For now, simulate check from within df
+
+    df_grouped = df.groupby(['GCDU_ID'])
+    no_cid_default = []
+    for gcdu, group in df_grouped:
+        if group['Default'].max() == 1:
+            if group.groupby('Customer_ID')['Default'].max().max() == 0:
+                no_cid_default.append(gcdu)
+
+    results['4d_GCDU_Default_No_CID_Default'] = len(no_cid_default)
+    details['4d_GCDU_Default_No_CID_Default'] = df[df['GCDU_ID'].isin(no_cid_default)]
+
+    # 4.e Total RWA/EAD for GLCS
+    glcs_df = df[df['GLCS_flag'] == 1]
+    total_rwa = glcs_df['RWA'].sum()
+    total_ead = glcs_df['EAD'].sum()
+    rwa_ead_ratio = total_rwa / total_ead if total_ead else None
+
+    results['4e_GLCS_Total_RWA'] = total_rwa
+    results['4e_GLCS_Total_EAD'] = total_ead
+    results['4e_GLCS_RWA/EAD_Ratio'] = round(rwa_ead_ratio, 2) if rwa_ead_ratio is not None else "NA"
+    details['4e_GLCS_RWA_EAD_Detail'] = glcs_df[['GCDU_ID', 'RWA', 'EAD']]
+
+    # 4.f Inactive GLCS GCDU IDs
+    inactive_glcs = df[(df['GLCS_flag'] == 1) & (df['active_flag'] == 0)]
+    results['4f_Inactive_GLCS_GCDU_IDs'] = len(inactive_glcs)
+    details['4f_Inactive_GLCS_GCDU_IDs'] = inactive_glcs
+
+    return results, details
+
+section 3
+
+def check_financial_data_accuracy(old_df, new_df):
+    results = {}
+    details = {}
+
+    # 3.a Turnover used in scoping vs risk driver
+    compare_df = new_df[['GCDU_ID', 'Turnover']].merge(
+        old_df[['GCDU_ID', 'Turnover']],
+        on='GCDU_ID', how='inner', suffixes=('_new', '_old')
+    )
+    compare_df['diff'] = compare_df['Turnover_new'] - compare_df['Turnover_old']
+    results['3a_Avg_Turnover_Diff'] = compare_df['diff'].mean()
+    details['3a_Turnover_Comparison'] = compare_df
+
+    # 3.b Turnover fluctuations YoY (spikes/drops)
+    new_sorted = new_df.sort_values(['GCDU_ID', 'Year'])
+    new_sorted['Turnover_diff'] = new_sorted.groupby('GCDU_ID')['Turnover'].diff()
+    spikes = new_sorted[abs(new_sorted['Turnover_diff']) > new_sorted['Turnover'].mean() * 0.5]
+    results['3b_YoY_Spikes_Count'] = len(spikes)
+    details['3b_YoY_Spikes'] = spikes
+
+    # 3.c Financials in RDSv2 but missing in RDSv3.X
+    old_ids = set(old_df['GCDU_ID'].unique())
+    new_ids = set(new_df['GCDU_ID'].unique())
+    missing_ids = old_ids - new_ids
+    missing_financials = old_df[old_df['GCDU_ID'].isin(missing_ids)]
+    results['3c_Missing_in_New'] = len(missing_ids)
+    details['3c_Missing_Financials'] = missing_financials
+
+    # 3.d Internal vs External financials consistency across cohorts
+    inconsistent_source = new_df.groupby('GCDU_ID')['Source'].nunique()
+    inconsistent_ids = inconsistent_source[inconsistent_source > 1].index.tolist()
+    inconsistent_source_df = new_df[new_df['GCDU_ID'].isin(inconsistent_ids)]
+    results['3d_Inconsistent_Source_Count'] = len(inconsistent_ids)
+    details['3d_Inconsistent_Source'] = inconsistent_source_df
+
+    # 3.e Missing financials at GCDU_ID but present at child CID
+    # Assume Turnover missing at GCDU level but same GCDU has child with data
+    group = new_df.groupby('GCDU_ID')
+    missing_gcdus = group['Turnover'].apply(lambda x: x.isna().all())
+    present_cids = new_df.groupby('GCDU_ID')['Turnover'].apply(lambda x: x.notna().any())
+    gcdus_with_issue = missing_gcdus[missing_gcdus & present_cids].index
+    issue_df = new_df[new_df['GCDU_ID'].isin(gcdus_with_issue)]
+    results['3e_GCDU_Missing_CID_Present'] = len(gcdus_with_issue)
+    details['3e_GCDU_Missing_CID_Present'] = issue_df
+
+    # 3.f Distribution shift across 80 financials
+    fin_cols = [col for col in old_df.columns if col.startswith('Fin_')]
+    dist_shift = {}
+    for col in fin_cols:
+        old_median = old_df[col].median()
+        new_median = new_df[col].median()
+        pct_diff = 100 * abs(new_median - old_median) / (abs(old_median) + 1e-6)
+        if pct_diff > 20:
+            dist_shift[col] = pct_diff
+    results['3f_Distribution_Shift_Count'] = len(dist_shift)
+    details['3f_Distribution_Shifts'] = pd.Series(dist_shift).sort_values(ascending=False)
+
+    # 3.g Duplicate financials across cohorts
+    dup_cols = ['GCDU_ID', 'Year'] + fin_cols
+    duplicate_rows = new_df[dup_cols].duplicated()
+    dups_df = new_df[duplicate_rows]
+    results['3g_Duplicate_Financials'] = len(dups_df)
+    details['3g_Duplicates'] = dups_df
+
+    # 3.h Median financials by cohort year/industry
+    if 'Industry' in new_df.columns:
+        medians = new_df.groupby(['Year', 'Industry'])[fin_cols].median().reset_index()
+    else:
+        medians = new_df.groupby('Year')[fin_cols].median().reset_index()
+    results['3h_Median_Summary_Rows'] = len(medians)
+    details['3h_Median_By_Year_Industry'] = medians
+
+    return results, details
+
+import pandas as pd
+
+def check_default_aco_accuracy(old_df, new_df):
+    results = {}
+    details = {}
+
+    df = new_df.copy()  # work only on the new version
+
+    # === 4.a Inactive Defaults ===
+    inactive_defaults = df[(df['Default'] == 1) & (df['active_flag'] == 0)]
+    results['4a_Inactive_Defaults'] = len(inactive_defaults)
+    details['4a_Inactive_Defaults'] = inactive_defaults
+
+    # === 4.b Defaults from CRR ≤ 4 ===
+    defaults_good_crr = df[(df['Default'] == 1) & (df['CRR'] <= 4)]
+    results['4b_Defaults_CRR≤4'] = len(defaults_good_crr)
+    details['4b_Defaults_CRR≤4'] = defaults_good_crr
+
+    # === 4.c Defaults with Missing Dates ===
+    missing_default_dates = df[(df['Default'] == 1) & (df['Default_date'].isna())]
+    results['4c_Missing_Default_Dates'] = len(missing_default_dates)
+    details['4c_Missing_Default_Dates'] = missing_default_dates
+
+    # === 4.d GCDU default with no default at Customer ID ===
+    # Assumption: If any Customer_ID under a GCDU_ID defaults, the GCDU is considered defaulted.
+    # Inconsistency: GCDU marked defaulted, but no child Customer_ID is defaulted
+    group_default = df[df['Default'] == 1][['GCDU_ID']].drop_duplicates()
+    cid_default = df[df['Default'] == 1][['Customer_ID']].drop_duplicates()
+
+    # Join to get all GCDU -> CID mappings
+    all_relations = df[['GCDU_ID', 'Customer_ID']].drop_duplicates()
+    merged = all_relations.merge(cid_default, on='Customer_ID', how='left', indicator=True)
+    cid_with_no_default = merged[merged['_merge'] == 'left_only']
+    gcdus_without_default_cid = cid_with_no_default['GCDU_ID'].unique()
+    defaulted_gcdus = group_default['GCDU_ID'].unique()
+    inconsistent_gcdus = list(set(defaulted_gcdus) & set(gcdus_without_default_cid))
+
+    results['4d_GCDU_Default_no_CID_Default'] = len(inconsistent_gcdus)
+    details['4d_GCDU_Default_no_CID_Default'] = df[df['GCDU_ID'].isin(inconsistent_gcdus)]
+
+    # === 4.e Total RWA/EAD for GLCS IDs ===
+    glcs_df = df[df['GLCS_flag'] == 1]
+    total_rwa = glcs_df['RWA'].sum()
+    total_ead = glcs_df['EAD'].sum()
+    results['4e_GLCS_Total_RWA'] = total_rwa
+    results['4e_GLCS_Total_EAD'] = total_ead
+    details['4e_GLCS_Records'] = glcs_df[['GCDU_ID', 'RWA', 'EAD']]
+
+    # === 4.f Inactive GCDU IDs among GLCS ===
+    inactive_glcs = glcs_df[glcs_df['active_flag'] == 0]
+    results['4f_Inactive_GLCS_Count'] = len(inactive_glcs)
+    results['4f_Inactive_GLCS_%'] = round(len(inactive_glcs) / len(glcs_df) * 100, 2) if len(glcs_df) else 0
+    details['4f_Inactive_GLCS'] = inactive_glcs
+
+    return results, details
+
+
+import pandas as pd
+
+def check_rds_glcs_parent_accuracy(old_df, new_df):
+    results = {}
+    details = {}
+
+    # Make sure we are only working on required columns
+    old = old_df[['GCDU_ID', 'Year', 'GLCS_flag', 'Parent_flag']].drop_duplicates()
+    new = new_df[['GCDU_ID', 'Year', 'GLCS_flag', 'Parent_flag']].drop_duplicates()
+
+    # Merge old and new on GCDU_ID
+    merged = old.merge(new, on='GCDU_ID', how='outer', suffixes=('_old', '_new'))
+
+    # === a. Change between Parent and Sub across cohorts ===
+    parent_sub_change = merged[
+        ((merged['Parent_flag_old'] == 'Parent') & (merged['Parent_flag_new'] == 'Sub')) |
+        ((merged['Parent_flag_old'] == 'Sub') & (merged['Parent_flag_new'] == 'Parent'))
+    ]
+    results['a_Parent_Sub_Flip_Count'] = len(parent_sub_change)
+    details['a_Parent_Sub_Flip'] = parent_sub_change
+
+    # === b. Now GLCS but not earlier ===
+    new_glcs_only = merged[(merged['GLCS_flag_old'] == 0) & (merged['GLCS_flag_new'] == 1)]
+    results['b_Now_GLCS_Previously_NonGLCS'] = len(new_glcs_only)
+    details['b_Now_GLCS_Previously_NonGLCS'] = new_glcs_only
+
+    # === c. Parent/Sub role swap ===
+    role_changed = merged[
+        ((merged['Parent_flag_old'] != merged['Parent_flag_new']) & 
+         (merged['Parent_flag_old'].isin(['Parent', 'Sub'])) &
+         (merged['Parent_flag_new'].isin(['Parent', 'Sub'])))
+    ]
+    results['c_Parent_Sub_Role_Changed'] = len(role_changed)
+    details['c_Parent_Sub_Role_Changed'] = role_changed
+
+    # === d. GLCS Parent/Standalone now but was Sub ===
+    suspect_upgrade = merged[
+        (merged['GLCS_flag_new'] == 1) &
+        (merged['Parent_flag_new'].isin(['Parent', 'Standalone'])) &
+        (merged['Parent_flag_old'] == 'Sub')
+    ]
+    results['d_GLCS_ParentNow_SubEarlier'] = len(suspect_upgrade)
+    details['d_GLCS_ParentNow_SubEarlier'] = suspect_upgrade
+
+    return results, details
+
+import pandas as pd
+
+def check_css_level_glcs_accuracy(old_df, new_df):
+    results = {}
+    details = {}
+
+    # === a. In/Out of GLCS across cohorts ===
+    glcs_old = old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
+    glcs_new = new_df[new_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
+
+    in_out_glcs = set(glcs_old).symmetric_difference(set(glcs_new))
+    flapping_glcs = new_df[new_df['GCDU_ID'].isin(in_out_glcs)]
+
+    missing_turnover = flapping_glcs[flapping_glcs['Turnover'].isna()]
+    results['a_GLCS_Fluctuation_Count'] = len(in_out_glcs)
+    results['a_Missing_Turnover_Fluctuating'] = len(missing_turnover)
+    details['a_Fluctuating_GLCS'] = flapping_glcs
+
+    # === b. Used GLCS Scorecard but not flagged ===
+    used_scorecard = new_df[(new_df['Source'] == 'GLCS_Scorecard') & (new_df['GLCS_flag'] == 0)]
+    results['b_Scorecard_Not_GLCS_Count'] = used_scorecard['GCDU_ID'].nunique()
+    details['b_Scorecard_Not_GLCS'] = used_scorecard
+
+    # === c. Previously GLCS (RDSv2) but not now ===
+    previously_glcs = set(old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'])
+    now_not_glcs = set(new_df[new_df['GLCS_flag'] == 0]['GCDU_ID'])
+    unexpected_drop = list(previously_glcs & now_not_glcs)
+    dropped_df = new_df[new_df['GCDU_ID'].isin(unexpected_drop)]
+    results['c_Previously_GLCS_Now_Not'] = len(unexpected_drop)
+    details['c_Previously_GLCS_Now_Not'] = dropped_df
+
+    # === d. GCDU with missing turnover (in new) ===
+    missing_turnover_new = new_df[new_df['Turnover'].isna()]
+    results['d_Missing_Turnover_New'] = len(missing_turnover_new)
+    details['d_Missing_Turnover_New'] = missing_turnover_new
+
+    # === e. GLCS Parents with missing or <550 turnover ===
+    parent_low_turn = new_df[
+        (new_df['GLCS_flag'] == 1) &
+        (new_df['Parent_flag'] == 'Parent') &
+        ((new_df['Turnover'].isna()) | (new_df['Turnover'] < 550))
+    ]
+    results['e_GLCS_Parent_Turnover_Issue'] = len(parent_low_turn)
+    details['e_GLCS_Parent_Turnover_Issue'] = parent_low_turn
+
+    # === f. Subs in multiple mastergroups ===
+    sub_multiple_groups = new_df[
+        (new_df['Parent_flag'] == 'Sub') & (new_df['Mastergroup_Count'] > 1)
+    ]
+    results['f_Subs_Multiple_Mastergroups'] = len(sub_multiple_groups)
+    details['f_Subs_Multiple_Mastergroups'] = sub_multiple_groups
+
+    # === g. Parents/Standalone with parental support ===
+    unsupported_independents = new_df[
+        (new_df['Parent_flag'].isin(['Parent', 'Standalone'])) &
+        (new_df['Parental_support_flag'] == 1)
+    ]
+    results['g_ParentOrStandalone_With_Support'] = len(unsupported_independents)
+    details['g_ParentOrStandalone_With_Support'] = unsupported_independents
+
+    # === h. Parents/Standalone in multiple mastergroups ===
+    multigroup_parents = new_df[
+        (new_df['Parent_flag'].isin(['Parent', 'Standalone'])) &
+        (new_df['Mastergroup_Count'] > 1)
+    ]
+    results['h_ParentOrStandalone_MultiGroups'] = len(multigroup_parents)
+    details['h_ParentOrStandalone_MultiGroups'] = multigroup_parents
+
+    return results, details
+
+
+
