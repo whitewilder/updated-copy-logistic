@@ -1,721 +1,257 @@
-# Regenerate data and rerun all checks cleanly
-
-# Generate mock data again
-np.random.seed(0)
-years = [2020, 2021, 2022, 2023]
-ids = [f"GCDU_{i}" for i in range(100)]
-generate_df = lambda version: pd.DataFrame({
-    'GCDU_ID': np.random.choice(ids, 300),
-    'Year': np.random.choice(years, 300),
-    'active_flag': np.random.choice([0, 1], 300),
-    'GLCS_flag': np.random.choice([0, 1], 300),
-    'Parent_flag': np.random.choice(['Parent', 'Sub', 'Standalone'], 300),
-    'Turnover': np.random.normal(800, 300, 300).clip(0),
-    'Source': np.random.choice(['Internal', 'External'], 300),
-    'CRR': np.random.choice([1, 2, 3, 4, 5, 6, 7, 8], 300),
-    'Default': np.random.choice([0, 1], 300),
-    'Default_date': pd.to_datetime(np.random.choice(pd.date_range('2019-01-01', '2023-12-31'), 300)),
-    'RWA': np.random.normal(1000, 400, 300).clip(0),
-    'EAD': np.random.normal(500, 200, 300).clip(0)
-})
-
-old_df = generate_df("v2")
-new_df = generate_df("v3")
-
-# Helper to safely write to Excel with 31-char sheet name limit
-def safe_sheet_name(name):
-    return name[:28] + "..." if len(name) > 31 else name
-
-def summarize_check(writer, sheet_name, summary_dict, detail_df=None):
-    sheet_name_safe = safe_sheet_name(sheet_name)
-    summary_df = pd.DataFrame(list(summary_dict.items()), columns=["Check", "Result"])
-    summary_df.to_excel(writer, sheet_name=sheet_name_safe, index=False)
-    if detail_df is not None:
-        detail_name_safe = safe_sheet_name(f"{sheet_name}_Details")
-        detail_df.to_excel(writer, sheet_name=detail_name_safe, index=False)
-
-# Start writing Excel output
-output_path = "/mnt/data/data_quality_summary.xlsx"
-writer = pd.ExcelWriter(output_path, engine="xlsxwriter")
-
-# 1.a GCDU ID going in/out of GLCS
-old_glcs = old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
-new_glcs = new_df[new_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
-lost_glcs = list(set(old_glcs) - set(new_glcs))
-gained_glcs = list(set(new_glcs) - set(old_glcs))
-turnover_missing_lost = new_df[new_df['GCDU_ID'].isin(lost_glcs) & new_df['Turnover'].isna()]
-summarize_check(writer, "1a_GLCS_Fluctuation", {
-    "GLCS Lost IDs": len(lost_glcs),
-    "GLCS Gained IDs": len(gained_glcs),
-    "GLCS Lost IDs with Missing Turnover": len(turnover_missing_lost)
-}, detail_df=turnover_missing_lost)
-
-# 1.b GCDU ID using GLCS scorecard but not GLCS flagged
-scored_but_not_glcs = new_df[(new_df['Source'] == 'Internal') & (new_df['GLCS_flag'] == 0)]
-summarize_check(writer, "1b_Scorecard_Not_GLCS", {
-    "Count": scored_but_not_glcs['GCDU_ID'].nunique()
-}, detail_df=scored_but_not_glcs)
-
-# 1.c Previously GLCS but now not
-prev_glcs = set(old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'])
-now_not_glcs = set(new_df[new_df['GLCS_flag'] == 0]['GCDU_ID'])
-unexpected_drop = list(prev_glcs & now_not_glcs)
-summarize_check(writer, "1c_GLCS_Drop_Unexpected", {
-    "Unexpected GLCS Drops": len(unexpected_drop)
-}, detail_df=new_df[new_df['GCDU_ID'].isin(unexpected_drop)])
-
-# 1.d Missing Turnover
-missing_turnover = new_df[new_df['Turnover'].isna()]
-summarize_check(writer, "1d_Missing_Turnover", {
-    "Missing Turnover Count": len(missing_turnover)
-}, detail_df=missing_turnover)
-
-# 1.e GLCS Parent with Missing/<550 Turnover
-parents_with_issues = new_df[
-    (new_df['Parent_flag'] == 'Parent') &
-    ((new_df['Turnover'].isna()) | (new_df['Turnover'] < 550))
-]
-summarize_check(writer, "1e_GLCS_Parent_Issue", {
-    "Count": len(parents_with_issues)
-}, detail_df=parents_with_issues)
-
-# 3.a Turnover difference in scoping vs risk driver
-turnover_compare = new_df[['GCDU_ID', 'Turnover']].merge(
-    old_df[['GCDU_ID', 'Turnover']], on='GCDU_ID', suffixes=('_new', '_old'))
-turnover_compare['diff'] = turnover_compare['Turnover_new'] - turnover_compare['Turnover_old']
-summarize_check(writer, "3a_Turnover_Compare", {
-    "Avg Turnover Diff": turnover_compare['diff'].mean(),
-    "Max Diff": turnover_compare['diff'].max(),
-    "Min Diff": turnover_compare['diff'].min()
-}, detail_df=turnover_compare)
-
-# 4.a Inactive Defaults
-inactive_defaults = new_df[(new_df['Default'] == 1) & (new_df['active_flag'] == 0)]
-summarize_check(writer, "4a_Inactive_Defaults", {
-    "Inactive Default Count": len(inactive_defaults)
-}, detail_df=inactive_defaults)
-
-# 4.b Defaults from CRR <= 4
-crr_defaults = new_df[(new_df['Default'] == 1) & (new_df['CRR'] <= 4)]
-summarize_check(writer, "4b_Defaults_CRR_4orLess", {
-    "Defaults from CRR ≤ 4": len(crr_defaults)
-}, detail_df=crr_defaults)
-
-# Save the file
-writer.close()
-
-output_path
-
-
-
+import streamlit as st
 import pandas as pd
+import plotly.express as px
+from datetime import datetime
+import plotly.graph_objects as go
 
-def run_data_quality_checks(old_df, new_df):
-    results = {}
-    details = {}
+# Set page configuration
+st.set_page_config(page_title="Data Quality Dashboard", layout="wide")
 
-    # === 1a: GLCS fluctuation ===
-    old_glcs = old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
-    new_glcs = new_df[new_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
-    lost_glcs = list(set(old_glcs) - set(new_glcs))
-    gained_glcs = list(set(new_glcs) - set(old_glcs))
-    turnover_missing_lost = new_df[new_df['GCDU_ID'].isin(lost_glcs) & new_df['Turnover'].isna()]
+# Title
+st.title("Data Quality Dashboard")
 
-    results['1a_GLCS_Lost_Count'] = len(lost_glcs)
-    results['1a_GLCS_Gained_Count'] = len(gained_glcs)
-    results['1a_Lost_with_Missing_Turnover'] = len(turnover_missing_lost)
-    details['1a_Turnover_Missing_Lost'] = turnover_missing_lost
+# File uploader
+uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
 
-    # === 1b: Scorecard used but not GLCS ===
-    scored_not_glcs = new_df[(new_df['Source'] == 'Internal') & (new_df['GLCS_flag'] == 0)]
-    results['1b_Scorecard_Not_GLCS_Count'] = scored_not_glcs['GCDU_ID'].nunique()
-    details['1b_Scorecard_Not_GLCS'] = scored_not_glcs
-
-    # === 1c: Previously GLCS, now not ===
-    unexpected_drop = list(set(old_df[old_df['GLCS_flag'] == 1]['GCDU_ID']) & 
-                           set(new_df[new_df['GLCS_flag'] == 0]['GCDU_ID']))
-    results['1c_Previously_GLCS_Now_Not'] = len(unexpected_drop)
-    details['1c_Previously_GLCS_Now_Not'] = new_df[new_df['GCDU_ID'].isin(unexpected_drop)]
-
-    # === 1d: Missing Turnover ===
-    missing_turnover = new_df[new_df['Turnover'].isna()]
-    results['1d_Missing_Turnover'] = len(missing_turnover)
-    details['1d_Missing_Turnover'] = missing_turnover
-
-    # === 1e: GLCS Parent with missing/<550M turnover ===
-    parent_issues = new_df[
-        (new_df['Parent_flag'] == 'Parent') & 
-        ((new_df['Turnover'].isna()) | (new_df['Turnover'] < 550))
-    ]
-    results['1e_GLCS_Parent_Issues'] = len(parent_issues)
-    details['1e_GLCS_Parent_Issues'] = parent_issues
-
-    # === 3a: Turnover value comparison between old and new ===
-    turnover_compare = new_df[['GCDU_ID', 'Turnover']].merge(
-        old_df[['GCDU_ID', 'Turnover']], on='GCDU_ID', suffixes=('_new', '_old'))
-    turnover_compare['diff'] = turnover_compare['Turnover_new'] - turnover_compare['Turnover_old']
-    results['3a_Turnover_Avg_Diff'] = turnover_compare['diff'].mean()
-    results['3a_Turnover_Max_Diff'] = turnover_compare['diff'].max()
-    results['3a_Turnover_Min_Diff'] = turnover_compare['diff'].min()
-    details['3a_Turnover_Diff'] = turnover_compare
-
-    # === 4a: Inactive Defaults ===
-    inactive_defaults = new_df[(new_df['Default'] == 1) & (new_df['active_flag'] == 0)]
-    results['4a_Inactive_Defaults'] = len(inactive_defaults)
-    details['4a_Inactive_Defaults'] = inactive_defaults
-
-    # === 4b: Defaults from CRR ≤ 4 ===
-    defaults_good_crr = new_df[(new_df['Default'] == 1) & (new_df['CRR'] <= 4)]
-    results['4b_Defaults_CRR<=4'] = len(defaults_good_crr)
-    details['4b_Defaults_CRR<=4'] = defaults_good_crr
-
-    return results, details
-
-
-section 4
-
-def check_default_and_aco_accuracy(df):
-    results = {}
-    details = {}
-
-    # 4.a Count of inactive defaults
-    inactive_defaults = df[(df['Default'] == 1) & (df['active_flag'] == 0)]
-    results['4a_Inactive_Defaults'] = len(inactive_defaults)
-    details['4a_Inactive_Defaults'] = inactive_defaults
-
-    # 4.b Count of defaults from CRR ≤ 4
-    defaults_good_crr = df[(df['Default'] == 1) & (df['CRR'] <= 4)]
-    results['4b_Defaults_from_CRR<=4'] = len(defaults_good_crr)
-    details['4b_Defaults_from_CRR<=4'] = defaults_good_crr
-
-    # 4.c Count of defaults without default dates
-    default_no_date = df[(df['Default'] == 1) & (df['Default_date'].isna())]
-    results['4c_Defaults_Without_Date'] = len(default_no_date)
-    details['4c_Defaults_Without_Date'] = default_no_date
-
-    # 4.d GCDU-level defaults with no CID-level default
-    # Assumes each GCDU_ID maps to one or more Customer_IDs
-    # Assumes a separate 'customer_df' with one row per Customer_ID
-    # For now, simulate check from within df
-
-    df_grouped = df.groupby(['GCDU_ID'])
-    no_cid_default = []
-    for gcdu, group in df_grouped:
-        if group['Default'].max() == 1:
-            if group.groupby('Customer_ID')['Default'].max().max() == 0:
-                no_cid_default.append(gcdu)
-
-    results['4d_GCDU_Default_No_CID_Default'] = len(no_cid_default)
-    details['4d_GCDU_Default_No_CID_Default'] = df[df['GCDU_ID'].isin(no_cid_default)]
-
-    # 4.e Total RWA/EAD for GLCS
-    glcs_df = df[df['GLCS_flag'] == 1]
-    total_rwa = glcs_df['RWA'].sum()
-    total_ead = glcs_df['EAD'].sum()
-    rwa_ead_ratio = total_rwa / total_ead if total_ead else None
-
-    results['4e_GLCS_Total_RWA'] = total_rwa
-    results['4e_GLCS_Total_EAD'] = total_ead
-    results['4e_GLCS_RWA/EAD_Ratio'] = round(rwa_ead_ratio, 2) if rwa_ead_ratio is not None else "NA"
-    details['4e_GLCS_RWA_EAD_Detail'] = glcs_df[['GCDU_ID', 'RWA', 'EAD']]
-
-    # 4.f Inactive GLCS GCDU IDs
-    inactive_glcs = df[(df['GLCS_flag'] == 1) & (df['active_flag'] == 0)]
-    results['4f_Inactive_GLCS_GCDU_IDs'] = len(inactive_glcs)
-    details['4f_Inactive_GLCS_GCDU_IDs'] = inactive_glcs
-
-    return results, details
-
-section 3
-
-def check_financial_data_accuracy(old_df, new_df):
-    results = {}
-    details = {}
-
-    # 3.a Turnover used in scoping vs risk driver
-    compare_df = new_df[['GCDU_ID', 'Turnover']].merge(
-        old_df[['GCDU_ID', 'Turnover']],
-        on='GCDU_ID', how='inner', suffixes=('_new', '_old')
-    )
-    compare_df['diff'] = compare_df['Turnover_new'] - compare_df['Turnover_old']
-    results['3a_Avg_Turnover_Diff'] = compare_df['diff'].mean()
-    details['3a_Turnover_Comparison'] = compare_df
-
-    # 3.b Turnover fluctuations YoY (spikes/drops)
-    new_sorted = new_df.sort_values(['GCDU_ID', 'Year'])
-    new_sorted['Turnover_diff'] = new_sorted.groupby('GCDU_ID')['Turnover'].diff()
-    spikes = new_sorted[abs(new_sorted['Turnover_diff']) > new_sorted['Turnover'].mean() * 0.5]
-    results['3b_YoY_Spikes_Count'] = len(spikes)
-    details['3b_YoY_Spikes'] = spikes
-
-    # 3.c Financials in RDSv2 but missing in RDSv3.X
-    old_ids = set(old_df['GCDU_ID'].unique())
-    new_ids = set(new_df['GCDU_ID'].unique())
-    missing_ids = old_ids - new_ids
-    missing_financials = old_df[old_df['GCDU_ID'].isin(missing_ids)]
-    results['3c_Missing_in_New'] = len(missing_ids)
-    details['3c_Missing_Financials'] = missing_financials
-
-    # 3.d Internal vs External financials consistency across cohorts
-    inconsistent_source = new_df.groupby('GCDU_ID')['Source'].nunique()
-    inconsistent_ids = inconsistent_source[inconsistent_source > 1].index.tolist()
-    inconsistent_source_df = new_df[new_df['GCDU_ID'].isin(inconsistent_ids)]
-    results['3d_Inconsistent_Source_Count'] = len(inconsistent_ids)
-    details['3d_Inconsistent_Source'] = inconsistent_source_df
-
-    # 3.e Missing financials at GCDU_ID but present at child CID
-    # Assume Turnover missing at GCDU level but same GCDU has child with data
-    group = new_df.groupby('GCDU_ID')
-    missing_gcdus = group['Turnover'].apply(lambda x: x.isna().all())
-    present_cids = new_df.groupby('GCDU_ID')['Turnover'].apply(lambda x: x.notna().any())
-    gcdus_with_issue = missing_gcdus[missing_gcdus & present_cids].index
-    issue_df = new_df[new_df['GCDU_ID'].isin(gcdus_with_issue)]
-    results['3e_GCDU_Missing_CID_Present'] = len(gcdus_with_issue)
-    details['3e_GCDU_Missing_CID_Present'] = issue_df
-
-    # 3.f Distribution shift across 80 financials
-    fin_cols = [col for col in old_df.columns if col.startswith('Fin_')]
-    dist_shift = {}
-    for col in fin_cols:
-        old_median = old_df[col].median()
-        new_median = new_df[col].median()
-        pct_diff = 100 * abs(new_median - old_median) / (abs(old_median) + 1e-6)
-        if pct_diff > 20:
-            dist_shift[col] = pct_diff
-    results['3f_Distribution_Shift_Count'] = len(dist_shift)
-    details['3f_Distribution_Shifts'] = pd.Series(dist_shift).sort_values(ascending=False)
-
-    # 3.g Duplicate financials across cohorts
-    dup_cols = ['GCDU_ID', 'Year'] + fin_cols
-    duplicate_rows = new_df[dup_cols].duplicated()
-    dups_df = new_df[duplicate_rows]
-    results['3g_Duplicate_Financials'] = len(dups_df)
-    details['3g_Duplicates'] = dups_df
-
-    # 3.h Median financials by cohort year/industry
-    if 'Industry' in new_df.columns:
-        medians = new_df.groupby(['Year', 'Industry'])[fin_cols].median().reset_index()
-    else:
-        medians = new_df.groupby('Year')[fin_cols].median().reset_index()
-    results['3h_Median_Summary_Rows'] = len(medians)
-    details['3h_Median_By_Year_Industry'] = medians
-
-    return results, details
-
-import pandas as pd
-
-def check_default_aco_accuracy(old_df, new_df):
-    results = {}
-    details = {}
-
-    df = new_df.copy()  # work only on the new version
-
-    # === 4.a Inactive Defaults ===
-    inactive_defaults = df[(df['Default'] == 1) & (df['active_flag'] == 0)]
-    results['4a_Inactive_Defaults'] = len(inactive_defaults)
-    details['4a_Inactive_Defaults'] = inactive_defaults
-
-    # === 4.b Defaults from CRR ≤ 4 ===
-    defaults_good_crr = df[(df['Default'] == 1) & (df['CRR'] <= 4)]
-    results['4b_Defaults_CRR≤4'] = len(defaults_good_crr)
-    details['4b_Defaults_CRR≤4'] = defaults_good_crr
-
-    # === 4.c Defaults with Missing Dates ===
-    missing_default_dates = df[(df['Default'] == 1) & (df['Default_date'].isna())]
-    results['4c_Missing_Default_Dates'] = len(missing_default_dates)
-    details['4c_Missing_Default_Dates'] = missing_default_dates
-
-    # === 4.d GCDU default with no default at Customer ID ===
-    # Assumption: If any Customer_ID under a GCDU_ID defaults, the GCDU is considered defaulted.
-    # Inconsistency: GCDU marked defaulted, but no child Customer_ID is defaulted
-    group_default = df[df['Default'] == 1][['GCDU_ID']].drop_duplicates()
-    cid_default = df[df['Default'] == 1][['Customer_ID']].drop_duplicates()
-
-    # Join to get all GCDU -> CID mappings
-    all_relations = df[['GCDU_ID', 'Customer_ID']].drop_duplicates()
-    merged = all_relations.merge(cid_default, on='Customer_ID', how='left', indicator=True)
-    cid_with_no_default = merged[merged['_merge'] == 'left_only']
-    gcdus_without_default_cid = cid_with_no_default['GCDU_ID'].unique()
-    defaulted_gcdus = group_default['GCDU_ID'].unique()
-    inconsistent_gcdus = list(set(defaulted_gcdus) & set(gcdus_without_default_cid))
-
-    results['4d_GCDU_Default_no_CID_Default'] = len(inconsistent_gcdus)
-    details['4d_GCDU_Default_no_CID_Default'] = df[df['GCDU_ID'].isin(inconsistent_gcdus)]
-
-    # === 4.e Total RWA/EAD for GLCS IDs ===
-    glcs_df = df[df['GLCS_flag'] == 1]
-    total_rwa = glcs_df['RWA'].sum()
-    total_ead = glcs_df['EAD'].sum()
-    results['4e_GLCS_Total_RWA'] = total_rwa
-    results['4e_GLCS_Total_EAD'] = total_ead
-    details['4e_GLCS_Records'] = glcs_df[['GCDU_ID', 'RWA', 'EAD']]
-
-    # === 4.f Inactive GCDU IDs among GLCS ===
-    inactive_glcs = glcs_df[glcs_df['active_flag'] == 0]
-    results['4f_Inactive_GLCS_Count'] = len(inactive_glcs)
-    results['4f_Inactive_GLCS_%'] = round(len(inactive_glcs) / len(glcs_df) * 100, 2) if len(glcs_df) else 0
-    details['4f_Inactive_GLCS'] = inactive_glcs
-
-    return results, details
-
-
-import pandas as pd
-
-def check_rds_glcs_parent_accuracy(old_df, new_df):
-    results = {}
-    details = {}
-
-    # Make sure we are only working on required columns
-    old = old_df[['GCDU_ID', 'Year', 'GLCS_flag', 'Parent_flag']].drop_duplicates()
-    new = new_df[['GCDU_ID', 'Year', 'GLCS_flag', 'Parent_flag']].drop_duplicates()
-
-    # Merge old and new on GCDU_ID
-    merged = old.merge(new, on='GCDU_ID', how='outer', suffixes=('_old', '_new'))
-
-    # === a. Change between Parent and Sub across cohorts ===
-    parent_sub_change = merged[
-        ((merged['Parent_flag_old'] == 'Parent') & (merged['Parent_flag_new'] == 'Sub')) |
-        ((merged['Parent_flag_old'] == 'Sub') & (merged['Parent_flag_new'] == 'Parent'))
-    ]
-    results['a_Parent_Sub_Flip_Count'] = len(parent_sub_change)
-    details['a_Parent_Sub_Flip'] = parent_sub_change
-
-    # === b. Now GLCS but not earlier ===
-    new_glcs_only = merged[(merged['GLCS_flag_old'] == 0) & (merged['GLCS_flag_new'] == 1)]
-    results['b_Now_GLCS_Previously_NonGLCS'] = len(new_glcs_only)
-    details['b_Now_GLCS_Previously_NonGLCS'] = new_glcs_only
-
-    # === c. Parent/Sub role swap ===
-    role_changed = merged[
-        ((merged['Parent_flag_old'] != merged['Parent_flag_new']) & 
-         (merged['Parent_flag_old'].isin(['Parent', 'Sub'])) &
-         (merged['Parent_flag_new'].isin(['Parent', 'Sub'])))
-    ]
-    results['c_Parent_Sub_Role_Changed'] = len(role_changed)
-    details['c_Parent_Sub_Role_Changed'] = role_changed
-
-    # === d. GLCS Parent/Standalone now but was Sub ===
-    suspect_upgrade = merged[
-        (merged['GLCS_flag_new'] == 1) &
-        (merged['Parent_flag_new'].isin(['Parent', 'Standalone'])) &
-        (merged['Parent_flag_old'] == 'Sub')
-    ]
-    results['d_GLCS_ParentNow_SubEarlier'] = len(suspect_upgrade)
-    details['d_GLCS_ParentNow_SubEarlier'] = suspect_upgrade
-
-    return results, details
-
-import pandas as pd
-
-def check_css_level_glcs_accuracy(old_df, new_df):
-    results = {}
-    details = {}
-
-    # === a. In/Out of GLCS across cohorts ===
-    glcs_old = old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
-    glcs_new = new_df[new_df['GLCS_flag'] == 1]['GCDU_ID'].unique()
-
-    in_out_glcs = set(glcs_old).symmetric_difference(set(glcs_new))
-    flapping_glcs = new_df[new_df['GCDU_ID'].isin(in_out_glcs)]
-
-    missing_turnover = flapping_glcs[flapping_glcs['Turnover'].isna()]
-    results['a_GLCS_Fluctuation_Count'] = len(in_out_glcs)
-    results['a_Missing_Turnover_Fluctuating'] = len(missing_turnover)
-    details['a_Fluctuating_GLCS'] = flapping_glcs
-
-    # === b. Used GLCS Scorecard but not flagged ===
-    used_scorecard = new_df[(new_df['Source'] == 'GLCS_Scorecard') & (new_df['GLCS_flag'] == 0)]
-    results['b_Scorecard_Not_GLCS_Count'] = used_scorecard['GCDU_ID'].nunique()
-    details['b_Scorecard_Not_GLCS'] = used_scorecard
-
-    # === c. Previously GLCS (RDSv2) but not now ===
-    previously_glcs = set(old_df[old_df['GLCS_flag'] == 1]['GCDU_ID'])
-    now_not_glcs = set(new_df[new_df['GLCS_flag'] == 0]['GCDU_ID'])
-    unexpected_drop = list(previously_glcs & now_not_glcs)
-    dropped_df = new_df[new_df['GCDU_ID'].isin(unexpected_drop)]
-    results['c_Previously_GLCS_Now_Not'] = len(unexpected_drop)
-    details['c_Previously_GLCS_Now_Not'] = dropped_df
-
-    # === d. GCDU with missing turnover (in new) ===
-    missing_turnover_new = new_df[new_df['Turnover'].isna()]
-    results['d_Missing_Turnover_New'] = len(missing_turnover_new)
-    details['d_Missing_Turnover_New'] = missing_turnover_new
-
-    # === e. GLCS Parents with missing or <550 turnover ===
-    parent_low_turn = new_df[
-        (new_df['GLCS_flag'] == 1) &
-        (new_df['Parent_flag'] == 'Parent') &
-        ((new_df['Turnover'].isna()) | (new_df['Turnover'] < 550))
-    ]
-    results['e_GLCS_Parent_Turnover_Issue'] = len(parent_low_turn)
-    details['e_GLCS_Parent_Turnover_Issue'] = parent_low_turn
-
-    # === f. Subs in multiple mastergroups ===
-    sub_multiple_groups = new_df[
-        (new_df['Parent_flag'] == 'Sub') & (new_df['Mastergroup_Count'] > 1)
-    ]
-    results['f_Subs_Multiple_Mastergroups'] = len(sub_multiple_groups)
-    details['f_Subs_Multiple_Mastergroups'] = sub_multiple_groups
-
-    # === g. Parents/Standalone with parental support ===
-    unsupported_independents = new_df[
-        (new_df['Parent_flag'].isin(['Parent', 'Standalone'])) &
-        (new_df['Parental_support_flag'] == 1)
-    ]
-    results['g_ParentOrStandalone_With_Support'] = len(unsupported_independents)
-    details['g_ParentOrStandalone_With_Support'] = unsupported_independents
-
-    # === h. Parents/Standalone in multiple mastergroups ===
-    multigroup_parents = new_df[
-        (new_df['Parent_flag'].isin(['Parent', 'Standalone'])) &
-        (new_df['Mastergroup_Count'] > 1)
-    ]
-    results['h_ParentOrStandalone_MultiGroups'] = len(multigroup_parents)
-    details['h_ParentOrStandalone_MultiGroups'] = multigroup_parents
-
-    return results, details
-
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import statsmodels.api as sm
-from statsmodels.stats.outliers_influence import variance_inflation_factor
-
-# Set random seed and create base variables
-np.random.seed(0)
-n = 100
-x1 = np.random.normal(0, 1, n)
-x2_base = 5 * x1 + np.random.normal(0, 0.1, n)
-y = 3 * x1 + np.random.normal(0, 1, n)
-
-scales = [1, 10, 100, 500, 1000, 5000]
-vif_x1_list = []
-vif_x2_list = []
-stderr_x1_list = []
-
-for scale in scales:
-    x2 = x2_base * scale
-    df = pd.DataFrame({'x1': x1, 'x2': x2})
-    X = sm.add_constant(df)
-    model = sm.OLS(y, X).fit()
-
-    # Store std error of beta_x1
-    stderr_x1_list.append(model.bse['x1'])
-
-    # Compute regression-based VIFs
-    vif_vals = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
-    vif_x1_list.append(vif_vals[1])  # x1
-    vif_x2_list.append(vif_vals[2])  # x2
-
-# Plotting
-plt.figure(figsize=(12, 6))
-plt.subplot(1, 2, 1)
-plt.plot(scales, vif_x1_list, marker='o', label='VIF of x1')
-plt.plot(scales, vif_x2_list, marker='s', label='VIF of x2')
-plt.xlabel('Scale of x2')
-plt.ylabel('VIF')
-plt.title('📈 VIF vs Scale of x2')
-plt.legend()
-plt.grid(True)
-
-plt.subplot(1, 2, 2)
-plt.plot(scales, stderr_x1_list, marker='^', color='red', label='Std Err of β₁')
-plt.xlabel('Scale of x2')
-plt.ylabel('Standard Error of Coefficient x1')
-plt.title('📉 Std Error of Coefficient vs Scale')
-plt.legend()
-plt.grid(True)
-
-plt.tight_layout()
-plt.show()
-
-
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import LinearRegression
-import statsmodels.api as sm
-from statsmodels.stats.outliers_influence import variance_inflation_factor
-
-# Create correlated variables
-np.random.seed(0)
-n = 100
-x1 = np.random.normal(0, 1, n)
-x2 = 5 * x1 + np.random.normal(0, 0.1, n)
-y = 3 * x1 + np.random.normal(0, 1, n)
-
-# Raw scale
-df_raw = pd.DataFrame({'x1': x1, 'x2': x2})
-X1 = sm.add_constant(df_raw)
-model1 = sm.OLS(y, X1).fit()
-
-# Scale x2 up by 1000
-df_scaled = df_raw.copy()
-df_scaled['x2'] *= 1000
-X2 = sm.add_constant(df_scaled)
-model2 = sm.OLS(y, X2).fit()
-
-print("🔹 R-squared is same in both:")
-print(f"R² (raw): {model1.rsquared:.4f}")
-print(f"R² (scaled): {model2.rsquared:.4f}")
-
-print("\n🔸 Coefficient Std Errors:")
-print("Raw scale:\n", model1.bse)
-print("Scaled x2:\n", model2.bse)
-
-
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
-
-def calculate_r2_regression(X):
-    """
-    Calculate R^2 for each predictor by regressing it on the other predictors.
-    
-    Parameters:
-    X : numpy array, shape (n_samples, n_features)
-        Design matrix with predictors.
-        
-    Returns:
-    r2_scores : list
-        R^2 values for each predictor.
-    vif_scores : list
-        VIF values for each predictor.
-    """
-    n_features = X.shape[1]
-    r2_scores = []
-    vif_scores = []
-    
-    for j in range(n_features):
-        y = X[:, j]
-        X_other = np.delete(X, j, axis=1)
-        model = LinearRegression()
-        model.fit(X_other, y)
-        y_pred = model.predict(X_other)
-        r2 = r2_score(y, y_pred)
-        r2_scores.append(r2)
-        vif_scores.append(1 / (1 - r2) if r2 < 1 else float('inf'))
-    
-    return r2_scores, vif_scores
-
-def calculate_r2_correlation(X):
-    """
-    Calculate R^2 for standardized predictors using the correlation matrix.
-    
-    Parameters:
-    X : numpy array, shape (n_samples, n_features)
-        Standardized design matrix.
-        
-    Returns:
-    r2_scores : list
-        R^2 values for each predictor.
-    vif_scores : list
-        VIF values for each predictor.
-    """
-    corr_matrix = np.corrcoef(X, rowvar=False)
+if uploaded_file is not None:
+    # Read Excel file
     try:
-        inv_corr_matrix = np.linalg.inv(corr_matrix)
-    except np.linalg.LinAlgError:
-        print("Correlation matrix is singular.")
-        return None, None
-    r2_scores = [1 - 1 / inv_corr_matrix[j, j] for j in range(X.shape[1])]
-    vif_scores = [1 / (1 - r2) if r2 < 1 else float('inf') for r2 in r2_scores]
-    return r2_scores, vif_scores
+        df = pd.read_excel(uploaded_file)
+        st.success("File uploaded successfully!")
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        st.stop()
+        
 
-def calculate_beta_variance(X, y, s2):
-    """
-    Calculate variance of beta_j using: s^2 / [(n-1) var(X_j) (1 - R_j^2)].
-    
-    Parameters:
-    X : numpy array, shape (n_samples, n_features)
-        Design matrix with predictors (no intercept).
-    y : numpy array, shape (n_samples,)
-        Response variable.
-    s2 : float
-        Estimated residual variance (RMSE^2).
-    
-    Returns:
-    var_beta : list
-        Variance of beta_j for each predictor.
-    """
-    n = X.shape[0]
-    r2_scores, _ = calculate_r2_regression(X)
-    var_beta = []
-    
-    for j in range(X.shape[1]):
-        var_xj = np.var(X[:, j], ddof=1)
-        r2_j = r2_scores[j]
-        if r2_j >= 1:
-            var_beta.append(float('inf'))
+
+    # Ensure required columns exist
+    required_columns = ['customer_id', 'name', 'active_flag', 'default_flag', 'cohort_date', 'turnover', 'ead']
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        st.error(f"Missing columns: {missing_cols}")
+        st.stop()
+        # Check for entity_type column
+    has_entity_type = 'entity_type' in df.columns
+    if not has_entity_type:
+        st.warning("No 'entity_type' column found. All data will be treated as a single entity type.")
+        df['entity_type'] = 'Unknown'
+
+    # Convert cohort_date to datetime
+    try:
+        df['cohort_date'] = pd.to_datetime(df['cohort_date'])
+    except:
+        st.warning("Invalid format in 'cohort_date'. Please ensure it's a valid date.")
+
+ 
+  # Create tabs
+    tab1, tab2, tab3 = st.tabs(["Data Quality Summary", "Customer History", "Default History Check"])
+
+
+    with tab1:
+        st.header("Data Quality Summary")
+
+        # Entity type filter
+        entity_types = df['entity_type'].unique().tolist()
+        selected_entities = st.multiselect("Select Entity Type(s)", entity_types, default=entity_types)
+
+        # Filter data based on selected entity types
+        if selected_entities:
+            filtered_df = df[df['entity_type'].isin(selected_entities)]
         else:
-            var_beta_j = s2 / ((n - 1) * var_xj * (1 - r2_j))
-            var_beta.append(var_beta_j)
-    
-    return var_beta
+            filtered_df = df
+            st.warning("No entity types selected. Showing all data.")
 
-# Example usage
-if __name__ == "__main__":
-    # Generate sample data
-    np.random.seed(42)
-    n_samples = 100
-    
-    # Create X1, X2, X3 with correlations
-    X1 = np.random.randn(n_samples)
-    X2 = 0.7 * X1 + np.random.randn(n_samples) * 0.3
-    X3 = 0.5 * X2 + np.random.randn(n_samples) * 0.5
-    y = 2 * X1 + 3 * X2 + 1.5 * X3 + np.random.randn(n_samples) * 0.5  # Response
-    
-    # Design matrices
-    X_raw = np.column_stack((X1, X2, X3))
-    X_std = (X_raw - X_raw.mean(axis=0)) / X_raw.std(axis=0, ddof=1)
-    c1, c2, c3 = 2, 3, 1.5  # Scaling factors
-    X_scaled = np.column_stack((c1 * X1, c2 * X2, c3 * X3))
-    
-    # Add intercept for regression
-    X_raw_with_intercept = np.column_stack((np.ones(n_samples), X_raw))
-    X_scaled_with_intercept = np.column_stack((np.ones(n_samples), X_scaled))
-    
-    # Estimate s^2 (RMSE^2)
-    model = LinearRegression()
-    model.fit(X_raw_with_intercept, y)
-    y_pred = model.predict(X_raw_with_intercept)
-    s2 = np.sum((y - y_pred) ** 2) / (n_samples - X_raw_with_intercept.shape[1])
-    
-    # Calculate R^2 and VIF
-    print("=== Raw (Unscaled) Predictors ===")
-    r2_raw, vif_raw = calculate_r2_regression(X_raw)
-    for j, (r2, vif) in enumerate(zip(r2_raw, vif_raw)):
-        print(f"Predictor X{j+1}: R^2 = {r2:.4f}, VIF = {vif:.4f}")
-    
-    print("\n=== Standardized Predictors ===")
-    r2_std, vif_std = calculate_r2_correlation(X_std)
-    if r2_std:
-        for j, (r2, vif) in enumerate(zip(r2_std, vif_std)):
-            print(f"Predictor X{j+1}: R^2 = {r2:.4f}, VIF = {vif:.4f}")
-    
-    print("\n=== Scaled Predictors (c1=2, c2=3, c3=1.5) ===")
-    r2_scaled, vif_scaled = calculate_r2_regression(X_scaled)
-    for j, (r2, vif) in enumerate(zip(r2_scaled, vif_scaled)):
-        print(f"Predictor X{j+1}: R^2 = {r2:.4f}, VIF = {vif:.4f}")
-    
-    # Calculate var(beta_j)
-    print("\n=== Variance of beta_j (Raw) ===")
-    var_beta_raw = calculate_beta_variance(X_raw, y, s2)
-    for j, var in enumerate(var_beta_raw):
-        print(f"var(beta_{j+1}) = {var:.4f}")
-    
-    print("\n=== Variance of beta_j (Standardized) ===")
-    var_beta_std = calculate_beta_variance(X_std, y, s2)
-    for j, var in enumerate(var_beta_std):
-        print(f"var(beta_{j+1}) = {var:.4f}")
-    
-    print("\n=== Variance of beta_j (Scaled, c1=2, c2=3, c3=1.5) ===")
-    var_beta_scaled = calculate_beta_variance(X_scaled, y, s2)
-    for j, var in enumerate(var_beta_scaled):
-        print(f"var(beta_{j+1}^*) = {var:.4f}")
+        # Data Quality Checks
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Missing Values
+            st.subheader("Missing Values")
+            missing_data = filtered_df.isnull().sum()
+            missing_df = pd.DataFrame({
+                'Column': missing_data.index,
+                'Missing Count': missing_data.values,
+                'Missing %': (missing_data / len(filtered_df) * 100).round(2)
+            })
+            missing_df = missing_df[missing_df['Missing Count'] > 0]
+            if not missing_df.empty:
+                st.dataframe(missing_df)
+            else:
+                st.write("No missing values found.")
+
+            # Duplicates
+            st.subheader("Duplicate Records")
+            duplicates = filtered_df.duplicated(subset=['customer_id', 'cohort_date']).sum()
+            st.write(f"Number of duplicate records: {duplicates}")
+            if duplicates > 0:
+                st.write("Duplicate customer_id and cohort_date combinations found.")
+
+        with col2:
+            # Data Type Issues
+            st.subheader("Data Type Validation")
+            type_issues = []
+            if not filtered_df['customer_id'].apply(lambda x: isinstance(x, (int, str))).all():
+                type_issues.append("Invalid customer_id format (should be string or integer).")
+            if not filtered_df['active_flag'].isin([0, 1, True, False]).all():
+                type_issues.append("Invalid active_flag values (should be 0/1 or True/False).")
+            if not filtered_df['default_flag'].isin([0, 1, True, False]).all():
+                type_issues.append("Invalid default_flag values (should be 0/1 or True/False).")
+            if not filtered_df['turnover'].apply(lambda x: isinstance(x, (int, float))).all():
+                type_issues.append("Invalid turnover values (should be numeric).")
+            if not filtered_df['ead'].apply(lambda x: isinstance(x, (int, float))).all():
+                type_issues.append("Invalid EAD values (should be numeric).")
+
+            if type_issues:
+                for issue in type_issues:
+                    st.write(f"- {issue}")
+            else:
+                st.write("No data type issues found.")
+
+        # Summary Statistics
+        st.subheader("Summary Statistics")
+        st.dataframe(filtered_df.describe(include='all'))
+
+    with tab2:
+        st.header("Customer History")
+
+        # Customer selection
+        customer_id = st.selectbox("Select Customer ID", df['customer_id'].unique())
+        customer_data = df[df['customer_id'] == customer_id]
+
+        # Display customer details
+        st.subheader(f"Details for Customer: {customer_data['name'].iloc[0]} (ID: {customer_id})")
+        st.dataframe(customer_data[['cohort_date', 'active_flag', 'default_flag', 'turnover', 'ead']])
+
+# Visualize turnover (line chart) and EAD (bar chart)
+        if not customer_data.empty:
+            # Line chart for turnover
+            fig_line = px.line(customer_data, x='cohort_date', y='turnover',
+                               title=f"Turnover Over Time for Customer {customer_id}",
+                               labels={'turnover': 'Turnover', 'cohort_date': 'Cohort Date'})
+            st.plotly_chart(fig_line, use_container_width=True)
+
+            # Bar chart for EAD
+            fig_bar = px.bar(customer_data, x='cohort_date', y='ead',
+                             title=f"EAD Over Time for Customer {customer_id}",
+                             labels={'ead': 'EAD', 'cohort_date': 'Cohort Date'})
+            st.plotly_chart(fig_bar, use_container_width=True)
 
 
+            # Active and Default Flag Status
+            st.subheader("Flag Status Over Time")
+            flag_data = customer_data[['cohort_date', 'active_flag', 'default_flag']].melt(
+                id_vars='cohort_date', var_name='Flag', value_name='Status'
+            )
+            fig_flags = px.scatter(flag_data, x='cohort_date', y='Flag', color='Status',
+                                   title="Active and Default Flag Status",
+                                   color_continuous_scale='Viridis')
+            st.plotly_chart(fig_flags, use_container_width=True)
+            
+            
+    with tab3:
+        st.header("Default History Check")
 
+        # Filter data for defaulted customers
+        default_data = df[df['default_flag'] == 1]
+        if default_data.empty:
+            st.warning("No customers with default_flag = 1 found.")
+        else:
+            # Display defaulted customers
+            st.subheader("Customers with Default Flag = 1")
+            st.dataframe(default_data[['customer_id', 'name', 'cohort_date', 'active_flag', 'turnover', 'ead']])
 
+            # Summary of defaults by cohort date
+            st.subheader("Default Count by Cohort Date")
+            default_count = default_data.groupby('cohort_date').size().reset_index(name='Default Count')
+            fig_default_count = px.bar(default_count, x='cohort_date', y='Default Count',
+                                      title="Number of Defaults by Cohort Date",
+                                      labels={'cohort_date': 'Cohort Date', 'Default Count': 'Number of Defaults'})
+            st.plotly_chart(fig_default_count, use_container_width=True)
 
+            # Flag Status Over Time (Stacked Bar Chart)
+            st.subheader("Flag Status Over Time for Defaulted Customers")
+            # Prepare data for stacked bar chart
+            flag_summary = default_data.groupby(['cohort_date', 'active_flag']).size().unstack(fill_value=0).reset_index()
+            flag_summary.columns = ['cohort_date', 'Inactive (0)', 'Active (1)']
+            
+            fig_flags_bar = go.Figure()
+            fig_flags_bar.add_trace(go.Bar(
+                x=flag_summary['cohort_date'],
+                y=flag_summary['Inactive (0)'],
+                name='Inactive (0)',
+                marker_color='red'
+            ))
+            fig_flags_bar.add_trace(go.Bar(
+                x=flag_summary['cohort_date'],
+                y=flag_summary['Active (1)'],
+                name='Active (1)',
+                marker_color='green'
+            ))
+            fig_flags_bar.update_layout(
+                title="Active Flag Status for Defaulted Customers Over Time",
+                xaxis_title="Cohort Date",
+                yaxis_title="Count of Defaulted Customers",
+                barmode='stack',
+                legend=dict(x=0.1, y=1.1, orientation='h')
+            )
+            st.plotly_chart(fig_flags_bar, use_container_width=True)
+
+            # Heatmap for Flag Status
+            st.subheader("Flag Status Heatmap")
+            flag_heatmap_data = default_data.pivot_table(
+                index='cohort_date', 
+                columns='active_flag', 
+                values='customer_id', 
+                aggfunc='count', 
+                fill_value=0
+            ).reset_index()
+            flag_heatmap_data.columns = ['cohort_date', 'Inactive (0)', 'Active (1)']
+            
+            fig_heatmap = go.Figure(data=go.Heatmap(
+                x=flag_heatmap_data['cohort_date'],
+                y=['Active Flag'],
+                z=[flag_heatmap_data['Active (1)'] / (flag_heatmap_data['Active (1)'] + flag_heatmap_data['Inactive (0)'])],
+                colorscale='Viridis',
+                showscale=True,
+                text=[flag_heatmap_data['Active (1)'] / (flag_heatmap_data['Active (1)'] + flag_heatmap_data['Inactive (0)'])],
+                texttemplate="%{text:.2f}",
+                colorbar=dict(title="Proportion of Active (1)")
+            ))
+            fig_heatmap.update_layout(
+                title="Proportion of Active Flag for Defaulted Customers",
+                xaxis_title="Cohort Date",
+                yaxis_title="Flag"
+            )
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+
+            # EAD and Turnover for defaulted customers
+            st.subheader("EAD and Turnover for Defaulted Customers")
+            fig_default_metrics = go.Figure()
+            fig_default_metrics.add_trace(go.Bar(
+                x=default_data['cohort_date'],
+                y=default_data['ead'],
+                name='EAD',
+                marker_color='blue'
+            ))
+            fig_default_metrics.add_trace(go.Scatter(
+                x=default_data['cohort_date'],
+                y=default_data['turnover'],
+                name='Turnover',
+                mode='lines+markers',
+                yaxis='y2',
+                line=dict(color='red')
+            ))
+            fig_default_metrics.update_layout(
+                title="EAD (Bar) and Turnover (Line) for Defaulted Customers",
+                xaxis=dict(title="Cohort Date"),
+                yaxis=dict(title="EAD", titlefont=dict(color='blue'), tickfont=dict(color='blue')),
+                yaxis2=dict(title="Turnover", titlefont=dict(color='red'), tickfont=dict(color='red'), overlaying='y', side='right'),
+                legend=dict(x=0.1, y=1.1, orientation='h')
+            )
+            st.plotly_chart(fig_default_metrics, use_container_width=True)
+else:
+    st.info("Please upload an Excel file to proceed.")
+
+# Footer
+st.markdown("---")
+st.write("Built with Streamlit | Data Dashboard for Customer Analysis")
