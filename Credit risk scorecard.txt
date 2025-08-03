@@ -619,7 +619,370 @@ st.sidebar.download_button(
 )
 
 # 8. Info
-st.info("This dashboard is optimized for large datasets using Parquet and Polars. For privacy, only the first 100 rows are shown in the table. Use the sidebar to filter and download your data.")
+st.info("This dashboard is optimized for large datasets using Parquet and Polars. For privacy, only the first 100 rows are shown in the table. Use the sidebar to filter and download your dat
+a.")
+
+#------------------
+-----------
+import streamlit as st
+import polars as pl
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+import numpy as np
+
+# Page configuration
+st.set_page_config(
+    page_title="Financial Data Quality Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for elegant styling
+st.markdown("""
+<style>
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    div[data-testid="metric-container"] {
+        background-color: #f0f2f6;
+        border: 1px solid #e0e0e0;
+        padding: 10px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# 1. Efficient Data Loading with Caching
+@st.cache_resource(show_spinner=False)
+def load_data():
+    """Load data from parquet file with optimized settings"""
+    with st.spinner('Loading data... This may take a moment for large datasets'):
+        # Read parquet with specific columns if needed for memory optimization
+        df = pl.scan_parquet("financial_data.parquet")
+        
+        # For demo purposes, let's create sample data if file doesn't exist
+        try:
+            df = df.collect()
+        except:
+            # Generate sample data
+            np.random.seed(42)
+            n_rows = 100000  # Reduced for demo
+            
+            df = pl.DataFrame({
+                "gid": [f"GID_{i:07d}" for i in range(n_rows)],
+                "cohort_date": pl.date_range(
+                    datetime(2020, 1, 1), 
+                    datetime(2024, 12, 31), 
+                    interval="1d", 
+                    eager=True
+                ).sample(n_rows, with_replacement=True),
+                "approval_date": pl.date_range(
+                    datetime(2020, 1, 1), 
+                    datetime(2024, 12, 31), 
+                    interval="1d", 
+                    eager=True
+                ).sample(n_rows, with_replacement=True),
+                "financial_statement_date": pl.concat([
+                    pl.date_range(
+                        datetime(2019, 1, 1), 
+                        datetime(2024, 12, 31), 
+                        interval="1d", 
+                        eager=True
+                    ).sample(int(n_rows * 0.95), with_replacement=True),
+                    [None] * int(n_rows * 0.05)
+                ]),
+                "default_flag": np.random.choice([True, False], n_rows, p=[0.15, 0.85]),
+                "active_flag": np.random.choice([True, False], n_rows, p=[0.7, 0.3]),
+                "execution_entity": np.random.choice(["Entity_A", "Entity_B", "Entity_C", "Entity_D", "Entity_E"], n_rows),
+                "entity_type": np.random.choice(["Corporate", "SME", "Retail", "Institution"], n_rows),
+                "turnover": np.random.lognormal(10, 2, n_rows),
+                "total_assets": np.random.lognormal(12, 2, n_rows),
+                "ead": np.random.lognormal(8, 1.5, n_rows),
+                "region": np.random.choice(["North", "South", "East", "West", "Central"], n_rows),
+                "industry": np.random.choice(["Manufacturing", "Services", "Retail", "Technology", "Finance"], n_rows),
+            })
+            
+    return df
+
+# Load data
+df = load_data()
+
+# 2. Sidebar Configuration
+st.sidebar.header("🔍 Data Filters")
+
+# Create tabs in sidebar
+tab1, tab2, tab3 = st.sidebar.tabs(["📅 Date Filters", "🏢 Entity Filters", "💰 Financial Filters"])
+
+with tab1:
+    # Cohort Date Filter
+    cohort_dates = sorted(df["cohort_date"].unique().to_list())
+    cohort_date_range = st.date_input(
+        "Cohort Date Range",
+        value=(cohort_dates[0], cohort_dates[-1]),
+        min_value=cohort_dates[0],
+        max_value=cohort_dates[-1]
+    )
+    
+    # Approval Date Filter
+    approval_dates = sorted(df["approval_date"].unique().to_list())
+    approval_date_range = st.date_input(
+        "Approval Date Range",
+        value=(approval_dates[0], approval_dates[-1]),
+        min_value=approval_dates[0],
+        max_value=approval_dates[-1]
+    )
+
+with tab2:
+    # Entity Type Filter
+    entity_types = ["All"] + sorted(df["entity_type"].unique().to_list())
+    selected_entity_type = st.multiselect(
+        "Entity Type",
+        entity_types[1:],
+        default=entity_types[1:]
+    )
+    
+    # Execution Entity Filter
+    execution_entities = ["All"] + sorted(df["execution_entity"].unique().to_list())
+    selected_execution_entity = st.multiselect(
+        "Execution Entity",
+        execution_entities[1:],
+        default=execution_entities[1:]
+    )
+    
+    # Region Filter
+    regions = ["All"] + sorted(df["region"].unique().to_list())
+    selected_regions = st.multiselect(
+        "Region",
+        regions[1:],
+        default=regions[1:]
+    )
+
+with tab3:
+    # Default Flag Filter
+    default_flag = st.selectbox("Default Flag", ["All", "Default", "Non-Default"])
+    
+    # Active Flag Filter
+    active_flag = st.selectbox("Active Flag", ["All", "Active", "Inactive"])
+    
+    # Turnover Range
+    turnover_min = float(df["turnover"].min())
+    turnover_max = float(df["turnover"].max())
+    turnover_range = st.slider(
+        "Turnover Range (Log Scale)",
+        min_value=np.log10(turnover_min + 1),
+        max_value=np.log10(turnover_max + 1),
+        value=(np.log10(turnover_min + 1), np.log10(turnover_max + 1))
+    )
+    turnover_range = (10**turnover_range[0] - 1, 10**turnover_range[1] - 1)
+    
+    # EAD Range
+    ead_min = float(df["ead"].min())
+    ead_max = float(df["ead"].max())
+    top_n_ead = st.slider("Top N Customers by EAD", 10, 100, 20)
+
+# 3. Apply Filters
+filtered_df = df.filter(
+    (pl.col("cohort_date") >= cohort_date_range[0]) &
+    (pl.col("cohort_date") <= cohort_date_range[1]) &
+    (pl.col("approval_date") >= approval_date_range[0]) &
+    (pl.col("approval_date") <= approval_date_range[1]) &
+    (pl.col("turnover") >= turnover_range[0]) &
+    (pl.col("turnover") <= turnover_range[1])
+)
+
+if selected_entity_type:
+    filtered_df = filtered_df.filter(pl.col("entity_type").is_in(selected_entity_type))
+if selected_execution_entity:
+    filtered_df = filtered_df.filter(pl.col("execution_entity").is_in(selected_execution_entity))
+if selected_regions:
+    filtered_df = filtered_df.filter(pl.col("region").is_in(selected_regions))
+
+if default_flag == "Default":
+    filtered_df = filtered_df.filter(pl.col("default_flag") == True)
+elif default_flag == "Non-Default":
+    filtered_df = filtered_df.filter(pl.col("default_flag") == False)
+
+if active_flag == "Active":
+    filtered_df = filtered_df.filter(pl.col("active_flag") == True)
+elif active_flag == "Inactive":
+    filtered_df = filtered_df.filter(pl.col("active_flag") == False)
+
+# 4. Main Dashboard
+st.title("📊 Financial Data Quality Dashboard")
+st.markdown("---")
+
+# Data Quality Metrics
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+# Calculate metrics
+total_records = filtered_df.height
+missing_fs_date = filtered_df.filter(pl.col("financial_statement_date").is_null()).height
+stale_threshold = datetime.now().date() - timedelta(days=540)  # 18 months
+stale_financials = filtered_df.filter(
+    (pl.col("financial_statement_date").is_not_null()) &
+    (pl.col("financial_statement_date") < stale_threshold)
+).height
+default_rate = (filtered_df.filter(pl.col("default_flag") == True).height / total_records * 100) if total_records > 0 else 0
+active_rate = (filtered_df.filter(pl.col("active_flag") == True).height / total_records * 100) if total_records > 0 else 0
+avg_ead = filtered_df["ead"].mean()
+
+with col1:
+    st.metric("Total Records", f"{total_records:,}")
+with col2:
+    st.metric("Missing FS Date", f"{missing_fs_date:,}", f"{missing_fs_date/total_records*100:.1f}%" if total_records > 0 else "0%")
+with col3:
+    st.metric("Stale Financials", f"{stale_financials:,}", f"{stale_financials/total_records*100:.1f}%" if total_records > 0 else "0%")
+with col4:
+    st.metric("Default Rate", f"{default_rate:.1f}%")
+with col5:
+    st.metric("Active Rate", f"{active_rate:.1f}%")
+with col6:
+    st.metric("Avg EAD", f"${avg_ead:,.0f}")
+
+st.markdown("---")
+
+# Visualization Tabs
+viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(["📈 Time Series", "🥧 Distributions", "🏆 Rankings", "🔍 Data Quality"])
+
+with viz_tab1:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Cohort Analysis Over Time
+        cohort_analysis = (
+            filtered_df.groupby("cohort_date")
+            .agg([
+                pl.count().alias("count"),
+                pl.col("ead").sum().alias("total_ead"),
+                pl.col("default_flag").sum().alias("defaults")
+            ])
+            .sort("cohort_date")
+        )
+        
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=("Customer Count by Cohort", "Default Rate by Cohort"),
+            vertical_spacing=0.15
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=cohort_analysis["cohort_date"],
+                y=cohort_analysis["count"],
+                mode='lines+markers',
+                name='Customer Count',
+                line=dict(color='#1f77b4', width=3),
+                marker=dict(size=6)
+            ),
+            row=1, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=cohort_analysis["cohort_date"],
+                y=(cohort_analysis["defaults"] / cohort_analysis["count"] * 100),
+                mode='lines+markers',
+                name='Default Rate %',
+                line=dict(color='#ff7f0e', width=3),
+                marker=dict(size=6)
+            ),
+            row=2, col=1
+        )
+        
+        fig.update_layout(height=600, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # EAD Trend Over Time
+        ead_trend = (
+            filtered_df.groupby("cohort_date")
+            .agg([
+                pl.col("ead").mean().alias("avg_ead"),
+                pl.col("ead").sum().alias("total_ead")
+            ])
+            .sort("cohort_date")
+        )
+        
+        fig2 = go.Figure()
+        fig2.add_trace(
+            go.Scatter(
+                x=ead_trend["cohort_date"],
+                y=ead_trend["total_ead"],
+                mode='lines+markers',
+                name='Total EAD',
+                line=dict(color='#2ca02c', width=3),
+                fill='tozeroy',
+                fillcolor='rgba(44, 160, 44, 0.2)'
+            )
+        )
+        
+        fig2.update_layout(
+            title="Total EAD Over Time",
+            height=600,
+            yaxis_title="Total EAD ($)"
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+with viz_tab2:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Active vs Inactive Pie Chart
+        active_dist = filtered_df.groupby("active_flag").agg(pl.count().alias("count"))
+        fig3 = px.pie(
+            active_dist.to_pandas(),
+            values='count',
+            names='active_flag',
+            title="Active vs Inactive Distribution",
+            color_discrete_map={True: '#2ca02c', False: '#d62728'}
+        )
+        fig3.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig3, use_container_width=True)
+        
+        # Entity Type Distribution
+        entity_dist = filtered_df.groupby("entity_type").agg(pl.count().alias("count"))
+        fig4 = px.bar(
+            entity_dist.to_pandas(),
+            x='entity_type',
+            y='count',
+            title="Distribution by Entity Type",
+            color='count',
+            color_continuous_scale='Blues'
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+    
+    with col2:
+        # Default vs Non-Default Donut Chart
+        default_dist = filtered_df.groupby("default_flag").agg(pl.count().alias("count"))
+        fig5 = px.pie(
+            default_dist.to_pandas(),
+            values='count',
+            names='default_flag',
+            title="Default vs Non-Default Distribution",
+            hole=0.4,
+            color_discrete_map={True: '#ff7f0e', False: '#1f77b4'}
+        )
+        fig5.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig5, use_container_width=True)
+        
+        # Turnover Distribution
+        fig6 = px.histogram(
+            filtered_df.to_pandas(),
+            x='turnover',
+            nbins=50,
+            title="Turnover Distribution
+
+
 
 
 
