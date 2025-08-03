@@ -254,4 +254,102 @@ else:
 
 # Footer
 st.markdown("---")
-st.write("Built with Streamlit | Data Dashboard for Customer Analysis")
+st.write("Built with Streamlit | Data Dashboard for Customer Analysis")import streamlit as st
+import polars as pl
+import plotly.express as px
+from st_aggrid import AgGrid, GridOptionsBuilder
+
+# --- CONFIG ---
+st.set_page_config(page_title="Customer Data Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+# --- DATA LOADING ---
+@st.cache_resource(show_spinner="Loading data...", max_entries=1)
+def load_data():
+    # Simulate loading a large dataset
+    # Replace with: pl.read_csv("your_file.csv") or pl.read_parquet("your_file.parquet")
+    import numpy as np
+    import random
+    n_rows = 5_000_000
+    n_cols = 500
+    data = {
+        "customer_id": np.arange(n_rows),
+        "age": np.random.randint(18, 80, n_rows),
+        "gender": np.random.choice(["Male", "Female", "Other"], n_rows),
+        "country": np.random.choice(["USA", "UK", "Canada", "India", "Germany"], n_rows),
+        "spend": np.random.exponential(1000, n_rows).round(2),
+        "signup_date": np.random.choice(
+            pd.date_range("2020-01-01", "2024-01-01", freq="D"), n_rows
+        ),
+    }
+    # Add more columns for demonstration
+    for i in range(6, n_cols+1):
+        data[f"feature_{i}"] = np.random.randn(n_rows)
+    df = pl.DataFrame(data)
+    return df
+
+df = load_data()
+
+# --- SIDEBAR FILTERS ---
+st.sidebar.header("Filter Customers")
+country = st.sidebar.multiselect("Country", options=df["country"].unique().to_list(), default=None)
+gender = st.sidebar.multiselect("Gender", options=df["gender"].unique().to_list(), default=None)
+age_range = st.sidebar.slider("Age Range", int(df["age"].min()), int(df["age"].max()), (18, 80))
+spend_range = st.sidebar.slider("Spend Range", float(df["spend"].min()), float(df["spend"].max()), (0.0, 5000.0))
+
+# --- FILTERING ---
+filtered_df = df
+if country:
+    filtered_df = filtered_df.filter(pl.col("country").is_in(country))
+if gender:
+    filtered_df = filtered_df.filter(pl.col("gender").is_in(gender))
+filtered_df = filtered_df.filter(
+    (pl.col("age") >= age_range[0]) & (pl.col("age") <= age_range[1]) &
+    (pl.col("spend") >= spend_range[0]) & (pl.col("spend") <= spend_range[1])
+)
+
+# --- SUMMARY METRICS ---
+st.title("📊 Customer Data Dashboard")
+st.markdown("Elegant, fast dashboard for large-scale customer analytics.")
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Customers", f"{filtered_df.height:,}")
+col2.metric("Avg. Age", f"{filtered_df['age'].mean():.1f}")
+col3.metric("Avg. Spend", f"${filtered_df['spend'].mean():,.2f}")
+col4.metric("Countries", f"{filtered_df['country'].n_unique()}")
+
+# --- CHARTS ---
+st.subheader("Customer Demographics & Spend")
+
+c1, c2 = st.columns(2)
+with c1:
+    fig1 = px.histogram(filtered_df.to_pandas(), x="age", nbins=40, color="gender", title="Age Distribution")
+    st.plotly_chart(fig1, use_container_width=True)
+with c2:
+    fig2 = px.box(filtered_df.to_pandas(), x="country", y="spend", color="country", title="Spend by Country")
+    st.plotly_chart(fig2, use_container_width=True)
+
+st.subheader("Customer Table (first 1000 rows)")
+# --- AGGRID TABLE ---
+gb = GridOptionsBuilder.from_dataframe(filtered_df.head(1000).to_pandas())
+gb.configure_pagination()
+gb.configure_side_bar()
+gb.configure_default_column(groupable=True, value=True, enableRowGroup=True, aggFunc='sum', editable=False)
+gridOptions = gb.build()
+AgGrid(filtered_df.head(1000).to_pandas(), gridOptions=gridOptions, height=400, theme="streamlit")
+
+# --- SUMMARY ---
+st.subheader("Summary")
+st.write(f"Showing **{filtered_df.height:,}** customers after filtering. Use the sidebar to refine your analysis.")
+
+# --- FOOTER ---
+st.markdown(
+    """
+    <style>
+    footer {visibility: hidden;}
+    .css-1v0mbdj {background: #f8f9fa;}
+    </style>
+    """, unsafe_allow_html=True
+)
+
+
+
