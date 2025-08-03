@@ -452,6 +452,174 @@ st.sidebar.download_button(
     mime="text/csv"
 )
 
+#--------------
+#------New code 2
+--------
+
+import streamlit as st
+import polars as pl
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+
+# 1. Load Data Efficiently from Parquet
+@st.cache_resource(show_spinner="Loading data...", max_entries=1)
+def load_data():
+    # Adjust dtypes for speed/memory
+    dtypes = {
+        "gid": pl.Utf8,
+        "cohort_date": pl.Date,
+        "approval_date": pl.Date,
+        "default_flag": pl.Boolean,
+        "active_flag": pl.Boolean,
+        "execution_entity": pl.Utf8,
+        "entity_type": pl.Utf8,
+        "financial_statement_date": pl.Date,
+        "turnover": pl.Float64,
+        "total_assets": pl.Float64,
+        # Add more columns as needed
+    }
+    df = pl.read_parquet("financials_data.parquet")
+    return df
+
+df = load_data()
+
+# 2. Sidebar Filters
+st.sidebar.header("Filter Data")
+
+# Cohort Date
+cohort_dates = df["cohort_date"].unique().sort()
+selected_cohort = st.sidebar.multiselect("Cohort Date", cohort_dates, default=cohort_dates[:3])
+
+# Approval Date
+approval_dates = df["approval_date"].unique().sort()
+selected_approval = st.sidebar.multiselect("Approval Date", approval_dates, default=approval_dates[:3])
+
+# Default Flag
+default_flag = st.sidebar.selectbox("Default Flag", options=["All", True, False], index=0)
+
+# Active Flag
+active_flag = st.sidebar.selectbox("Active Flag", options=["All", True, False], index=0)
+
+# Entity Type
+entity_types = df["entity_type"].unique().to_list()
+selected_entity_type = st.sidebar.multiselect("Entity Type", entity_types, default=entity_types)
+
+# Execution Entity
+execution_entities = df["execution_entity"].unique().to_list()
+selected_execution_entity = st.sidebar.multiselect("Execution Entity", execution_entities, default=execution_entities)
+
+# Turnover Range
+turnover_min, turnover_max = float(df["turnover"].min()), float(df["turnover"].max())
+turnover_range = st.sidebar.slider("Turnover Range", min_value=turnover_min, max_value=turnover_max, value=(turnover_min, turnover_max))
+
+# 3. Apply Filters
+filtered_df = df
+
+if selected_cohort:
+    filtered_df = filtered_df.filter(pl.col("cohort_date").is_in(selected_cohort))
+if selected_approval:
+    filtered_df = filtered_df.filter(pl.col("approval_date").is_in(selected_approval))
+if default_flag != "All":
+    filtered_df = filtered_df.filter(pl.col("default_flag") == default_flag)
+if active_flag != "All":
+    filtered_df = filtered_df.filter(pl.col("active_flag") == active_flag)
+if selected_entity_type:
+    filtered_df = filtered_df.filter(pl.col("entity_type").is_in(selected_entity_type))
+if selected_execution_entity:
+    filtered_df = filtered_df.filter(pl.col("execution_entity").is_in(selected_execution_entity))
+filtered_df = filtered_df.filter(
+    (pl.col("turnover") >= turnover_range[0]) &
+    (pl.col("turnover") <= turnover_range[1])
+)
+
+# 4. Data Quality Checks
+st.title("Financials Data Quality Dashboard")
+
+st.markdown("### Data Quality Summary")
+
+# Missing financial_statement_date
+missing_fs = filtered_df.filter(pl.col("financial_statement_date").is_null()).height
+
+# Stale financials: older than 18 months from today
+today = datetime.today().date()
+stale_threshold = today - timedelta(days=18*30)
+stale_fs = filtered_df.filter(
+    (pl.col("financial_statement_date").is_not_null()) &
+    (pl.col("financial_statement_date") < stale_threshold)
+).height
+
+# Duplicates by gid + cohort_date
+duplicates = (
+    filtered_df
+    .groupby(["gid", "cohort_date"])
+    .agg(pl.count().alias("count"))
+    .filter(pl.col("count") > 1)
+    .height
+)
+
+# Missing turnover or total_assets
+missing_turnover = filtered_df.filter(pl.col("turnover").is_null()).height
+missing_assets = filtered_df.filter(pl.col("total_assets").is_null()).height
+
+# Show summary
+st.write(f"**Total Records (after filter):** {filtered_df.height:,}")
+st.write(f"**Missing Financial Statement Date:** {missing_fs:,}")
+st.write(f"**Stale Financials (>18 months old):** {stale_fs:,}")
+st.write(f"**Duplicate GID + Cohort Date:** {duplicates:,}")
+st.write(f"**Missing Turnover:** {missing_turnover:,}")
+st.write(f"**Missing Total Assets:** {missing_assets:,}")
+
+# 5. Elegant Plots
+
+# Pie: Default vs Non-default
+st.markdown("#### Default vs Non-default")
+default_counts = filtered_df.groupby("default_flag").agg(pl.count().alias("count"))
+fig1 = px.pie(default_counts.to_pandas(), names="default_flag", values="count", color_discrete_sequence=px.colors.sequential.RdBu)
+st.plotly_chart(fig1, use_container_width=True)
+
+# Bar: Active vs Inactive
+st.markdown("#### Active vs Inactive")
+active_counts = filtered_df.groupby("active_flag").agg(pl.count().alias("count"))
+fig2 = px.bar(active_counts.to_pandas(), x="active_flag", y="count", color="count", color_continuous_scale="Blues")
+st.plotly_chart(fig2, use_container_width=True)
+
+# Line: Number of records by Cohort Date
+st.markdown("#### Records by Cohort Date")
+cohort_counts = filtered_df.groupby("cohort_date").agg(pl.count().alias("count")).sort("cohort_date")
+fig3 = px.line(cohort_counts.to_pandas(), x="cohort_date", y="count", markers=True, line_shape="spline", color_discrete_sequence=["#00CC96"])
+st.plotly_chart(fig3, use_container_width=True)
+
+# Bar: Top 10 Execution Entities by Count
+st.markdown("#### Top 10 Execution Entities")
+entity_counts = (
+    filtered_df.groupby("execution_entity")
+    .agg(pl.count().alias("count"))
+    .sort("count", descending=True)
+    .head(10)
+)
+fig4 = px.bar(entity_counts.to_pandas(), x="execution_entity", y="count", color="count", color_continuous_scale="Viridis")
+st.plotly_chart(fig4, use_container_width=True)
+
+# Histogram: Turnover Distribution
+st.markdown("#### Turnover Distribution")
+fig5 = px.histogram(filtered_df.to_pandas(), x="turnover", nbins=50, color_discrete_sequence=["#636EFA"])
+st.plotly_chart(fig5, use_container_width=True)
+
+# 6. Show Sample Data Table (restricted)
+st.markdown("### Sample Data (First 100 Rows)")
+st.dataframe(filtered_df.head(100).to_pandas())
+
+# 7. Download Option
+st.sidebar.download_button(
+    label="Download Filtered Data (CSV)",
+    data=filtered_df.to_pandas().to_csv(index=False),
+    file_name="filtered_financials_data.csv",
+    mime="text/csv"
+)
+
+# 8. Info
+st.info("This dashboard is optimized for large datasets using Parquet and Polars. For privacy, only the first 100 rows are shown in the table. Use the sidebar to filter and download your data.")
 
 
 
