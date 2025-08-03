@@ -982,6 +982,330 @@ with viz_tab2:
             nbins=50,
             title="Turnover Distribution
 
+            title="Turnover Distribution",
+            color_discrete_sequence=['#9467bd']
+        )
+        fig6.update_xaxis(type="log")
+        fig6.update_layout(bargap=0.1)
+        st.plotly_chart(fig6, use_container_width=True)
+
+with viz_tab3:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Top N Customers by EAD
+        top_customers = (
+            filtered_df.sort("ead", descending=True)
+            .head(top_n_ead)
+            .select(["gid", "ead", "entity_type", "default_flag"])
+        )
+        
+        fig7 = px.bar(
+            top_customers.to_pandas(),
+            x='gid',
+            y='ead',
+            title=f"Top {top_n_ead} Customers by EAD",
+            color='entity_type',
+            color_discrete_sequence=px.colors.qualitative.Set3,
+            hover_data=['default_flag']
+        )
+        fig7.update_xaxis(tickangle=-45)
+        fig7.update_layout(height=500)
+        st.plotly_chart(fig7, use_container_width=True)
+    
+    with col2:
+        # Execution Entity Performance
+        exec_performance = (
+            filtered_df.groupby("execution_entity")
+            .agg([
+                pl.count().alias("count"),
+                pl.col("ead").sum().alias("total_ead"),
+                pl.col("default_flag").sum().alias("defaults")
+            ])
+            .with_columns(
+                (pl.col("defaults") / pl.col("count") * 100).alias("default_rate")
+            )
+            .sort("total_ead", descending=True)
+        )
+        
+        fig8 = go.Figure()
+        fig8.add_trace(
+            go.Bar(
+                x=exec_performance["execution_entity"],
+                y=exec_performance["total_ead"],
+                name="Total EAD",
+                marker_color='lightblue',
+                yaxis='y'
+            )
+        )
+        fig8.add_trace(
+            go.Scatter(
+                x=exec_performance["execution_entity"],
+                y=exec_performance["default_rate"],
+                name="Default Rate %",
+                mode='lines+markers',
+                marker_color='red',
+                yaxis='y2',
+                line=dict(width=3)
+            )
+        )
+        
+        fig8.update_layout(
+            title="Execution Entity Performance",
+            yaxis=dict(title="Total EAD ($)", side="left"),
+            yaxis2=dict(title="Default Rate (%)", overlaying="y", side="right"),
+            height=500,
+            hovermode='x unified'
+        )
+        st.plotly_chart(fig8, use_container_width=True)
+
+with viz_tab4:
+    # Data Quality Heatmap
+    st.subheader("Data Quality Heatmap by Entity")
+    
+    # Calculate data quality metrics by entity
+    dq_metrics = (
+        filtered_df.groupby("execution_entity")
+        .agg([
+            pl.col("financial_statement_date").is_null().sum().alias("missing_fs_date"),
+            pl.col("turnover").is_null().sum().alias("missing_turnover"),
+            pl.col("total_assets").is_null().sum().alias("missing_assets"),
+            pl.count().alias("total_records")
+        ])
+        .with_columns([
+            (pl.col("missing_fs_date") / pl.col("total_records") * 100).alias("missing_fs_date_pct"),
+            (pl.col("missing_turnover") / pl.col("total_records") * 100).alias("missing_turnover_pct"),
+            (pl.col("missing_assets") / pl.col("total_records") * 100).alias("missing_assets_pct")
+        ])
+    )
+    
+    # Create heatmap data
+    heatmap_data = dq_metrics.select([
+        "execution_entity",
+        "missing_fs_date_pct",
+        "missing_turnover_pct",
+        "missing_assets_pct"
+    ]).to_pandas()
+    
+    heatmap_values = heatmap_data.set_index('execution_entity').T
+    
+    fig9 = px.imshow(
+        heatmap_values,
+        labels=dict(x="Execution Entity", y="Data Quality Metric", color="Missing %"),
+        y=['Missing FS Date', 'Missing Turnover', 'Missing Assets'],
+        color_continuous_scale='Reds',
+        aspect="auto"
+    )
+    fig9.update_layout(height=400)
+    st.plotly_chart(fig9, use_container_width=True)
+    
+    # Stale Financial Analysis
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Calculate age of financial statements
+        current_date = datetime.now().date()
+        fs_age_analysis = (
+            filtered_df.filter(pl.col("financial_statement_date").is_not_null())
+            .with_columns(
+                ((pl.lit(current_date) - pl.col("financial_statement_date")).dt.total_days() / 30).alias("months_old")
+            )
+            .with_columns(
+                pl.when(pl.col("months_old") <= 6).then(pl.lit("0-6 months"))
+                .when(pl.col("months_old") <= 12).then(pl.lit("6-12 months"))
+                .when(pl.col("months_old") <= 18).then(pl.lit("12-18 months"))
+                .when(pl.col("months_old") <= 24).then(pl.lit("18-24 months"))
+                .otherwise(pl.lit(">24 months"))
+                .alias("age_category")
+            )
+            .groupby("age_category")
+            .agg(pl.count().alias("count"))
+        )
+        
+        # Define order for categories
+        category_order = ["0-6 months", "6-12 months", "12-18 months", "18-24 months", ">24 months"]
+        fs_age_df = fs_age_analysis.to_pandas()
+        fs_age_df['age_category'] = pd.Categorical(fs_age_df['age_category'], categories=category_order, ordered=True)
+        fs_age_df = fs_age_df.sort_values('age_category')
+        
+        fig10 = px.bar(
+            fs_age_df,
+            x='age_category',
+            y='count',
+            title="Financial Statement Age Distribution",
+            color='count',
+            color_continuous_scale='Viridis'
+        )
+        st.plotly_chart(fig10, use_container_width=True)
+    
+    with col2:
+        # Data Completeness by Region
+        completeness_by_region = (
+            filtered_df.groupby("region")
+            .agg([
+                pl.count().alias("total"),
+                pl.col("financial_statement_date").is_not_null().sum().alias("has_fs_date"),
+                pl.col("turnover").is_not_null().sum().alias("has_turnover"),
+                pl.col("total_assets").is_not_null().sum().alias("has_assets")
+            ])
+            .with_columns(
+                ((pl.col("has_fs_date") + pl.col("has_turnover") + pl.col("has_assets")) / (pl.col("total") * 3) * 100).alias("completeness_score")
+            )
+        )
+        
+        fig11 = px.bar(
+            completeness_by_region.to_pandas(),
+            x='region',
+            y='completeness_score',
+            title="Data Completeness Score by Region",
+            color='completeness_score',
+            color_continuous_scale='RdYlGn',
+            range_color=[0, 100]
+        )
+        fig11.update_yaxis(range=[0, 100])
+        st.plotly_chart(fig11, use_container_width=True)
+
+# 5. Data Sample Section
+st.markdown("---")
+st.subheader("📋 Data Sample")
+
+# Sample size selector
+sample_size = st.slider("Sample Size", min_value=10, max_value=1000, value=100, step=10)
+
+# Display options
+col1, col2, col3 = st.columns(3)
+with col1:
+    show_missing = st.checkbox("Show only records with missing data", value=False)
+with col2:
+    show_stale = st.checkbox("Show only stale financials", value=False)
+with col3:
+    show_defaults = st.checkbox("Show only defaults", value=False)
+
+# Apply sample filters
+sample_df = filtered_df
+
+if show_missing:
+    sample_df = sample_df.filter(
+        pl.col("financial_statement_date").is_null() |
+        pl.col("turnover").is_null() |
+        pl.col("total_assets").is_null()
+    )
+
+if show_stale:
+    sample_df = sample_df.filter(
+        (pl.col("financial_statement_date").is_not_null()) &
+        (pl.col("financial_statement_date") < stale_threshold)
+    )
+
+if show_defaults:
+    sample_df = sample_df.filter(pl.col("default_flag") == True)
+
+# Display sample
+display_columns = [
+    "gid", "cohort_date", "approval_date", "financial_statement_date",
+    "default_flag", "active_flag", "execution_entity", "entity_type",
+    "turnover", "total_assets", "ead", "region"
+]
+
+sample_display = sample_df.select(display_columns).head(sample_size).to_pandas()
+
+# Format numeric columns
+numeric_cols = ['turnover', 'total_assets', 'ead']
+for col in numeric_cols:
+    sample_display[col] = sample_display[col].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+
+st.dataframe(
+    sample_display,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "gid": st.column_config.TextColumn("Group ID"),
+        "cohort_date": st.column_config.DateColumn("Cohort Date"),
+        "approval_date": st.column_config.DateColumn("Approval Date"),
+        "financial_statement_date": st.column_config.DateColumn("FS Date"),
+        "default_flag": st.column_config.CheckboxColumn("Default"),
+        "active_flag": st.column_config.CheckboxColumn("Active"),
+        "execution_entity": st.column_config.TextColumn("Exec Entity"),
+        "entity_type": st.column_config.TextColumn("Entity Type"),
+        "turnover": st.column_config.TextColumn("Turnover"),
+        "total_assets": st.column_config.TextColumn("Total Assets"),
+        "ead": st.column_config.TextColumn("EAD"),
+        "region": st.column_config.TextColumn("Region")
+    }
+)
+
+# 6. Export Section
+st.markdown("---")
+st.subheader("📥 Export Options")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    # Export filtered data
+    csv_data = filtered_df.to_pandas().to_csv(index=False)
+    st.download_button(
+        label="📊 Download Filtered Data (CSV)",
+        data=csv_data,
+        file_name=f"filtered_financial_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+with col2:
+    # Export data quality report
+    dq_report = f"""
+    Data Quality Report
+    Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    
+    Total Records: {total_records:,}
+    Missing Financial Statement Dates: {missing_fs_date:,} ({missing_fs_date/total_records*100:.2f}%)
+    Stale Financials (>18 months): {stale_financials:,} ({stale_financials/total_records*100:.2f}%)
+    Default Rate: {default_rate:.2f}%
+    Active Rate: {active_rate:.2f}%
+    Average EAD: ${avg_ead:,.2f}
+    
+    Filters Applied:
+    - Cohort Date: {cohort_date_range[0]} to {cohort_date_range[1]}
+    - Approval Date: {approval_date_range[0]} to {approval_date_range[1]}
+    - Turnover Range: ${turnover_range[0]:,.2f} to ${turnover_range[1]:,.2f}
+    - Entity Types: {', '.join(selected_entity_type) if selected_entity_type else 'All'}
+    - Execution Entities: {', '.join(selected_execution_entity) if selected_execution_entity else 'All'}
+    - Regions: {', '.join(selected_regions) if selected_regions else 'All'}
+    - Default Flag: {default_flag}
+    - Active Flag: {active_flag}
+    """
+    
+    st.download_button(
+        label="📄 Download DQ Report (TXT)",
+        data=dq_report,
+        file_name=f"dq_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+        mime="text/plain"
+    )
+
+with col3:
+    # Export sample data
+    sample_csv = sample_display.to_csv(index=False)
+    st.download_button(
+        label="📋 Download Sample Data (CSV)",
+        data=sample_csv,
+        file_name=f"sample_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+# 7. Footer
+st.markdown("---")
+st.info("""
+    💡 **Tips for optimal performance:**
+    - Use date range filters to limit data volume
+    - Apply entity filters to focus on specific segments
+    - For large exports, consider using the filtered data option
+    - Data is loaded from parquet files for maximum speed
+""")
+
+# Add refresh button
+if st.button("🔄 Refresh Dashboard"):
+    st.cache_resource.clear()
+    st.rerun()
+
 
 
 
