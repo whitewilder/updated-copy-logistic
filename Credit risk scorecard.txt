@@ -351,5 +351,109 @@ st.markdown(
     """, unsafe_allow_html=True
 )
 
+#-------------------
+#----------New---------
+#----------------------
+
+import streamlit as st
+import polars as pl
+import plotly.express as px
+import plotly.graph_objects as go
+
+# 1. Load Data Efficiently
+@st.cache_resource(show_spinner="Loading data...", max_entries=1)
+def load_data():
+    # Adjust dtypes for speed/memory
+    dtypes = {
+        "customer_id": pl.Utf8,
+        "cohort_date": pl.Date,
+        "turnover": pl.Float64,
+        "active_flag": pl.Boolean,
+        "ead": pl.Float64,
+        # Add more columns as needed
+    }
+    df = pl.read_csv("customer_data.csv", dtypes=dtypes, parse_dates=True)
+    return df
+
+df = load_data()
+
+# 2. Sidebar Filters
+st.sidebar.header("Filter Data")
+cohort_dates = df["cohort_date"].unique().sort()
+selected_cohort = st.sidebar.multiselect("Cohort Date", cohort_dates, default=cohort_dates[:3])
+
+turnover_min, turnover_max = float(df["turnover"].min()), float(df["turnover"].max())
+turnover_range = st.sidebar.slider("Turnover Range", min_value=turnover_min, max_value=turnover_max, value=(turnover_min, turnover_max))
+
+active_flag = st.sidebar.selectbox("Active Flag", options=["All", True, False], index=0)
+
+top_n = st.sidebar.slider("Top N Customers by EAD", min_value=10, max_value=100, value=20)
+
+# Optional: Add more filters (e.g., region, segment)
+# region_list = df["region"].unique().to_list()
+# selected_region = st.sidebar.multiselect("Region", region_list, default=region_list)
+
+# 3. Apply Filters
+filtered_df = df.filter(
+    (pl.col("cohort_date").is_in(selected_cohort)) &
+    (pl.col("turnover") >= turnover_range[0]) &
+    (pl.col("turnover") <= turnover_range[1])
+)
+if active_flag != "All":
+    filtered_df = filtered_df.filter(pl.col("active_flag") == active_flag)
+
+# 4. Summarize Data
+st.title("Customer Data Dashboard")
+st.markdown("### Data Summary")
+st.write(f"**Total Customers:** {filtered_df['customer_id'].n_unique()}")
+st.write(f"**Total EAD:** {filtered_df['ead'].sum():,.2f}")
+st.write(f"**Average Turnover:** {filtered_df['turnover'].mean():,.2f}")
+
+# 5. Elegant Plots
+
+# Cohort Date Distribution
+st.markdown("#### Customers by Cohort Date")
+cohort_counts = filtered_df.groupby("cohort_date").agg(pl.count("customer_id").alias("count")).sort("cohort_date")
+fig1 = px.bar(cohort_counts.to_pandas(), x="cohort_date", y="count", color="count", color_continuous_scale="Blues")
+st.plotly_chart(fig1, use_container_width=True)
+
+# Turnover Distribution
+st.markdown("#### Turnover Distribution")
+fig2 = px.histogram(filtered_df.to_pandas(), x="turnover", nbins=50, color_discrete_sequence=["#636EFA"])
+st.plotly_chart(fig2, use_container_width=True)
+
+# Active vs Inactive Pie Chart
+st.markdown("#### Active vs Inactive Customers")
+active_counts = filtered_df.groupby("active_flag").agg(pl.count("customer_id").alias("count"))
+fig3 = px.pie(active_counts.to_pandas(), names="active_flag", values="count", color_discrete_sequence=px.colors.sequential.RdBu)
+st.plotly_chart(fig3, use_container_width=True)
+
+# Top N Customers by EAD
+st.markdown(f"#### Top {top_n} Customers by EAD")
+top_customers = filtered_df.sort("ead", descending=True).head(top_n)
+fig4 = px.bar(top_customers.to_pandas(), x="customer_id", y="ead", color="ead", color_continuous_scale="Viridis")
+st.plotly_chart(fig4, use_container_width=True)
+
+# EAD Over Time (Line Chart)
+st.markdown("#### EAD Over Time by Cohort")
+ead_time = filtered_df.groupby("cohort_date").agg(pl.sum("ead").alias("total_ead")).sort("cohort_date")
+fig5 = px.line(ead_time.to_pandas(), x="cohort_date", y="total_ead", markers=True, line_shape="spline", color_discrete_sequence=["#00CC96"])
+st.plotly_chart(fig5, use_container_width=True)
+
+# 6. Show Data Table (optional)
+with st.expander("Show Filtered Data Table"):
+    st.dataframe(filtered_df.head(100).to_pandas())
+
+# 7. Download Option
+st.sidebar.download_button(
+    label="Download Filtered Data (CSV)",
+    data=filtered_df.to_pandas().to_csv(index=False),
+    file_name="filtered_customer_data.csv",
+    mime="text/csv"
+)
+
+
+
+
 
 
