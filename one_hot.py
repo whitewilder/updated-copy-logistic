@@ -819,4 +819,216 @@ st.markdown("---")
 st.markdown("Built with Streamlit | Advanced Logistic Regression Dashboard v2.0")
 
 
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import random
+
+# Set random seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+def create_dummy_data(n_samples=10000, n_features=10, train_test_split=0.7):
+    """
+    Create dummy training and testing dataframes with all required columns
+    """
+    
+    # Define regions and ratings
+    regions = ['North', 'South', 'East', 'West', 'Central']
+    ratings = ['AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC']
+    
+    # Generate date range for cohort_date (last 12 months)
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    
+    # Create feature names
+    feature_names = [f'feature_{i+1}' for i in range(n_features)]
+    
+    # Generate base features with some correlation structure
+    # Create a correlation matrix
+    correlation_matrix = np.random.rand(n_features, n_features)
+    correlation_matrix = (correlation_matrix + correlation_matrix.T) / 2
+    np.fill_diagonal(correlation_matrix, 1)
+    
+    # Generate correlated features
+    mean = np.zeros(n_features)
+    features = np.random.multivariate_normal(mean, correlation_matrix, n_samples)
+    
+    # Create base probability influenced by features
+    # Use first 3 features as main drivers
+    logits = (
+        0.5 * features[:, 0] + 
+        0.3 * features[:, 1] - 
+        0.4 * features[:, 2] + 
+        0.2 * features[:, 3] +
+        np.random.normal(0, 0.5, n_samples)
+    )
+    
+    # Convert to probabilities
+    probabilities = 1 / (1 + np.exp(-logits))
+    
+    # Create target variable (binary)
+    target = (probabilities + np.random.normal(0, 0.1, n_samples) > 0.5).astype(int)
+    
+    # Create DataFrame
+    df = pd.DataFrame(features, columns=feature_names)
+    
+    # Add target variable
+    df['target'] = target
+    
+    # Add region (with some correlation to features)
+    region_probabilities = np.abs(features[:, 0]) / np.abs(features[:, 0]).max()
+    df['region'] = np.random.choice(regions, size=n_samples, p=[0.2, 0.2, 0.2, 0.2, 0.2])
+    
+    # Add cohort_date
+    days_range = (end_date - start_date).days
+    random_days = np.random.randint(0, days_range, n_samples)
+    df['cohort_date'] = [start_date + timedelta(days=int(d)) for d in random_days]
+    
+    # Create model scores (correlated with true probability)
+    model_scores = probabilities + np.random.normal(0, 0.05, n_samples)
+    model_scores = np.clip(model_scores, 0, 1)
+    
+    # Convert scores to ratings
+    def score_to_rating(score):
+        if score > 0.9:
+            return 'AAA'
+        elif score > 0.8:
+            return 'AA'
+        elif score > 0.7:
+            return 'A'
+        elif score > 0.6:
+            return 'BBB'
+        elif score > 0.5:
+            return 'BB'
+        elif score > 0.4:
+            return 'B'
+        else:
+            return 'CCC'
+    
+    df['model_rating'] = [score_to_rating(s) for s in model_scores]
+    
+    # Create final_rating (similar to model_rating but with some noise)
+    final_scores = model_scores + np.random.normal(0, 0.1, n_samples)
+    final_scores = np.clip(final_scores, 0, 1)
+    df['final_rating'] = [score_to_rating(s) for s in final_scores]
+    
+    # Add some additional realistic columns
+    df['customer_id'] = [f'CUST_{i:06d}' for i in range(n_samples)]
+    df['account_age_months'] = np.random.randint(1, 120, n_samples)
+    df['transaction_count'] = np.random.poisson(50, n_samples)
+    df['avg_transaction_amount'] = np.random.lognormal(4, 1.5, n_samples)
+    
+    # Split into train and test
+    split_idx = int(n_samples * train_test_split)
+    
+    # Shuffle the dataframe
+    df = df.sample(frac=1).reset_index(drop=True)
+    
+    train_df = df.iloc[:split_idx].copy()
+    test_df = df.iloc[split_idx:].copy()
+    
+    # Ensure test data has more recent dates (for realistic time-based validation)
+    test_df['cohort_date'] = test_df['cohort_date'] + timedelta(days=30)
+    
+    return train_df, test_df
+
+def save_dummy_data_to_parquet():
+    """
+    Generate and save dummy data to parquet files
+    """
+    print("Generating dummy data...")
+    train_df, test_df = create_dummy_data(
+        n_samples=10000,
+        n_features=10,
+        train_test_split=0.7
+    )
+    
+    # Save to parquet files
+    train_df.to_parquet('train_data_dummy.parquet', index=False)
+    test_df.to_parquet('test_data_dummy.parquet', index=False)
+    
+    print(f"Training data shape: {train_df.shape}")
+    print(f"Testing data shape: {test_df.shape}")
+    print("\nTraining data columns:")
+    print(train_df.columns.tolist())
+    print("\nData types:")
+    print(train_df.dtypes)
+    print("\nFirst few rows of training data:")
+    print(train_df.head())
+    print("\nTarget distribution in training data:")
+    print(train_df['target'].value_counts(normalize=True))
+    print("\nRegion distribution in training data:")
+    print(train_df['region'].value_counts())
+    print("\nRating distribution in training data:")
+    print(train_df['model_rating'].value_counts())
+    
+    return train_df, test_df
+
+# Generate and save the dummy data
+if __name__ == "__main__":
+    train_df, test_df = save_dummy_data_to_parquet()
+    
+    # Create a sample code to test specific scenarios
+    print("\n" + "="*50)
+    print("TESTING SCENARIOS")
+    print("="*50)
+    
+    # Scenario 1: Check rating migration
+    print("\n1. Rating Migration Matrix Preview:")
+    migration = pd.crosstab(test_df['final_rating'], test_df['model_rating'])
+    print(migration)
+    
+    # Scenario 2: Regional distribution
+    print("\n2. Regional Distribution:")
+    print(test_df.groupby('region')['target'].agg(['count', 'mean']))
+    
+    # Scenario 3: Time-based distribution
+    print("\n3. Monthly Distribution:")
+    test_df['month'] = pd.to_datetime(test_df['cohort_date']).dt.to_period('M')
+    print(test_df.groupby('month')['target'].agg(['count', 'mean']))
+    
+    # Create a smaller sample file for quick testing
+    train_sample = train_df.sample(n=1000, random_state=42)
+    test_sample = test_df.sample(n=300, random_state=42)
+    
+    train_sample.to_parquet('train_data_sample.parquet', index=False)
+    test_sample.to_parquet('test_data_sample.parquet', index=False)
+    
+    print("\n" + "="*50)
+    print("FILES CREATED:")
+    print("="*50)
+    print("1. train_data_dummy.parquet (7,000 rows)")
+    print("2. test_data_dummy.parquet (3,000 rows)")
+    print("3. train_data_sample.parquet (1,000 rows) - for quick testing")
+    print("4. test_data_sample.parquet (300 rows) - for quick testing")
+    
+    # Create a data dictionary
+    data_dict = {
+        'Column': ['target', 'feature_1 to feature_10', 'region', 'cohort_date', 
+                   'model_rating', 'final_rating', 'customer_id', 'account_age_months',
+                   'transaction_count', 'avg_transaction_amount'],
+        'Description': [
+            'Binary target variable (0 or 1)',
+            'Numerical features for model training',
+            'Geographic region (North, South, East, West, Central)',
+            'Date when the rating was generated',
+            'Rating assigned by the model (AAA to CCC)',
+            'Final rating after review (AAA to CCC)',
+            'Unique customer identifier',
+            'Age of account in months',
+            'Number of transactions',
+            'Average transaction amount'
+        ],
+        'Type': ['Binary', 'Numeric', 'Categorical', 'Datetime', 
+                 'Ordinal', 'Ordinal', 'String', 'Integer',
+                 'Integer', 'Numeric']
+    }
+    
+    data_dict_df = pd.DataFrame(data_dict)
+    print("\n" + "="*50)
+    print("DATA DICTIONARY:")
+    print("="*50)
+    print(data_dict_df.to_string(index=False))
+
 
