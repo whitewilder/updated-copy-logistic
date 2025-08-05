@@ -1,0 +1,1087 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from scipy import stats
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import seaborn as sns
+import matplotlib.pyplot as plt
+from datetime import datetime
+import pickle
+import io
+from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix
+from sklearn.model_selection import train_test_split
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set page config
+st.set_page_config(
+    page_title="Regulatory Model Development Dashboard",
+    # page_layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 24px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        padding-left: 20px;
+        padding-right: 20px;
+    }
+    div[data-testid="metric-container"] {
+        background-color: #f0f2f6;
+        border: 1px solid #c9d3e0;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'train_data' not in st.session_state:
+    st.session_state.train_data = None
+if 'test_data' not in st.session_state:
+    st.session_state.test_data = None
+if 'calibration_params' not in st.session_state:
+    st.session_state.calibration_params = None
+    
+if 'train_scores' not in st.session_state:
+    st.session_state.train_scores = None
+    
+if 'test_scores' not in st.session_state:
+    st.session_state.test_scores = None
+    
+if 'cols_to_normalize' not in st.session_state:
+    st.session_state.cols_to_normalize = None
+
+# Title
+st.title("🏦 Regulatory Model Development Dashboard")
+st.markdown("### Advanced Logistic Regression Model for Credit Risk")
+
+# Sidebar for file upload and configuration
+with st.sidebar:
+    st.header("📁 Data Configuration")
+    
+    # File upload
+    train_file = st.file_uploader("Upload Training Data (Parquet)", type=['parquet'])
+    test_file = st.file_uploader("Upload Test Data (Parquet)", type=['parquet'])
+    
+    # PD to Rating mapping
+    st.header("📊 PD to Rating Mapping")
+    pd_rating_data = {
+        'Rating': ['1.1', '1.2', '2.1', '2.2', '3.1', '3.2', '4.1', '4.2', '5.1', '5.2'],
+        'Min_PD': [0.0000, 0.0010, 0.0025, 0.0050, 0.0100, 0.0200, 0.0400, 0.0800, 0.1600, 0.3200],
+        'Max_PD': [0.0010, 0.0025, 0.0050, 0.0100, 0.0200, 0.0400, 0.0800, 0.1600, 0.3200, 1.0000]
+    }
+    pd_rating_df = pd.DataFrame(pd_rating_data)
+    st.dataframe(pd_rating_df, height=200)
+
+# Helper Functions
+def load_parquet_data(file):
+    """Load parquet file"""
+    return pd.read_parquet(file)
+
+def calculate_pd_from_score(score):
+    """Convert score to PD using probit function"""
+    return stats.norm.cdf(score)
+
+def assign_rating(pd_value, pd_rating_df):
+    """Assign rating based on PD value"""
+    for _, row in pd_rating_df.iterrows():
+        if row['Min_PD'] <= pd_value < row['Max_PD']:
+            return row['Rating']
+    return '5.2'  # Default worst rating
+
+def calculate_gini(y_true, y_pred):
+    """Calculate Gini coefficient"""
+    return 2 * roc_auc_score(y_true, y_pred) - 1
+
+def create_migration_matrix(data, from_col, to_col):
+    """Create migration matrix"""
+    migration = pd.crosstab(data[from_col], data[to_col], normalize='index') * 100
+    return migration
+
+def perform_sensitivity_analysis(model, X, feature_name, num_points=20):
+    """Perform sensitivity analysis for a feature"""
+    X_sens = X.copy()
+    feature_range = np.linspace(X[feature_name].min(), X[feature_name].max(), num_points)
+    predictions = []
+    
+    for value in feature_range:
+        X_sens[feature_name] = value
+        pred_proba = model.predict(X_sens)
+        predictions.append(pred_proba.mean())
+    
+    return feature_range, predictions
+
+def calibrate_pd(observed_pd, model_pd, method='linear'):
+    """Calibrate PD using different methods"""
+    if method == 'linear':
+        # Simple linear calibration
+        calibration_factor = observed_pd / model_pd if model_pd > 0 else 1
+        return calibration_factor
+    elif method == 'logistic':
+        # Logistic calibration
+        from sklearn.isotonic import IsotonicRegression
+        iso_reg = IsotonicRegression(out_of_bounds='clip')
+        iso_reg.fit(model_pd.reshape(-1, 1), observed_pd)
+        return iso_reg
+    else:
+        return 1.0
+
+# Main tabs
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "📊 Data & Variables", 
+    "🔧 Model Development", 
+    "📈 Model Performance", 
+    "🔄 Migration Analysis",
+    "🎯 Sensitivity Analysis",
+    "⚖️ Calibration",
+    "💾 Export & Save"
+])
+
+# Tab 1: Data & Variables
+with tab1:
+    st.header("Data Loading and Variable Selection")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if train_file is not None:
+            st.session_state.train_data = load_parquet_data(train_file)
+            st.success(f"✅ Training data loaded: {st.session_state.train_data.shape}")
+            st.dataframe(st.session_state.train_data.head(), height=200)
+    
+    with col2:
+        if test_file is not None:
+            st.session_state.test_data = load_parquet_data(test_file)
+            st.success(f"✅ Test data loaded: {st.session_state.test_data.shape}")
+            st.dataframe(st.session_state.test_data.head(), height=200)
+    
+    if st.session_state.train_data is not None:
+        st.subheader("Variable Selection")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            all_columns = st.session_state.train_data.columns.tolist()
+            target_variable = st.selectbox("Select Target Variable", all_columns)
+        
+        with col2:
+            feature_columns = st.multiselect(
+                "Select Feature Variables",
+                [col for col in all_columns if col != target_variable]
+            )
+        
+        with col3:
+            cohort_column = st.selectbox("Select Cohort Year Column", all_columns)
+            region_column = st.selectbox("Select Region Column", all_columns)
+        
+        if st.button("Confirm Variable Selection", type="primary"):
+            st.session_state.target = target_variable
+            st.session_state.features = feature_columns
+            st.session_state.cohort_col = cohort_column
+            st.session_state.region_col = region_column
+            st.success("✅ Variables selected successfully!")
+            
+        st.subheader("Data Preprocessing")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            normalize_option = st.selectbox(
+                "Normalize Features?",
+                ["No", "Yes - StandardScaler", "Yes - MinMaxScaler", "Yes - RobustScaler"]
+            )
+
+        with col2:
+            if normalize_option != "No":
+                exclude_from_norm = st.multiselect(
+                    "Exclude from normalization (e.g., binary variables):",
+                    st.session_state.features
+                )
+
+# Add this function at the top with other helper functions
+def normalize_features(X, method='standard', exclude_cols=None):
+    """Normalize features using specified method"""
+    from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+    
+    X_normalized = X.copy()
+    
+    # Determine which columns to normalize
+    cols_to_normalize = [col for col in X.columns if col not in (exclude_cols or [])]
+    
+    if method == 'standard':
+        scaler = StandardScaler()
+    elif method == 'minmax':
+        scaler = MinMaxScaler()
+    elif method == 'robust':
+        scaler = RobustScaler()
+    else:
+        return X, None
+    
+    # Fit and transform
+    X_normalized[cols_to_normalize] = scaler.fit_transform(X[cols_to_normalize])
+    
+    return X_normalized, scaler, cols_to_normalize
+
+
+
+# Tab 2: Model Development
+with tab2:
+    st.header("Logistic Regression Model Development")
+    
+    if st.session_state.train_data is not None and hasattr(st.session_state, 'features'):
+        if st.button("Fit Logit Model", type="primary"):
+            # Prepare data
+            X_train = st.session_state.train_data[st.session_state.features]
+            y_train = st.session_state.train_data[st.session_state.target]
+            
+            # Apply normalization if selected
+            if normalize_option != "No":
+                method_map = {
+                    "Yes - StandardScaler": "standard",
+                    "Yes - MinMaxScaler": "minmax",
+                    "Yes - RobustScaler": "robust"
+                }
+                X_train, scaler, st.session_state.cols_to_normalize  = normalize_features(
+                    X_train, 
+                    method=method_map[normalize_option],
+                    exclude_cols=exclude_from_norm if 'exclude_from_norm' in locals() else None
+                )
+                # st.text(st.session_state.cols_to_normalize )
+                st.session_state.scaler = scaler
+                st.session_state.normalization_method = normalize_option
+                st.info(f"✅ Features normalized using {normalize_option}")
+            
+            # Add constant
+            X_train_const = sm.add_constant(X_train)
+            
+            # Fit model
+            model = sm.Logit(y_train, X_train_const)
+            st.session_state.model = model.fit()
+            
+            st.success("✅ Model fitted successfully!")
+            
+        if st.session_state.model is not None:
+            # Model Summary
+            st.subheader("Model Summary")
+            
+            # Create summary dataframe
+            summary_data = {
+                'Coefficient': st.session_state.model.params,
+                'Std Error': st.session_state.model.bse,
+                'z-statistic': st.session_state.model.tvalues,
+                'P-value': st.session_state.model.pvalues,
+                'Significant': st.session_state.model.pvalues < 0.05
+            }
+            summary_df = pd.DataFrame(summary_data)
+            
+            # Display summary with highlighting
+            st.dataframe(
+                summary_df.style.applymap(
+                    lambda x: 'background-color: lightgreen' if x else 'background-color: lightcoral',
+                    subset=['Significant']
+                ),
+                height=400
+            )
+            
+            # Model metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Log-Likelihood", f"{st.session_state.model.llf:.4f}")
+            with col2:
+                st.metric("AIC", f"{st.session_state.model.aic:.4f}")
+            with col3:
+                st.metric("BIC", f"{st.session_state.model.bic:.4f}")
+            with col4:
+                st.metric("Pseudo R²", f"{st.session_state.model.prsquared:.4f}")
+            
+            # Generate scores
+            if True:
+            # st.button("Generate Scores and PD", type="secondary"):
+                # Training data
+                X_train = st.session_state.train_data[st.session_state.features]
+                
+                    # Apply normalization if it was used
+                if hasattr(st.session_state, 'scaler') and st.session_state.scaler is not None:
+                    X_train[st.session_state.cols_to_normalize ] = st.session_state.scaler.transform(X_train[st.session_state.cols_to_normalize ])
+                
+                
+                X_train_const = sm.add_constant(X_train)
+                
+                # Calculate scores
+                st.session_state.train_scores = st.session_state.model.predict(X_train_const)
+                st.session_state.train_data['model_score'] = st.session_state.train_scores
+                st.session_state.train_data['model_pd'] = st.session_state.train_scores  # For logit, prediction is already probability
+                
+                # Assign ratings
+                st.session_state.train_data['rating'] = st.session_state.train_data['model_pd'].apply(
+                    lambda x: assign_rating(x, pd_rating_df)
+                )
+                
+                # Test data
+                if st.session_state.test_data is not None:
+                    X_test = st.session_state.test_data[st.session_state.features]
+                    
+                    if hasattr(st.session_state, 'scaler') and st.session_state.scaler is not None:
+                        X_test[st.session_state.cols_to_normalize ] = st.session_state.scaler.transform(X_test[st.session_state.cols_to_normalize ])
+                
+                    X_test_const = sm.add_constant(X_test)
+                    st.session_state.test_scores = st.session_state.model.predict(X_test_const)
+                    st.session_state.test_data['model_score'] = st.session_state.test_scores
+                    st.session_state.test_data['model_pd'] = st.session_state.test_scores
+                    st.session_state.test_data['rating'] = st.session_state.test_data['model_pd'].apply(
+                        lambda x: assign_rating(x, pd_rating_df)
+                    )
+                # st.text(st.session_state.test_data['model_pd'].head())
+                st.success("✅ Scores and PD calculated successfully!")
+
+# Tab 3: Model Performance
+with tab3:
+    st.header("Model Performance Analysis")
+    
+    if st.session_state.model is not None and 'model_pd' in st.session_state.train_data.columns:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # ROC Curve
+            st.subheader("ROC Curve")
+            y_true = st.session_state.train_data[st.session_state.target]
+            y_pred = st.session_state.train_data['model_pd']
+            
+            fpr, tpr, _ = roc_curve(y_true, y_pred)
+            auc = roc_auc_score(y_true, y_pred)
+            gini = calculate_gini(y_true, y_pred)
+            
+            fig_roc = go.Figure()
+            fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, name=f'ROC (AUC={auc:.3f}, Gini={gini:.3f})'))
+            fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines', line=dict(dash='dash'), name='Random'))
+            fig_roc.update_layout(
+                title='ROC Curve',
+                xaxis_title='False Positive Rate',
+                yaxis_title='True Positive Rate',
+                height=400
+            )
+            st.plotly_chart(fig_roc, use_container_width=True)
+        
+        with col2:
+            # PD Distribution
+            st.subheader("PD Distribution")
+            fig_pd = px.histogram(
+                st.session_state.train_data, 
+                x='model_pd', 
+                nbins=50,
+                title='Model PD Distribution'
+            )
+            fig_pd.update_layout(height=400)
+            st.plotly_chart(fig_pd, use_container_width=True)
+        
+        # Performance by segments
+        st.subheader("Performance by Segments")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # By Cohort Year
+            cohort_stats = st.session_state.train_data.groupby(st.session_state.cohort_col).agg({
+                'model_pd': ['mean', 'std'],
+                st.session_state.target: 'mean'
+            }).round(4)
+            cohort_stats.columns = ['Model_PD_Mean', 'Model_PD_Std', 'Actual_DR']
+            st.write("By Cohort Year")
+            st.dataframe(cohort_stats)
+        
+        with col2:
+            # By Region
+            region_stats = st.session_state.train_data.groupby(st.session_state.region_col).agg({
+                'model_pd': ['mean', 'std'],
+                st.session_state.target: 'mean'
+            }).round(4)
+            region_stats.columns = ['Model_PD_Mean', 'Model_PD_Std', 'Actual_DR']
+            st.write("By Region")
+            st.dataframe(region_stats)
+
+# Tab 4: Migration Analysis
+with tab4:
+    st.header("Rating Migration Analysis")
+    
+    if st.session_state.train_data is not None and 'rating' in st.session_state.train_data.columns:
+        # Simulate historical rating for migration analysis
+        st.info("Simulating historical ratings for migration analysis...")
+        
+        # Create synthetic historical rating
+        np.random.seed(42)
+        rating_map = {'1.1': 0, '1.2': 1, '2.1': 2, '2.2': 3, '3.1': 4, '3.2': 5, '4.1': 6, '4.2': 7, '5.1': 8, '5.2': 9}
+        reverse_map = {v: k for k, v in rating_map.items()}
+        
+        current_rating_num = st.session_state.train_data['rating'].map(rating_map)
+        historical_rating_num = np.clip(current_rating_num + np.random.randint(-2, 3, size=len(current_rating_num)), 0, 9)
+        st.session_state.train_data['historical_rating'] = historical_rating_num.map(reverse_map)
+        
+        # Create migration matrix
+        migration_matrix = create_migration_matrix(
+            st.session_state.train_data,
+            'historical_rating',
+            'rating'
+        )
+        
+        # Display migration matrix as heatmap
+        st.subheader("Rating Migration Matrix (%)")
+        fig_migration = px.imshow(
+            migration_matrix,
+            labels=dict(x="To Rating", y="From Rating", color="Migration %"),
+            x=migration_matrix.columns,
+            y=migration_matrix.index,
+            color_continuous_scale='RdYlGn_r',
+            aspect='auto'
+        )
+        fig_migration.update_layout(height=600)
+        st.plotly_chart(fig_migration, use_container_width=True)
+        
+        # Migration statistics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Upgrade rate
+            upgrade_rate = 0
+            for i in range(len(migration_matrix)):
+                for j in range(i):
+                    if i < len(migration_matrix) and j < len(migration_matrix.columns):
+                        upgrade_rate += migration_matrix.iloc[i, j]
+            st.metric("Upgrade Rate", f"{upgrade_rate:.2f}%")
+        
+        with col2:
+            # Stable rate
+            stable_rate = np.diag(migration_matrix).mean()
+            st.metric("Stability Rate", f"{stable_rate:.2f}%")
+        
+        with col3:
+            # Downgrade rate
+            downgrade_rate = 0
+            for i in range(len(migration_matrix)):
+                for j in range(i+1, len(migration_matrix.columns)):
+                    if i < len(migration_matrix) and j < len(migration_matrix.columns):
+                        downgrade_rate += migration_matrix.iloc[i, j]
+            st.metric("Downgrade Rate", f"{downgrade_rate:.2f}%")
+
+# Tab 5: Sensitivity Analysis
+with tab5:
+    st.header("Sensitivity Analysis")
+    
+    if st.session_state.model is not None and hasattr(st.session_state, 'features'):
+        st.subheader("Feature Impact Analysis")
+        
+        # Select feature for sensitivity analysis
+        selected_feature = st.selectbox("Select Feature for Sensitivity Analysis", st.session_state.features)
+        
+        if st.button("Run Sensitivity Analysis"):
+            X_train = st.session_state.train_data[st.session_state.features]
+            X_train_const = sm.add_constant(X_train)
+            
+            # Perform sensitivity analysis
+            feature_range, predictions = perform_sensitivity_analysis(
+                st.session_state.model,
+                X_train_const,
+                selected_feature
+            )
+            
+            # Plot sensitivity
+            fig_sens = go.Figure()
+            fig_sens.add_trace(go.Scatter(
+                x=feature_range,
+                y=predictions,
+                mode='lines+markers',
+                name='PD Response'
+            ))
+            fig_sens.update_layout(
+                title=f'Sensitivity Analysis: {selected_feature}',
+                xaxis_title=selected_feature,
+                yaxis_title='Average PD',
+                height=400
+            )
+            st.plotly_chart(fig_sens, use_container_width=True)
+        
+        # Coefficient importance
+        st.subheader("Feature Importance (Standardized Coefficients)")
+        
+        # Calculate standardized coefficients
+        X_train = st.session_state.train_data[st.session_state.features]
+        std_coefs = st.session_state.model.params[1:] * X_train.std()  # Exclude constant
+        
+        importance_df = pd.DataFrame({
+            'Feature': st.session_state.features,
+            'Standardized_Coefficient': std_coefs.values,
+            'Absolute_Impact': np.abs(std_coefs.values)
+        }).sort_values('Absolute_Impact', ascending=False)
+        
+        # Plot feature importance
+        fig_importance = px.bar(
+            importance_df,
+            x='Absolute_Impact',
+            y='Feature',
+            orientation='h',
+            title='Feature Importance',
+            color='Standardized_Coefficient',
+            color_continuous_scale='RdBu_r',
+            color_continuous_midpoint=0
+        )
+        fig_importance.update_layout(height=400)
+        st.plotly_chart(fig_importance, use_container_width=True)
+        
+        # Partial dependence plots
+        st.subheader("Partial Dependence Plots")
+        
+        col1, col2 = st.columns(2)
+        
+        # Select top 4 features for partial dependence
+        top_features = importance_df.head(4)['Feature'].tolist()
+        
+        for idx, feature in enumerate(top_features):
+            with col1 if idx % 2 == 0 else col2:
+                X_train = st.session_state.train_data[st.session_state.features]
+                X_train_const = sm.add_constant(X_train)
+                
+                feature_vals = np.linspace(X_train[feature].min(), X_train[feature].max(), 50)
+                pd_vals = []
+                
+                for val in feature_vals:
+                    X_temp = X_train_const.copy()
+                    X_temp[feature] = val
+                    pd_vals.append(st.session_state.model.predict(X_temp).mean())
+                
+                fig_pd = go.Figure()
+                fig_pd.add_trace(go.Scatter(x=feature_vals, y=pd_vals, mode='lines'))
+                fig_pd.update_layout(
+                    title=f'Partial Dependence: {feature}',
+                    xaxis_title=feature,
+                    yaxis_title='Average PD',
+                    height=300
+                )
+                st.plotly_chart(fig_pd, use_container_width=True)
+
+# Tab 6: Calibration
+with tab6:
+    st.header("Model Calibration")
+    
+    if True:
+    # st.session_state.train_data is not None and 'model_pd' in st.session_state.train_data.columns:
+        st.subheader("PD Calibration")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            calibration_method = st.selectbox(
+                "Select Calibration Method",
+                ["Linear Scaling", "Isotonic Regression", "Platt Scaling"]
+            )
+            
+            target_dr = st.number_input(
+                "Target Default Rate (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(st.session_state.train_data[st.session_state.target].mean() * 100),
+                step=0.1
+            ) / 100
+        
+        with col2:
+            if st.button("Apply Calibration", type="primary"):
+                # Calculate observed vs predicted
+                observed_dr = st.session_state.train_data[st.session_state.target].mean()
+                model_dr = st.session_state.train_data['model_pd'].mean()
+                
+                # Apply calibration
+                if calibration_method == "Linear Scaling":
+                    calibration_factor = target_dr / model_dr
+                    st.session_state.train_data['calibrated_pd'] = st.session_state.train_data['model_pd'] * calibration_factor
+                    st.session_state.calibration_params = {'method': 'linear', 'factor': calibration_factor}
+                
+                elif calibration_method == "Isotonic Regression":
+                    from sklearn.isotonic import IsotonicRegression
+                    iso_reg = IsotonicRegression(out_of_bounds='clip')
+                    iso_reg.fit(
+                        st.session_state.train_data['model_pd'].values.reshape(-1, 1),
+                        st.session_state.train_data[st.session_state.target]
+                    )
+                    st.session_state.train_data['calibrated_pd'] = iso_reg.predict(
+                        st.session_state.train_data['model_pd'].values.reshape(-1, 1)
+                    )
+                    st.session_state.calibration_params = {'method': 'isotonic', 'model': iso_reg}
+                
+                elif calibration_method == "Platt Scaling":
+                    from sklearn.linear_model import LogisticRegression
+                    platt_model = LogisticRegression()
+                    platt_model.fit(
+                        st.session_state.train_data['model_pd'].values.reshape(-1, 1),
+                        st.session_state.train_data[st.session_state.target]
+                    )
+                    st.session_state.train_data['calibrated_pd'] = platt_model.predict_proba(
+                        st.session_state.train_data['model_pd'].values.reshape(-1, 1)
+                    )[:, 1]
+                    st.session_state.calibration_params = {'method': 'platt', 'model': platt_model}
+                
+                # Clip values
+                st.session_state.train_data['calibrated_pd'] = np.clip(
+                    st.session_state.train_data['calibrated_pd'], 0, 1
+                )
+                
+                # Assign calibrated ratings
+                st.session_state.train_data['calibrated_rating'] = st.session_state.train_data['calibrated_pd'].apply(
+                    lambda x: assign_rating(x, pd_rating_df)
+                )
+                
+                st.success("✅ Calibration applied successfully!")
+        
+        # Display calibration results
+        if 'calibrated_pd' in st.session_state.train_data.columns:
+            st.subheader("Calibration Results")
+            
+            # Calibration plot
+            fig_calib = go.Figure()
+            
+            # Add scatter plot
+            fig_calib.add_trace(go.Scatter(
+                x=st.session_state.train_data['model_pd'],
+                y=st.session_state.train_data['calibrated_pd'],
+                mode='markers',
+                name='Calibrated',
+                marker=dict(size=5, opacity=0.5)
+            ))
+            
+            # Add diagonal line
+            fig_calib.add_trace(go.Scatter(
+                x=[0, 1],
+                y=[0, 1],
+                mode='lines',
+                name='Perfect Calibration',
+                line=dict(dash='dash', color='red')
+            ))
+            
+            fig_calib.update_layout(
+                title='Calibration Plot',
+                xaxis_title='Original PD',
+                yaxis_title='Calibrated PD',
+                height=400
+            )
+            st.plotly_chart(fig_calib, use_container_width=True)
+            
+            # Calibration metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Original Avg PD",
+                    f"{st.session_state.train_data['model_pd'].mean():.4f}"
+                )
+            
+            with col2:
+                st.metric(
+                    "Calibrated Avg PD",
+                    f"{st.session_state.train_data['calibrated_pd'].mean():.4f}"
+                )
+            
+            with col3:
+                st.metric(
+                    "Actual Default Rate",
+                    f"{st.session_state.train_data[st.session_state.target].mean():.4f}"
+                )
+            
+            with col4:
+                calibration_error = abs(
+                    st.session_state.train_data['calibrated_pd'].mean() - 
+                    st.session_state.train_data[st.session_state.target].mean()
+                )
+                st.metric(
+                    "Calibration Error",
+                    f"{calibration_error:.4f}"
+                )
+            
+            # Rating distribution comparison
+            st.subheader("Rating Distribution Comparison")
+            
+            rating_comparison = pd.DataFrame({
+                'Original': st.session_state.train_data['rating'].value_counts(normalize=True) * 100,
+                'Calibrated': st.session_state.train_data['calibrated_rating'].value_counts(normalize=True) * 100
+            }).fillna(0)
+            
+            fig_rating_comp = go.Figure()
+            fig_rating_comp.add_trace(go.Bar(name='Original', x=rating_comparison.index, y=rating_comparison['Original']))
+            fig_rating_comp.add_trace(go.Bar(name='Calibrated', x=rating_comparison.index, y=rating_comparison['Calibrated']))
+            fig_rating_comp.update_layout(
+                title='Rating Distribution: Original vs Calibrated',
+                xaxis_title='Rating',
+                yaxis_title='Percentage (%)',
+                barmode='group',
+                height=400
+            )
+            st.plotly_chart(fig_rating_comp, use_container_width=True)
+
+# Tab 7: Export & Save
+with tab7:
+    st.header("Export Results and Save Model")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Save Model")
+        
+        if st.session_state.model is not None:
+            model_name = st.text_input("Model Name", value=f"logit_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            
+            if st.button("Save Model", type="primary"):
+                # Save model
+                model_data = {
+                    'model': st.session_state.model,
+                    'features': st.session_state.features,
+                    'target': st.session_state.target,
+                    'calibration_params': st.session_state.calibration_params,
+                    'timestamp': datetime.now()
+                }
+                
+                # Create download button for model
+                model_bytes = pickle.dumps(model_data)
+                st.download_button(
+                    label="Download Model (.pkl)",
+                    data=model_bytes,
+                    file_name=f"{model_name}.pkl",
+                    mime="application/octet-stream"
+                )
+                
+                st.success("✅ Model saved successfully!")
+    
+    with col2:
+        st.subheader("Load Existing Model")
+        
+        uploaded_model = st.file_uploader("Upload Model File (.pkl)", type=['pkl'])
+        
+        if uploaded_model is not None:
+            loaded_model_data = pickle.loads(uploaded_model.read())
+            st.session_state.model = loaded_model_data['model']
+            st.session_state.features = loaded_model_data['features']
+            st.session_state.target = loaded_model_data['target']
+            st.session_state.calibration_params = loaded_model_data.get('calibration_params')
+            
+            st.success("✅ Model loaded successfully!")
+            st.write(f"Model trained on: {loaded_model_data['timestamp']}")
+    
+
+
+# ```python
+    st.subheader("Export Scored Data")
+    
+    if st.session_state.train_data is not None and 'model_pd' in st.session_state.train_data.columns:
+        export_options = st.multiselect(
+            "Select data to export",
+            ["Training Data with Scores", "Test Data with Scores", "Model Report", "Calibration Report"]
+        )
+        
+        if st.button("Generate Export Files", type="primary"):
+            # Training data export
+            if "Training Data with Scores" in export_options:
+                train_export = st.session_state.train_data.copy()
+                
+                # Convert to CSV
+                csv_train = train_export.to_csv(index=False)
+                st.download_button(
+                    label="Download Training Data (CSV)",
+                    data=csv_train,
+                    file_name=f"train_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+                
+                # Convert to Parquet
+                parquet_buffer = io.BytesIO()
+                train_export.to_parquet(parquet_buffer, index=False)
+                st.download_button(
+                    label="Download Training Data (Parquet)",
+                    data=parquet_buffer.getvalue(),
+                    file_name=f"train_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet",
+                    mime="application/octet-stream"
+                )
+            
+            # Test data export
+            if "Test Data with Scores" in export_options and st.session_state.test_data is not None:
+                if 'model_pd' in st.session_state.test_data.columns:
+                    test_export = st.session_state.test_data.copy()
+                    
+                    csv_test = test_export.to_csv(index=False)
+                    st.download_button(
+                        label="Download Test Data (CSV)",
+                        data=csv_test,
+                        file_name=f"test_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+            
+            # Model Report
+            if "Model Report" in export_options:
+                report = generate_model_report()
+                st.download_button(
+                    label="Download Model Report (HTML)",
+                    data=report,
+                    file_name=f"model_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                    mime="text/html"
+                )
+            
+            # Calibration Report
+            if "Calibration Report" in export_options and 'calibrated_pd' in st.session_state.train_data.columns:
+                calib_report = generate_calibration_report()
+                st.download_button(
+                    label="Download Calibration Report (HTML)",
+                    data=calib_report,
+                    file_name=f"calibration_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                    mime="text/html"
+                )
+
+def generate_model_report():
+    """Generate comprehensive model report"""
+    if st.session_state.model is None:
+        return "No model available"
+    
+    html_report = f"""
+    <html>
+    <head>
+        <title>Model Development Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; }}
+            h1 {{ color: #333; }}
+            h2 {{ color: #666; }}
+            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            .metric {{ background-color: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Regulatory Model Development Report</h1>
+        <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        
+        <h2>Model Overview</h2>
+        <div class="metric">
+            <p><strong>Model Type:</strong> Logistic Regression (statsmodels)</p>
+            <p><strong>Target Variable:</strong> {st.session_state.target}</p>
+            <p><strong>Number of Features:</strong> {len(st.session_state.features)}</p>
+            <p><strong>Training Samples:</strong> {len(st.session_state.train_data)}</p>
+        </div>
+        
+        <h2>Model Performance Metrics</h2>
+        <div class="metric">
+            <p><strong>Log-Likelihood:</strong> {st.session_state.model.llf:.4f}</p>
+            <p><strong>AIC:</strong> {st.session_state.model.aic:.4f}</p>
+            <p><strong>BIC:</strong> {st.session_state.model.bic:.4f}</p>
+            <p><strong>Pseudo R²:</strong> {st.session_state.model.prsquared:.4f}</p>
+        </div>
+        
+        <h2>Coefficient Summary</h2>
+        <table>
+            <tr>
+                <th>Variable</th>
+                <th>Coefficient</th>
+                <th>Std Error</th>
+                <th>z-statistic</th>
+                <th>P-value</th>
+                <th>Significant</th>
+            </tr>
+    """
+    
+    for var in st.session_state.model.params.index:
+        coef = st.session_state.model.params[var]
+        se = st.session_state.model.bse[var]
+        z = st.session_state.model.tvalues[var]
+        p = st.session_state.model.pvalues[var]
+        sig = "Yes" if p < 0.05 else "No"
+        
+        html_report += f"""
+            <tr>
+                <td>{var}</td>
+                <td>{coef:.6f}</td>
+                <td>{se:.6f}</td>
+                <td>{z:.4f}</td>
+                <td>{p:.4f}</td>
+                <td>{sig}</td>
+            </tr>
+        """
+    
+    html_report += """
+        </table>
+        
+        <h2>Model Validation</h2>
+        <div class="metric">
+    """
+    
+    if 'model_pd' in st.session_state.train_data.columns:
+        y_true = st.session_state.train_data[st.session_state.target]
+        y_pred = st.session_state.train_data['model_pd']
+        auc = roc_auc_score(y_true, y_pred)
+        gini = calculate_gini(y_true, y_pred)
+        
+        html_report += f"""
+            <p><strong>AUC:</strong> {auc:.4f}</p>
+            <p><strong>Gini Coefficient:</strong> {gini:.4f}</p>
+            <p><strong>Average PD:</strong> {y_pred.mean():.4f}</p>
+            <p><strong>Actual Default Rate:</strong> {y_true.mean():.4f}</p>
+        """
+    
+    html_report += """
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html_report
+
+def generate_calibration_report():
+    """Generate calibration report"""
+    html_report = f"""
+    <html>
+    <head>
+        <title>Model Calibration Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; }}
+            h1 {{ color: #333; }}
+            h2 {{ color: #666; }}
+            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            .metric {{ background-color: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Model Calibration Report</h1>
+        <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        
+        <h2>Calibration Summary</h2>
+        <div class="metric">
+    """
+    
+    if st.session_state.calibration_params:
+        html_report += f"""
+            <p><strong>Calibration Method:</strong> {st.session_state.calibration_params['method']}</p>
+        """
+        
+        if st.session_state.calibration_params['method'] == 'linear':
+            html_report += f"""
+                <p><strong>Calibration Factor:</strong> {st.session_state.calibration_params['factor']:.4f}</p>
+            """
+    
+    if 'calibrated_pd' in st.session_state.train_data.columns:
+        html_report += f"""
+            <p><strong>Original Average PD:</strong> {st.session_state.train_data['model_pd'].mean():.4f}</p>
+            <p><strong>Calibrated Average PD:</strong> {st.session_state.train_data['calibrated_pd'].mean():.4f}</p>
+            <p><strong>Actual Default Rate:</strong> {st.session_state.train_data[st.session_state.target].mean():.4f}</p>
+        """
+    
+    html_report += """
+        </div>
+        
+        <h2>Rating Distribution</h2>
+        <table>
+            <tr>
+                <th>Rating</th>
+                <th>Original Count</th>
+                <th>Original %</th>
+                <th>Calibrated Count</th>
+                <th>Calibrated %</th>
+            </tr>
+    """
+    
+    if 'calibrated_rating' in st.session_state.train_data.columns:
+        orig_dist = st.session_state.train_data['rating'].value_counts()
+        calib_dist = st.session_state.train_data['calibrated_rating'].value_counts()
+        
+        all_ratings = sorted(set(orig_dist.index) | set(calib_dist.index))
+        
+        for rating in all_ratings:
+            orig_count = orig_dist.get(rating, 0)
+            orig_pct = (orig_count / len(st.session_state.train_data)) * 100
+            calib_count = calib_dist.get(rating, 0)
+            calib_pct = (calib_count / len(st.session_state.train_data)) * 100
+            
+            html_report += f"""
+                <tr>
+                    <td>{rating}</td>
+                    <td>{orig_count}</td>
+                    <td>{orig_pct:.2f}%</td>
+                    <td>{calib_count}</td>
+                    <td>{calib_pct:.2f}%</td>
+                </tr>
+            """
+    
+    html_report += """
+        </table>
+    </body>
+    </html>
+    """
+    
+    return html_report
+
+# Additional regulatory metrics section
+st.sidebar.markdown("---")
+st.sidebar.header("📊 Regulatory Metrics")
+
+if st.session_state.model is not None and 'model_pd' in st.session_state.train_data.columns:
+    # Calculate key regulatory metrics
+    y_true = st.session_state.train_data[st.session_state.target]
+    y_pred = st.session_state.train_data['model_pd']
+    
+    # Brier Score
+    brier_score = np.mean((y_pred - y_true) ** 2)
+    
+    # Hosmer-Lemeshow Test
+    from scipy.stats import chi2
+    n_bins = 10
+    predicted_probs = y_pred
+    actual_outcomes = y_true
+    
+    # Create bins
+    bin_edges = np.percentile(predicted_probs, np.linspace(0, 100, n_bins + 1))
+    bin_edges[0] = 0
+    bin_edges[-1] = 1
+    
+    # Calculate observed and expected frequencies
+    hl_statistic = 0
+    for i in range(n_bins):
+        mask = (predicted_probs >= bin_edges[i]) & (predicted_probs < bin_edges[i + 1])
+        if i == n_bins - 1:
+            mask = (predicted_probs >= bin_edges[i]) & (predicted_probs <= bin_edges[i + 1])
+        
+        n_i = mask.sum()
+        if n_i > 0:
+            o_i = actual_outcomes[mask].sum()
+            e_i = predicted_probs[mask].sum()
+            
+            if e_i > 0 and n_i - e_i > 0:
+                hl_statistic += ((o_i - e_i) ** 2) / (e_i * (1 - e_i / n_i))
+    
+    hl_p_value = 1 - chi2.cdf(hl_statistic, n_bins - 2)
+    
+    # Display metrics in sidebar
+    st.sidebar.metric("Brier Score", f"{brier_score:.4f}")
+    st.sidebar.metric("H-L Statistic", f"{hl_statistic:.2f}")
+    st.sidebar.metric("H-L p-value", f"{hl_p_value:.4f}")
+    
+    # Model stability indicator
+    if hl_p_value > 0.05:
+        st.sidebar.success("✅ Model shows good calibration (H-L test)")
+    else:
+        st.sidebar.warning("⚠️ Model may need recalibration (H-L test)")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666;'>
+    <p>Regulatory Model Development Dashboard v1.0</p>
+    <p>Developed for Credit Risk Modeling and Regulatory Compliance</p>
+</div>
+""", unsafe_allow_html=True)
