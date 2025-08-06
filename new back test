@@ -1,0 +1,634 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.backends.backend_pdf
+from datetime import datetime, timedelta
+import math
+from io import BytesIO
+import seaborn as sns
+from openpyxl import Workbook
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set page config
+st.set_page_config(
+    page_title="Model Summary Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for gray-red theme
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #f5f5f5;
+    }
+    .main-header {
+        color: #8B0000;
+        text-align: center;
+        padding: 1rem;
+        background-color: #e0e0e0;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #8B0000;
+    }
+    .stButton>button {
+        background-color: #8B0000;
+        color: white;
+    }
+    .stButton>button:hover {
+        background-color: #A52A2A;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Optimized helper functions
+@st.cache_data
+def generate_dummy_data(n_records=10000):
+    """Generate dummy data for testing"""
+    np.random.seed(42)
+    
+    # Generate dates
+    start_date = datetime(2023, 1, 1)
+    end_date = datetime(2024, 12, 31)
+    dates = pd.date_range(start=start_date, end=end_date, periods=n_records)
+    
+    # Create dummy dataframe
+    df = pd.DataFrame({
+        'cohort_date_sas': dates,
+        'cohort_year': dates.year * 100 + dates.quarter,
+        'region': np.random.choice(['North', 'South', 'East', 'West'], n_records),
+        'L1_industry_groups': np.random.choice(['Tech', 'Finance', 'Healthcare', 'Retail'], n_records),
+        'intodef_gid': np.random.binomial(1, 0.05, n_records),  # 5% default rate
+        'pre_moc_mid_point_pd': np.random.beta(2, 20, n_records),  # PD values
+        'Model_PD': np.random.beta(2, 20, n_records),
+        'score': np.random.uniform(0, 1, n_records)
+    })
+    
+    # Add mid_point_pd column
+    df['mid_point_pd'] = df['pre_moc_mid_point_pd']
+    
+    return df
+
+@st.cache_data
+def significance_test_optimized(target_counts, aucroc, limit_sigma=3):
+    """Optimized AUC significance test"""
+    n_pos, n_neg = target_counts[1], target_counts[0]
+    sigma = math.sqrt((n_pos + n_neg + 1) / (12 * n_pos * n_neg))
+    upper_limit = 0.5 + limit_sigma * sigma
+    test_result = "SIGNIFICANT" if upper_limit < aucroc else "NOT SIGNIFICANT"
+    return test_result, upper_limit
+
+@st.cache_data
+def calculate_auc_gini(df, score_col, target_col, ascending=False):
+    """Calculate AUC and GINI efficiently"""
+    df_sorted = df.sort_values(score_col, ascending=ascending)
+    
+    n_pos = df_sorted[target_col].sum()
+    n_neg = len(df_sorted) - n_pos
+    
+    if n_pos == 0 or n_neg == 0:
+        return {'AUROC': 0.5, 'gini': 0, 'AR': 0}
+    
+    tpr = np.cumsum(df_sorted[target_col]) / n_pos
+    fpr = np.cumsum(1 - df_sorted[target_col]) / n_neg
+    
+    auc = np.trapz(tpr, fpr)
+    gini = 2 * auc - 1
+    ar = 2 * gini
+    
+    return {'AUROC': auc, 'gini': gini, 'AR': ar}
+
+@st.cache_data
+def get_discriminatory_report_optimized(df, group_field, target, score):
+    """Optimized discriminatory report generation"""
+    results = []
+    
+    for group_val in df[group_field].unique():
+        group_df = df[df[group_field] == group_val]
+        
+        # Quick AUC check for direction
+        metrics = calculate_auc_gini(group_df, score, target, ascending=False)
+        if metrics['AUROC'] < 0.5:
+            metrics = calculate_auc_gini(group_df, score, target, ascending=True)
+            direction = 'inversely_related'
+        else:
+            direction = 'directly_related'
+        
+        # Significance test
+        target_counts = group_df[target].value_counts()
+        sig_test, _ = significance_test_optimized(target_counts, metrics['AUROC'])
+        
+        results.append({
+            group_field: group_val,
+            'GINI': metrics['gini'],
+            'AUROC': metrics['AUROC'],
+            'AR': metrics['AR'],
+            '# Observations': len(group_df),
+            '# Defaults': int(group_df[target].sum()),
+            'Significance': sig_test,
+            'Direction': direction
+        })
+    
+    return pd.DataFrame(results)
+
+def create_elegant_table(df, title=""):
+    """Create an elegant table visualization"""
+    fig, ax = plt.subplots(figsize=(12, len(df) * 0.5 + 2))
+    ax.axis('tight')
+    ax.axis('off')
+    
+    # Create table with custom colors
+    table = ax.table(cellText=df.values,
+                     colLabels=df.columns,
+                     cellLoc='center',
+                     loc='center')
+    
+    # Style the table
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.5)
+    
+    # Color scheme
+    for i in range(len(df.columns)):
+        table[(0, i)].set_facecolor('#8B0000')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+    
+    for i in range(1, len(df) + 1):
+        for j in range(len(df.columns)):
+            if i % 2 == 0:
+                table[(i, j)].set_facecolor('#f0f0f0')
+            else:
+                table[(i, j)].set_facecolor('white')
+    
+    plt.title(title, fontsize=14, fontweight='bold', pad=20)
+    return fig
+
+def create_summary_plots(df_list, titles, main_title="Summary"):
+    """Create summary plots with gray-red theme"""
+    n_plots = len(df_list)
+    n_cols = 2
+    n_rows = math.ceil(n_plots / n_cols)
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5 * n_rows))
+    axes = axes.flatten() if n_plots > 1 else [axes]
+    
+    # Set style
+    plt.style.use('seaborn-v0_8-darkgrid')
+    
+    for idx, (df, title) in enumerate(zip(df_list, titles)):
+        if idx < len(axes):
+            ax1 = axes[idx]
+            
+            # Bar plot for observations
+            ax1.bar(df.index, df['Observations'], color='lightgray', alpha=0.7, edgecolor='darkgray')
+            ax1.set_ylabel('# Observations', fontsize=10)
+            ax1.set_title(title, fontsize=12, fontweight='bold')
+            ax1.tick_params(axis='x', rotation=45)
+            
+            # Line plots for rates
+            ax2 = ax1.twinx()
+            if 'Default_Rate %' in df.columns:
+                ax2.plot(df.index, df['Default_Rate %'], 'o-', color='#8B0000', linewidth=2, label='Default Rate %')
+            if 'Avg_PD %' in df.columns:
+                ax2.plot(df.index, df['Avg_PD %'], 's-', color='#A52A2A', linewidth=2, label='Avg PD %')
+            
+            ax2.set_ylabel('Rate (%)', fontsize=10)
+            ax2.legend(loc='upper right')
+    
+    # Hide empty subplots
+    for idx in range(n_plots, len(axes)):
+        axes[idx].set_visible(False)
+    
+    plt.suptitle(main_title, fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+# Main Streamlit App
+def main():
+    st.markdown('<h1 class="main-header">📊 Model Summary Dashboard</h1>', unsafe_allow_html=True)
+    
+    # Sidebar for inputs
+    with st.sidebar:
+        st.header("Configuration")
+        
+        # Data source selection
+        data_source = st.radio("Data Source", ["Upload File", "Use Dummy Data"])
+        
+        if data_source == "Upload File":
+            uploaded_file = st.file_uploader("Choose a file", type=['csv', 'pkl', 'xlsx'])
+            if uploaded_file is not None:
+                if uploaded_file.name.endswith('.pkl'):
+                    df = pd.read_pickle(uploaded_file)
+                elif uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
+            else:
+                df = None
+        else:
+            n_records = st.number_input("Number of Records", min_value=1000, max_value=100000, value=10000)
+            df = generate_dummy_data(n_records)
+        
+        if df is not None:
+            st.success(f"Data loaded: {len(df)} records")
+            
+            # Column selection
+            st.subheader("Column Mapping")
+            
+            col_options = df.columns.tolist()
+            
+            target_col = st.selectbox("Target Column (Default Indicator)", col_options, 
+                                     index=col_options.index('intodef_gid') if 'intodef_gid' in col_options else 0)
+            
+            score_col = st.selectbox("Score Column", col_options,
+                                    index=col_options.index('score') if 'score' in col_options else 0)
+            
+            pd_col = st.selectbox("PD Column", col_options,
+                                 index=col_options.index('mid_point_pd') if 'mid_point_pd' in col_options else 0)
+            
+            cohort_col = st.selectbox("Cohort Date Column", col_options,
+                                     index=col_options.index('cohort_date_sas') if 'cohort_date_sas' in col_options else 0)
+            
+            # Group by fields
+            group_fields = st.multiselect("Group By Fields", col_options,
+                                         default=['region', 'L1_industry_groups'] if all(col in col_options for col in ['region', 'L1_industry_groups']) else [])
+            
+            # Metrics selection
+            metrics = st.multiselect("Metrics to Calculate", ['GINI', 'AUROC', 'AR'], default=['GINI'])
+            
+            # File naming
+            st.subheader("Output Files")
+            pdf_name = st.text_input("PDF Filename", value="model_summary.pdf")
+            excel_name = st.text_input("Excel Filename", value="model_summary.xlsx")
+    
+    # Main content area
+    if df is not None:
+        # Display data preview
+        with st.expander("Data Preview"):
+            st.dataframe(df.head(100))
+        
+        # Summary statistics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Observations", f"{len(df):,}")
+        with col2:
+            st.metric("Total Defaults", f"{df[target_col].sum():,}")
+        with col3:
+            st.metric("Default Rate", f"{df[target_col].mean()*100:.2f}%")
+        with col4:
+            st.metric("Avg PD", f"{df[pd_col].mean()*100:.2f}%")
+        
+        # Generate reports button
+        if st.button("Generate Reports", type="primary"):
+            with st.spinner("Generating reports..."):
+                try:
+                    # Create PDF and Excel buffers
+                    pdf_buffer = BytesIO()
+                    excel_buffer = BytesIO()
+                    
+                    # Generate reports
+                    pdf = matplotlib.backends.backend_pdf.PdfPages(pdf_buffer)
+                    writer = pd.ExcelWriter(excel_buffer, engine='openpyxl')
+                    
+                    # Overall summary
+                    overall_report = get_discriminatory_report_optimized(df, cohort_col, target_col, score_col)
+                    
+                    # Display overall summary
+                    st.subheader("Overall Discriminatory Power")
+                    st.dataframe(overall_report)
+                    
+                    # Create and save overall summary plot
+                    fig = create_elegant_table(overall_report, "Overall Discriminatory Power Summary")
+                    pdf.savefig(fig, bbox_inches='tight')
+                    plt.close()
+                    
+                    # Save to Excel
+                    overall_report.to_excel(writer, sheet_name='Overall', index=False)
+                    
+                    # Group-wise analysis
+                    for group_field in group_fields:
+                        st.subheader(f"Analysis by {group_field}")
+                        
+                        group_report = get_discriminatory_report_optimized(df, group_field, target_col, score_col)
+                        st.dataframe(group_report)
+                        
+                        # Create plots
+                        fig = create_elegant_table(group_report, f"Discriminatory Power by {group_field}")
+                        pdf.savefig(fig, bbox_inches='tight')
+                        plt.close()
+                        
+                        # Save to Excel
+                        group_report.to_excel(writer, sheet_name=group_field[:31], index=False)
+                    
+                    # Close files
+                    pdf.close()
+                    writer.close()
+                    
+                    # Provide download buttons
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        pdf_buffer.seek(0)
+                        st.download_button(
+                            label="📄 Download PDF Report",
+                            data=pdf_buffer,
+                            file_name=pdf_name,
+                            mime="application/pdf"
+                        )
+                    
+                    with col2:
+                        excel_buffer.seek(0)
+                        st.download_button(
+                            label="📊 Download Excel Report",
+                            data=excel_buffer,
+                            file_name=excel_name,
+                                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    
+                    st.success("Reports generated successfully!")
+                    
+                except Exception as e:
+                    st.error(f"Error generating reports: {str(e)}")
+    else:
+        st.info("Please upload data or use dummy data to begin analysis.")
+
+# Additional optimized functions for complete functionality
+@st.cache_data
+def generate_seg_table_optimized(df, by, default, score, metrics=['GINI'], 
+                                cohort_column='cohort_date_sas', pd_column='mid_point_pd'):
+    """Optimized segment table generation"""
+    
+    # Add year-quarter column
+    df['year_quarter'] = pd.to_datetime(df[cohort_column]).dt.year * 100 + \
+                        pd.to_datetime(df[cohort_column]).dt.quarter
+    
+    # 1. Discriminatory Power
+    disc_report = get_discriminatory_report_optimized(
+        df[~df[score].isnull()], by, default, score
+    )
+    disc_report.set_index(by, inplace=True)
+    
+    # 2. Observations and Default Rate by year
+    df_group_year = df.groupby([by, 'year_quarter']).agg(
+        Observations=(default, 'count'),
+        defaults=(default, 'sum'),
+        DR=(default, lambda x: x.mean() * 100),
+        pd_yr=(pd_column, lambda x: x.mean() * 100)
+    ).reset_index()
+    
+    # Overall group statistics
+    df_group = df_group_year.groupby(by).agg(
+        Observations=('Observations', 'sum'),
+        Defaults=('defaults', 'sum'),
+        LRADR=('DR', 'mean'),
+        LRA_PD=('pd_yr', 'mean')
+    ).rename(columns={'LRADR': 'LRADR %', 'LRA_PD': 'LRA_PD %'})
+    
+    df_group["Default_Rate %"] = 100 * df_group["Defaults"] / df_group["Observations"]
+    
+    # Merge results
+    result = pd.concat([disc_report.round(3), df_group.round(2)], axis=1)
+    result = result.drop(columns=["# Defaults", "# Observations"] + 
+                        [x for x in ['GINI', 'AUROC', 'AR'] if x not in metrics])
+    
+    # 3. Average PD
+    df_group_avg_pd = df.groupby([by]).agg(
+        Avg_PD=(pd_column, lambda x: x.mean() * 100)
+    ).rename(columns={'Avg_PD': 'Avg_PD %'})
+    
+    result = pd.concat([result, df_group_avg_pd.round(2)], axis=1)
+    
+    # 4. Confidence Intervals
+    result["sigma"] = np.sqrt(result["Avg_PD %"] * (100 - result["Avg_PD %"]) / result["Observations"])
+    result["Upper_Limit_PD(95%)"] = result["Avg_PD %"] + 2 * result["sigma"]
+    result["Lower_Limit_PD(95%)"] = result["Avg_PD %"] - 2 * result["sigma"]
+    result.drop(columns=["sigma"], inplace=True)
+    
+    # Update df_group_year
+    df_group_year.rename(columns={'DR': 'Default_Rate %', 'pd_yr': 'Avg_PD %'}, inplace=True)
+    df_group_year['LRADR %'] = df_group_year[by].map(result['LRADR %'].to_dict())
+    
+    return result, df_group_year
+
+def create_advanced_plots(df_list, text='', hline={}, rates={}, fig_title=[], figtext=''):
+    """Create advanced subplot visualizations with gray-red theme"""
+    n_plots = len(df_list)
+    n_cols = 2
+    n_rows = math.ceil(n_plots / n_cols)
+    
+    # Calculate figure size dynamically
+    fig_height = 5 + n_rows * 4
+    fig = plt.figure(figsize=(20, fig_height))
+    
+    # Add main title
+    fig.suptitle(text, fontweight='bold', fontsize=18, color='#8B0000', y=0.98)
+    
+    # Create subplots
+    for idx, df in enumerate(df_list):
+        ax1 = plt.subplot(n_rows, n_cols, idx + 1)
+        
+        # Bar plot for observations
+        bars = ax1.bar(df.index, df['Observations'], color='lightgray', 
+                       alpha=0.8, edgecolor='darkgray', linewidth=1.5)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{int(height):,}', ha='center', va='bottom', fontsize=8)
+        
+        ax1.set_ylabel('# Observations', fontsize=11, fontweight='bold')
+        ax1.set_title(fig_title[idx] if idx < len(fig_title) else f'Segment {idx+1}', 
+                     fontsize=12, fontweight='bold', pad=10)
+        ax1.tick_params(axis='x', rotation=45, labelsize=9)
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Secondary y-axis for rates
+        ax2 = ax1.twinx()
+        
+        # Plot rates with custom styling
+        for rate_name, color in rates.items():
+            if rate_name in df.columns:
+                line = ax2.plot(df.index, df[rate_name], 'o-', color=color, 
+                               linewidth=2.5, markersize=8, label=rate_name,
+                               markeredgecolor='white', markeredgewidth=1.5)
+        
+        # Plot horizontal lines
+        for hline_name, color in hline.items():
+            if hline_name in df.columns:
+                ax2.axhline(y=df[hline_name].iloc[0], color=color, 
+                           linestyle='--', linewidth=2, label=hline_name, alpha=0.7)
+        
+        ax2.set_ylabel('Rate (%)', fontsize=11, fontweight='bold')
+        ax2.grid(True, alpha=0.2, axis='y')
+        
+        # Legend
+        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), 
+                  ncol=len(rates) + len(hline), fontsize=9, frameon=True, 
+                  fancybox=True, shadow=True)
+    
+    # Hide empty subplots
+    for idx in range(n_plots, n_rows * n_cols):
+        ax = plt.subplot(n_rows, n_cols, idx + 1)
+        ax.set_visible(False)
+    
+    plt.tight_layout()
+    return fig
+
+def combined_metrics_optimized(df, by_list, default, score, metrics=['GINI'],
+                              cohort_column='cohort_date_sas', pd_column='mid_point_pd',
+                              pdf_buffer=None, excel_buffer=None):
+    """Optimized combined metrics generation"""
+    
+    # Prepare data
+    df['year_quarter'] = pd.to_datetime(df[cohort_column]).dt.year * 100 + \
+                        pd.to_datetime(df[cohort_column]).dt.quarter
+    df[''] = "Overall"
+    
+    # Get overall metrics
+    overall_df, _ = generate_seg_table_optimized(
+        df, by='', default=default, score=score, 
+        metrics=metrics, cohort_column=cohort_column, pd_column=pd_column
+    )
+    lradr_value = overall_df['LRADR %'].max()
+    
+    # Initialize PDF and Excel writers
+    pdf = matplotlib.backends.backend_pdf.PdfPages(pdf_buffer)
+    writer = pd.ExcelWriter(excel_buffer, engine='openpyxl')
+    
+    # Process each grouping field
+    for i, v in enumerate([cohort_column] + by_list):
+        df_list, summary = [], []
+        
+        # Generate segment table
+        z1, df_group_year = generate_seg_table_optimized(
+            df, by=v, default=default, score=score, 
+            metrics=metrics, cohort_column=cohort_column, pd_column=pd_column
+        )
+        
+        # Add overall LRADR for comparison
+        df_group_year['Overall_LRADR %'] = lradr_value
+        df_group_year.to_excel(writer, sheet_name=v[:31], index=False)
+        
+        # Create individual dataframes for each segment
+        for val in z1.index.unique():
+            segment_df = df_group_year[df_group_year[v] == val].set_index('year_quarter')
+            df_list.append(segment_df)
+        
+        # Format the summary table
+        tab_z = z1.reset_index().copy()
+        overall_by = overall_df.reset_index().copy()
+        overall_by = overall_by.rename(columns=dict(zip(overall_by.columns, tab_z.columns)))
+        tab_z = pd.concat([tab_z, overall_by], ignore_index=True)
+        
+        # Format numeric columns
+        rates_col = [x for x in tab_z.select_dtypes(include=[np.number]).columns if '%' in x]
+        col_other = list(set(tab_z.select_dtypes(include=[np.number]).columns) - set(metrics + rates_col))
+        
+        for col in metrics:
+            if col in tab_z.columns:
+                tab_z[col] = tab_z[col].apply(lambda x: f'{x:.1f}' if pd.notna(x) else '')
+        
+        for col in col_other:
+            if col in tab_z.columns:
+                tab_z[col] = tab_z[col].apply(lambda x: f'{x:,.0f}' if pd.notna(x) else '')
+        
+        for col in rates_col:
+            if col in tab_z.columns:
+                tab_z[col] = tab_z[col].apply(lambda x: f'{x:.2f}' if pd.notna(x) else '')
+        
+        # Set titles based on analysis type
+        if v == cohort_column:
+            fig_title = f"Fig {i+1}: Cross temporal back-testing predicted vs observed (total population)"
+            text = f"{i+1} Cross temporal back-testing"
+            tab_title = f"Table {i+1}: Cross temporal back-testing predicted vs observed and discriminatory power"
+        else:
+            text = f"{2}.{i}\n\na. Cross Sectional Analysis - {v}"
+            fig_title = f"Fig {2}.{i}: Cross Sectional Analysis - {v}"
+            tab_title = f"Table {2}.{i}: Cross Sectional Analysis - {v}"
+        
+        # Create main chart
+        z2 = z1.copy()
+        z2['Overall_LRADR %'] = lradr_value
+        z2.index = z2.index.astype('str')
+        
+        fig, ax1 = plt.subplots(figsize=(18, 10))
+        
+        # Style the plot
+        plt.style.use('seaborn-v0_8-whitegrid')
+        fig.patch.set_facecolor('white')
+        
+        # Bar plot
+        bars = z2.plot(y='Observations', kind='bar', color='lightgray', 
+                      ax=ax1, legend=False, edgecolor='darkgray', linewidth=1.5)
+        ax1.set_ylabel('# Observations', fontsize=12, fontweight='bold')
+        ax1.set_xlabel('')
+        ax1.set_xticklabels(z2.index, rotation=45, ha='right')
+        
+        # Secondary axis
+        ax2 = ax1.twinx()
+        
+        # Plot lines with enhanced styling
+        lines = []
+        lines.append(ax2.plot(z2.index, z2['LRADR %'], 'o-', color='#FF6B6B', 
+                             marker='s', linewidth=2.5, markersize=8, label='LRADR %')[0])
+        lines.append(ax2.plot(z2.index, z2['LRA_PD %'], 'o-', color='#4ECDC4', 
+                             marker='D', linewidth=2.5, markersize=8, label='LRA_PD %')[0])
+        lines.append(ax2.plot(z2.index, z2['Default_Rate %'], 'o-', color='#8B0000', 
+                             marker='o', linewidth=3, markersize=9, label='Default_Rate %')[0])
+        lines.append(ax2.plot(z2.index, z2['Avg_PD %'], 'o-', color='#2C3E50', 
+                             marker='^', linewidth=2.5, markersize=8, label='Avg_PD %')[0])
+        
+        # Confidence interval
+        ax2.fill_between(range(len(z2.index)), z2["Lower_Limit_PD(95%)"], 
+                        z2["Upper_Limit_PD(95%)"], color="#2C3E50", alpha=0.2)
+        
+        # Horizontal line
+        ax2.axhline(y=lradr_value, color='black', linestyle='--', 
+                   linewidth=2, label='Overall_LRADR %', alpha=0.7)
+        
+        ax2.set_ylabel('Rate (%)', fontsize=12, fontweight='bold')
+        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), 
+                  ncol=5, fontsize=10, frameon=True, fancybox=True, shadow=True)
+        
+        plt.title(fig_title, fontsize=16, fontweight='bold', pad=20)
+        plt.tight_layout()
+        
+        pdf.savefig(fig, bbox_inches='tight', pad_inches=1)
+        plt.close()
+        
+        # Create subplots for segments
+        if v != cohort_column and df_list:
+            subplot_fig = create_advanced_plots(
+                df_list=df_list,
+                hline={'LRADR %': '#FF6B6B', 'Overall_LRADR %': 'black'},
+                rates={'Default_Rate %': '#8B0000', 'Avg_PD %': '#2C3E50'},
+                fig_title=z2.index.tolist(),
+                text=f"b. Cross temporal back-testing by {v}"
+            )
+            pdf.savefig(subplot_fig, bbox_inches='tight', pad_inches=1)
+            plt.close()
+        
+        # Create elegant table
+        table_fig = create_elegant_table(tab_z, tab_title)
+        pdf.savefig(table_fig, bbox_inches='tight', pad_inches=1)
+        plt.close()
+    
+    # Close files
+    pdf.close()
+    writer.close()
+    
+    return True
+
+# Run the app
+if __name__ == "__main__":
+    main()
+
