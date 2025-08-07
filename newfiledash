@@ -1,0 +1,147 @@
+import streamlit as st
+import yaml
+import os
+import subprocess
+import pandas as pd
+import glob
+import matplotlib.pyplot as plt
+
+# === Helper: Save YAML ===
+def save_yaml(config, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+# === Helper: Run your SFA function ===
+def run_sfa_function(config_path):
+    from your_module import run_sfa  # Replace with your actual import
+    run_sfa(config_path)
+
+# === Helper: Read charts and tables ===
+def list_outputs(output_dir):
+    charts = glob.glob(f"{output_dir}/**/*.png", recursive=True)
+    tables = glob.glob(f"{output_dir}/**/*.csv", recursive=True)
+    excels = glob.glob(f"{output_dir}/**/*.xlsx", recursive=True)
+    return charts, tables, excels
+
+# === MAIN STREAMLIT APP ===
+st.set_page_config(page_title="SFA Configurator", layout="wide")
+st.title("SFA Config Builder & Runner")
+
+tab1, tab2, tab3 = st.tabs(["🛠 Build Config", "🚀 Run SFA", "📊 View Outputs"])
+
+# -----------------------------
+# TAB 1: CONFIGURATION BUILDER
+# -----------------------------
+with tab1:
+    st.header("Build SFA Configuration")
+    
+    with st.form("sfa_config_form"):
+        process_name = st.text_input("Short process name", "test_run")
+        process_name_long = st.text_input("Long process name", "")
+        target_variable = st.text_input("Target variable column", "target")
+
+        imputation_analysis_segmentors = st.multiselect(
+            "Imputation segmentors", ["segment1", "segment2", "segment3"], []
+        )
+        continuous_imputation_method = st.selectbox("Imputation method", ["mean", "median", "mode"])
+        outlier_detection_approach = st.selectbox("Outlier detection", ["grubbs", "local_outlier_factor", "iqr"])
+        max_segmentation_levels = st.number_input("Max segmentation levels", 1, 5, 3)
+        inplace_imputation = st.checkbox("In-place imputation", value=True)
+        gini_delta_threshold = st.number_input("Gini delta threshold", 0.0, 1.0, 0.01)
+        kw_p_value_threshold = st.number_input("KW p-value threshold", 0.0, 1.0, 0.05)
+        winsorisation_quantiles = st.number_input("Winsorisation quantiles", 1, 100, 20)
+        maximum_winsorisation = st.slider("Max winsorisation", 0.0, 1.0, 0.4)
+
+        st.subheader("Run Paths")
+        data_path = st.text_input("Data file path (.csv)", "data/data.csv")
+        variable_config_path = st.text_input("Variable config path (.xlsx)", "configs/variable_config.xlsx")
+        output_directory_path = st.text_input("Output directory", f"outputs/{process_name}")
+
+        st.subheader("Run Flags")
+        winsorisation_analysis = st.checkbox("Winsorisation analysis", value=True)
+        winsorisation_application = st.checkbox("Apply winsorisation", value=True)
+        imputation_analysis = st.checkbox("Imputation analysis", value=True)
+        imputation_application = st.checkbox("Apply imputation", value=True)
+
+        config_save_path = st.text_input("YAML Save Path", f"configs/{process_name}.yaml")
+
+        submitted = st.form_submit_button("Save Config")
+
+        if submitted:
+            config = {
+                "run_parameters": {
+                    "process_name": process_name,
+                    "process_name_long": process_name_long,
+                    "target_variable": target_variable,
+                    "imputation_analysis_segmentors": imputation_analysis_segmentors,
+                    "continuous_imputation_method": continuous_imputation_method,
+                    "outlier_detection_approach": outlier_detection_approach,
+                    "max_segmentation_levels": max_segmentation_levels,
+                    "inplace_imputation": inplace_imputation,
+                    "gini_delta_threshold": gini_delta_threshold,
+                    "kw_p_value_threshold": kw_p_value_threshold,
+                    "winsorisation_quantiles": winsorisation_quantiles,
+                    "maximum_winsorisation": maximum_winsorisation,
+                    "run_paths": {
+                        "data_path": data_path,
+                        "variable_config_path": variable_config_path,
+                        "output_directory_path": output_directory_path,
+                    },
+                    "run_flags": {
+                        "winsorisation_analysis": winsorisation_analysis,
+                        "winsorisation_application": winsorisation_application,
+                        "imputation_analysis": imputation_analysis,
+                        "imputation_application": imputation_application,
+                    },
+                }
+            }
+            save_yaml(config, config_save_path)
+            st.success(f"YAML saved to {config_save_path}")
+
+# -----------------------------
+# TAB 2: RUN SFA MODULE
+# -----------------------------
+with tab2:
+    st.header("Run SFA")
+    config_to_run = st.text_input("Path to config file to run", value=config_save_path)
+    run_button = st.button("Run SFA now")
+
+    if run_button:
+        try:
+            with st.spinner("Running SFA..."):
+                run_sfa_function(config_to_run)
+            st.success("SFA run completed.")
+        except Exception as e:
+            st.error(f"Failed to run SFA: {e}")
+
+# -----------------------------
+# TAB 3: VIEW OUTPUTS
+# -----------------------------
+with tab3:
+    st.header("Visualize Outputs")
+    output_path = st.text_input("Enter Output Directory Path", value=output_directory_path)
+
+    if st.button("Load Outputs"):
+        charts, tables, excels = list_outputs(output_path)
+
+        if charts:
+            st.subheader("Charts")
+            for chart in charts:
+                st.image(chart, caption=os.path.basename(chart), use_column_width=True)
+        else:
+            st.info("No charts found.")
+
+        if tables:
+            st.subheader("CSV Tables")
+            for table in tables:
+                df = pd.read_csv(table)
+                st.markdown(f"**{os.path.basename(table)}**")
+                st.dataframe(df)
+
+        if excels:
+            st.subheader("Excel Files")
+            for file in excels:
+                st.markdown(f"📁 `{file}`")
+        elif not charts and not tables and not excels:
+            st.warning("No output files found in this folder.")
