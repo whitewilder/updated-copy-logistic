@@ -1,0 +1,1039 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
+import os
+import yaml
+import json
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Import your CLT library components
+try:
+    from clt.configs.sfa_setup import SfaRunParameters, SfaRunPaths, SfaRunFlags, SfaRunSetup
+    from clt.regression.regression_utils import RegressionModelName
+    from clt.sfa.sfa_workflow import run_sfa
+    from clt.configs.config import generate_workflow_config
+except ImportError:
+    st.error("CLT library not found. Please ensure it's installed.")
+
+# Page configuration
+st.set_page_config(
+    page_title="SFA Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #2c3e50;
+        margin-bottom: 1rem;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'run_history' not in st.session_state:
+    st.session_state.run_history = []
+if 'current_results' not in st.session_state:
+    st.session_state.current_results = None
+if 'config_saved' not in st.session_state:
+    st.session_state.config_saved = False
+
+# Title
+st.markdown('<h1 class="main-header">🔬 Statistical Factor Analysis (SFA) Dashboard</h1>', unsafe_allow_html=True)
+
+# Sidebar for navigation
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Select Page", ["Configuration", "Run Analysis", "Results", "History"])
+
+# Model selection
+available_models = [
+    "LINEAR",
+    "LOGISTIC",
+    "RANDOM_FOREST",
+    "GRADIENT_BOOSTING",
+    "XGB",
+    "NEURAL_NETWORK"
+]
+
+if page == "Configuration":
+    st.markdown('<h2 class="sub-header">📋 SFA Configuration</h2>', unsafe_allow_html=True)
+    
+    # Create tabs for different configuration sections
+    tab1, tab2, tab3, tab4 = st.tabs(["Run Parameters", "Paths", "Flags", "Model Settings"])
+    
+    with tab1:
+        st.subheader("Run Parameters")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            process_name = st.text_input("Process Name", value="SFA", key="process_name")
+            process_name_long = st.text_input("Process Name (Long)", value="SFA_Testing", key="process_name_long")
+            target_variable = st.text_input("Target Variable", value="Final_PD", key="target_variable")
+            target_transformation = st.selectbox(
+                "Target Transformation Metric",
+                ["event_rate", "log_odds", "none"],
+                key="target_transformation"
+            )
+        
+        with col2:
+            model_engine = st.selectbox("Model Engine", available_models, key="model_engine")
+            discriminatory_power_measure = st.selectbox(
+                "Discriminatory Power Measure",
+                ["gini", "auc", "ks"],
+                key="discriminatory_power_measure"
+            )
+            discriminatory_power_threshold = st.slider(
+                "Discriminatory Power Threshold",
+                0.0, 1.0, 0.1,
+                key="discriminatory_power_threshold"
+            )
+            no_bins_uniform = st.number_input("Number of Uniform Bins", value=10, min_value=2, max_value=50, key="no_bins_uniform")
+    
+    with tab2:
+        st.subheader("File Paths")
+        data_path = st.text_input("Data Path", value="data/data.csv", key="data_path")
+        variable_config_path = st.text_input("Variable Config Path", value="config/variable_config.xlsx", key="variable_config_path")
+        output_directory_path = st.text_input("Output Directory Path", value="output/", key="output_directory_path")
+        
+        # File upload options
+        st.subheader("Upload Files")
+        uploaded_data = st.file_uploader("Upload Data File (CSV)", type=['csv'])
+        uploaded_config = st.file_uploader("Upload Variable Config (Excel)", type=['xlsx'])
+        
+        if uploaded_data:
+            # Save uploaded file
+            with open(data_path, "wb") as f:
+                f.write(uploaded_data.getbuffer())
+            st.success(f"Data file saved to {data_path}")
+        
+        if uploaded_config:
+            # Save uploaded file
+            with open(variable_config_path, "wb") as f:
+                f.write(uploaded_config.getbuffer())
+            st.success(f"Config file saved to {variable_config_path}")
+    
+    with tab3:
+        st.subheader("Analysis Flags")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            sfa_univariate_distribution = st.checkbox("Univariate Distribution", value=True, key="sfa_univariate_distribution")
+            sfa_univariate_discriminatory = st.checkbox("Univariate Discriminatory", value=True, key="sfa_univariate_discriminatory")
+            sfa_univariate_sign = st.checkbox("Univariate Sign", value=False, key="sfa_univariate_sign")
+        
+        with col2:
+            sfa_variable_transformation = st.checkbox("Variable Transformation", value=True, key="sfa_variable_transformation")
+            sfa_bivariate_correlation = st.checkbox("Bivariate Correlation", value=True, key="sfa_bivariate_correlation")
+            sfa_regression = st.checkbox("Regression", value=True, key="sfa_regression")
+    
+    with tab4:
+        st.subheader("Additional Model Settings")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            winsorise_continuous = st.checkbox("Winsorise Continuous Variables", value=False, key="winsorise_continuous")
+            outlier_detection = st.selectbox(
+                "Outlier Detection Approach",
+                ["local_outlier_factor", "isolation_forest", "none"],
+                key="outlier_detection"
+            )
+            keep_all_variables = st.checkbox("Keep All Variables", value=True, key="keep_all_variables")
+        
+        with col2:
+            output_correlation_matrix = st.checkbox("Output Correlation Matrix", value=False, key="output_correlation_matrix")
+            correlation_warning_threshold = st.number_input(
+                "Correlation Warning Threshold",
+                value=40, min_value=10, max_value=100,
+                key="correlation_warning_threshold"
+            )
+            save_modified_dataframe = st.checkbox("Save Modified DataFrame", value=False, key="save_modified_dataframe")
+    
+    # Save configuration button
+    col1, col2, col3 = st.columns([1, 1, 3])
+    with col1:
+        if st.button("💾 Save Configuration", type="primary"):
+            # Create configuration dictionary
+            config = {
+                "process_name": st.session_state.process_name,
+                "process_name_long": st.session_state.process_name_long,
+                "model_engine": st.session_state.model_engine,
+                "target_variable": st.session_state.target_variable,
+                "target_transformation_metric": st.session_state.target_transformation,
+                "discriminatory_power_measure": st.session_state.discriminatory_power_measure,
+                "discriminatory_power_threshold": st.session_state.discriminatory_power_threshold,
+                "no_bins_uniform": st.session_state.no_bins_uniform,
+                "data_path": st.session_state.data_path,
+                "variable_config_path": st.session_state.variable_config_path,
+                "output_directory_path": st.session_state.output_directory_path,
+                "winsorise_continuous_variables": st.session_state.winsorise_continuous,
+                "outlier_detection_approach": st.session_state.outlier_detection,
+                "output_correlation_matrix": st.session_state.output_correlation_matrix,
+                "correlation_warning_no_drivers": st.session_state.correlation_warning_threshold,
+                "keep_all_variables": st.session_state.keep_all_variables,
+                "save_modified_dataframe": st.session_state.save_modified_dataframe,
+                "flags": {
+                    "sfa_univariate_distribution": st.session_state.sfa_univariate_distribution,
+                    "sfa_univariate_discriminatory": st.session_state.sfa_univariate_discriminatory,
+                    "sfa_univariate_sign": st.session_state.sfa_univariate_sign,
+                    "sfa_variable_transformation": st.session_state.sfa_variable_transformation,
+                    "sfa_bivariate_correlation": st.session_state.sfa_bivariate_correlation,
+                    "sfa_regression": st.session_state.sfa_regression
+                }
+            }
+            
+            # Save to session state
+            st.session_state.saved_config = config
+            st.session_state.config_saved = True
+            
+            # Save to YAML file
+            yaml_path = "config/sfa_dashboard_config.yaml"
+            os.makedirs("config", exist_ok=True)
+            with open(yaml_path, 'w') as f:
+                yaml.dump(config, f)
+            
+            st.success("✅ Configuration saved successfully!")
+    
+    with col2:
+        if st.button("📥 Load Configuration"):
+            try:
+                with open("config/sfa_dashboard_config.yaml", 'r') as f:
+                    loaded_config = yaml.safe_load(f)
+                
+                # Update session state with loaded values
+                for key, value in loaded_config.items():
+                    if key != "flags" and key in st.session_state:
+                        st.session_state[key] = value
+                
+                if "flags" in loaded_config:
+                    for flag_key, flag_value in loaded_config["flags"].items():
+                        if flag_key in st.session_state:
+                            st.session_state[flag_key] = flag_value
+                
+                st.success("✅ Configuration loaded successfully!")
+                st.rerun()
+            except FileNotFoundError:
+                st.error("No saved configuration found!")
+
+elif page == "Run Analysis":
+    st.markdown('<h2 class="sub-header">🚀 Run SFA Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.config_saved:
+        st.warning("⚠️ Please save your configuration first in the Configuration page.")
+    else:
+        st.success("✅ Configuration loaded. Ready to run analysis.")
+        
+        # Display current configuration
+        with st.expander("View Current Configuration"):
+            st.json(st.session_state.saved_config)
+        
+        # Run analysis button
+        if st.button("🔬 Run SFA Analysis", type="primary"):
+            with st.spinner("Running SFA analysis... This may take a few minutes."):
+                try:
+                    # Create SfaRunSetup instance
+                    config = st.session_state.saved_config
+                    
+                    # Map model engine string to enum
+                    model_mapping = {
+                        "LINEAR": RegressionModelName.LINEAR,
+                        "LOGISTIC": RegressionModelName.LOGISTIC,
+                        "RANDOM_FOREST": RegressionModelName.RANDOM_FOREST,
+                        "GRADIENT_BOOSTING": RegressionModelName.GRADIENT_BOOSTING,
+                        "XGB": RegressionModelName.XGB,
+                        "NEURAL_NETWORK": RegressionModelName.NEURAL_NETWORK
+                    }
+                    
+                    sfa_run_setup = SfaRunSetup(
+                        run_parameters=SfaRunParameters(
+                            process_name=config["process_name"],
+                            process_name_long=config["process_name_long"],
+                            model_engine=model_mapping.get(config["model_engine"], RegressionModelName.LINEAR),
+                            target_transformation_metric=config["target_transformation_metric"],
+                            winsorise_continuous_variables=config["winsorise_continuous_variables"],
+                            outlier_detection_approach=config["outlier_detection_approach"],
+                            discriminatory_power_measure=config["discriminatory_power_measure"],
+                            discriminatory_power_threshold=config["discriminatory_power_threshold"],
+                            no_bins_uniform=config["no_bins_uniform"],
+                            output_correlation_matrix=config["output_correlation_matrix"],
+                            correlation_warning_no_drivers=config["correlation_warning_no_drivers"],
+                            keep_all_variables=config["keep_all_variables"],
+                            save_modified_dataframe=config["save_modified_dataframe"],
+                            target_variable=config["target_variable"]
+                        ),
+                        run_paths=SfaRunPaths(
+                            data_path=config["data_path"],
+                            variable_config_path=config["variable_config_path"],
+                            output_directory_path=config["output_directory_path"]
+                        ),
+                        run_flags={
+                            SfaRunFlags.sfa_univariate_distribution: config["flags"]["sfa_univariate_distribution"],
+                            SfaRunFlags.sfa_univariate_discriminatory: config["flags"]["sfa_univariate_discriminatory"],
+                            SfaRunFlags.sfa_univariate_sign: config["flags"]["sfa_univariate_sign"],
+                            SfaRunFlags.sfa_variable_transformation: config["flags"]["sfa_variable_transformation"],
+                            SfaRunFlags.sfa_bivariate_correlation: config["flags"]["sfa_bivariate_correlation"],
+                            SfaRunFlags.sfa_regression: config["flags"]["sfa_regression"]
+                        }
+                    )
+                    
+                    # Run SFA
+                    results = run_sfa(run_setup=sfa_run_setup)
+                    
+                    # Store results
+                    run_info = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "model": config["model_engine"],
+                        "target": config["target_variable"],
+                        "status": "Success",
+                        "output_path": config["output_directory_path"]
+                    }
+                    
+                    st.session_state.run_history.append(run_info)
+                    st.session_state.current_results = results
+                    
+                    st.success("✅ SFA analysis completed successfully!")
+                    st.balloons()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error running SFA: {str(e)}")
+                    run_info = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "model": config["model_engine"],
+                        "target": config["target_variable"],
+                        "status": "Failed",
+                                         "error": str(e)
+                    }
+                    st.session_state.run_history.append(run_info)
+
+elif page == "Results":
+    st.markdown('<h2 class="sub-header">📊 Analysis Results</h2>', unsafe_allow_html=True)
+    
+    # Check if results are available
+    if st.session_state.current_results is None and st.session_state.run_history:
+        # Try to load the most recent results
+        latest_run = st.session_state.run_history[-1]
+        if latest_run["status"] == "Success":
+            output_path = latest_run["output_path"]
+            st.info(f"Loading results from: {output_path}")
+    
+    # Create tabs for different result views
+    result_tabs = st.tabs([
+        "Summary", 
+        "Univariate Analysis", 
+        "Bivariate Analysis", 
+        "Model Performance", 
+        "Variable Importance",
+        "Correlation Matrix",
+        "Data Quality"
+    ])
+    
+    with result_tabs[0]:  # Summary
+        st.subheader("📈 Analysis Summary")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        # Mock metrics - replace with actual results
+        with col1:
+            st.metric("Model Performance (Gini)", "0.75", "↑ 0.05")
+        with col2:
+            st.metric("Variables Analyzed", "45", "")
+        with col3:
+            st.metric("Variables Selected", "12", "")
+        with col4:
+            st.metric("Data Quality Score", "92%", "↑ 2%")
+        
+        # Summary statistics table
+        st.subheader("Key Statistics")
+        summary_data = {
+            "Metric": ["Total Observations", "Target Event Rate", "Missing Data %", "Outliers Detected"],
+            "Value": ["10,000", "5.2%", "3.1%", "156"],
+            "Status": ["✅", "✅", "⚠️", "ℹ️"]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    
+    with result_tabs[1]:  # Univariate Analysis
+        st.subheader("📊 Univariate Analysis")
+        
+        # Variable filter
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            selected_variable = st.selectbox(
+                "Select Variable",
+                ["Variable_1", "Variable_2", "Variable_3", "Variable_4", "Variable_5"]
+            )
+        with col2:
+            chart_type = st.selectbox("Chart Type", ["Distribution", "Box Plot", "QQ Plot"])
+        
+        # Create sample visualizations
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Distribution plot
+            if chart_type == "Distribution":
+                fig = go.Figure()
+                x = np.random.normal(0, 1, 1000)
+                fig.add_trace(go.Histogram(x=x, name='Distribution', nbinsx=30))
+                fig.update_layout(
+                    title=f"Distribution of {selected_variable}",
+                    xaxis_title=selected_variable,
+                    yaxis_title="Frequency",
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            elif chart_type == "Box Plot":
+                fig = go.Figure()
+                y = np.random.normal(0, 1, 1000)
+                fig.add_trace(go.Box(y=y, name=selected_variable))
+                fig.update_layout(
+                    title=f"Box Plot of {selected_variable}",
+                    yaxis_title=selected_variable,
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            else:  # QQ Plot
+                fig, ax = plt.subplots(figsize=(8, 6))
+                from scipy import stats
+                stats.probplot(np.random.normal(0, 1, 1000), dist="norm", plot=ax)
+                ax.set_title(f"QQ Plot of {selected_variable}")
+                st.pyplot(fig)
+        
+        with col2:
+            # Variable statistics
+            st.subheader("Variable Statistics")
+            stats_data = {
+                "Statistic": ["Mean", "Median", "Std Dev", "Min", "Max", "Skewness", "Kurtosis"],
+                "Value": ["0.023", "0.019", "1.245", "-3.456", "4.789", "0.234", "2.987"]
+            }
+            stats_df = pd.DataFrame(stats_data)
+            st.dataframe(stats_df, use_container_width=True, hide_index=True)
+            
+            # Discriminatory power
+            st.subheader("Discriminatory Power")
+            gini_score = 0.65
+            st.progress(gini_score)
+            st.write(f"Gini Score: {gini_score:.3f}")
+    
+    with result_tabs[2]:  # Bivariate Analysis
+        st.subheader("📊 Bivariate Analysis")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            var1 = st.selectbox("Variable 1", ["Variable_1", "Variable_2", "Variable_3"])
+        with col2:
+            var2 = st.selectbox("Variable 2", ["Variable_4", "Variable_5", "Variable_6"])
+        
+        # Scatter plot
+        fig = px.scatter(
+            x=np.random.normal(0, 1, 500),
+            y=np.random.normal(0, 1, 500),
+            color=np.random.choice([0, 1], 500),
+            labels={'x': var1, 'y': var2, 'color': 'Target'},
+            title=f"Scatter Plot: {var1} vs {var2}"
+        )
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Correlation coefficient
+        correlation = np.random.uniform(-1, 1)
+        st.metric("Correlation Coefficient", f"{correlation:.3f}")
+    
+    with result_tabs[3]:  # Model Performance
+        st.subheader("🎯 Model Performance")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # ROC Curve
+            fpr = np.linspace(0, 1, 100)
+            tpr = np.sqrt(fpr) + np.random.normal(0, 0.05, 100)
+            tpr = np.clip(tpr, 0, 1)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name='ROC Curve'))
+            fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines', 
+                                   line=dict(dash='dash'), name='Random'))
+            fig.update_layout(
+                title="ROC Curve",
+                xaxis_title="False Positive Rate",
+                yaxis_title="True Positive Rate",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Lift Chart
+            deciles = list(range(1, 11))
+            lift = [3.5, 3.2, 2.8, 2.4, 2.0, 1.6, 1.3, 1.0, 0.7, 0.4]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=deciles, y=lift, name='Lift'))
+            fig.add_trace(go.Scatter(x=deciles, y=[1]*10, mode='lines',
+                                   line=dict(dash='dash'), name='Baseline'))
+            fig.update_layout(
+                title="Lift Chart by Decile",
+                xaxis_title="Decile",
+                yaxis_title="Lift",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Performance metrics table
+        st.subheader("Performance Metrics")
+        metrics_data = {
+            "Metric": ["AUC", "Gini", "KS Statistic", "Accuracy", "Precision", "Recall"],
+            "Training": [0.85, 0.70, 0.45, 0.82, 0.78, 0.75],
+            "Validation": [0.83, 0.66, 0.42, 0.80, 0.76, 0.73],
+            "Difference": [-0.02, -0.04, -0.03, -0.02, -0.02, -0.02]
+        }
+        metrics_df = pd.DataFrame(metrics_data)
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+    
+    with result_tabs[4]:  # Variable Importance
+        st.subheader("🎯 Variable Importance")
+        
+        # Variable importance chart
+        variables = [f"Variable_{i}" for i in range(1, 11)]
+        importance = sorted([np.random.uniform(0, 100) for _ in range(10)], reverse=True)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=importance,
+            y=variables,
+            orientation='h',
+            marker_color='lightblue'
+        ))
+        fig.update_layout(
+            title="Top 10 Most Important Variables",
+            xaxis_title="Importance Score",
+            yaxis_title="Variable",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Variable selection summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Variables", "45")
+        with col2:
+            st.metric("Selected Variables", "12")
+        with col3:
+            st.metric("Rejected Variables", "33")
+    
+    with result_tabs[5]:  # Correlation Matrix
+        st.subheader("🔗 Correlation Matrix")
+        
+        # Generate sample correlation matrix
+        n_vars = 10
+        corr_matrix = np.random.rand(n_vars, n_vars)
+        corr_matrix = (corr_matrix + corr_matrix.T) / 2
+        np.fill_diagonal(corr_matrix, 1)
+        
+        # Create heatmap
+        fig = go.Figure(data=go.Heatmap(
+            z=corr_matrix,
+            x=[f"Var_{i}" for i in range(1, n_vars+1)],
+            y=[f"Var_{i}" for i in range(1, n_vars+1)],
+            colorscale='RdBu',
+            zmid=0,
+            text=np.round(corr_matrix, 2),
+            texttemplate='%{text}',
+            textfont={"size": 10}
+        ))
+        fig.update_layout(
+            title="Variable Correlation Matrix",
+            height=600,
+            width=800
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # High correlation pairs
+        st.subheader("High Correlation Pairs (|r| > 0.7)")
+        high_corr_data = {
+            "Variable 1": ["Variable_2", "Variable_5", "Variable_7"],
+            "Variable 2": ["Variable_3", "Variable_8", "Variable_9"],
+            "Correlation": [0.85, -0.78, 0.72]
+        }
+        high_corr_df = pd.DataFrame(high_corr_data)
+        st.dataframe(high_corr_df, use_container_width=True, hide_index=True)
+    
+    with result_tabs[6]:  # Data Quality
+        st.subheader("🔍 Data Quality Report")
+        
+        # Missing data analysis
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Missing data by variable
+            variables = [f"Variable_{i}" for i in range(1, 11)]
+            missing_pct = [np.random.uniform(0, 10) for _ in range(10)]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=variables, y=missing_pct))
+            fig.update_layout(
+                title="Missing Data by Variable (%)",
+                xaxis_title="Variable",
+                yaxis_title="Missing %",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Data quality metrics
+            st.subheader("Quality Metrics")
+            quality_data = {
+                "Check": ["Completeness", "Uniqueness", "Validity", "Consistency"],
+                "Score": ["97%", "99%", "95%", "98%"],
+                "Status": ["✅", "✅", "⚠️", "✅"]
+            }
+            quality_df = pd.DataFrame(quality_data)
+            st.dataframe(quality_df, use_container_width=True, hide_index=True)
+        
+        # Outlier detection results
+        st.subheader("Outlier Detection Results")
+        outlier_data = {
+            "Variable": ["Variable_1", "Variable_3", "Variable_7", "Variable_9"],
+            "Outliers Detected": [12, 8, 25, 5],
+            "% of Total": ["0.12%", "0.08%", "0.25%", "0.05%"],
+            "Action": ["Winsorized", "Winsorized", "Flagged", "Kept"]
+        }
+        outlier_df = pd.DataFrame(outlier_data)
+        st.dataframe(outlier_df, use_container_width=True, hide_index=True)
+
+elif page == "History":
+    st.markdown('<h2 class="sub-header">📜 Run History</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.run_history:
+        st.info("No analysis runs yet. Go to 'Run Analysis' to start.")
+    else:
+        # Display run history
+        history_df = pd.DataFrame(st.session_state.run_history)
+        
+        # Add filters
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            status_filter = st.selectbox("Filter by Status", ["All", "Success", "Failed"])
+        with col2:
+            model_filter = st.selectbox("Filter by Model", ["All"] + available_models)
+        
+        # Apply filters
+        filtered_df = history_df.copy()
+        if status_filter != "All":
+            filtered_df = filtered_df[filtered_df["status"] == status_filter]
+        if model_filter != "All":
+            filtered_df = filtered_df[filtered_df["model"] == model_filter]
+        
+        # Display filtered results
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+        
+        # Export functionality
+        if st.button("📥 Export History to CSV"):
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                label="Download CSV",
+                data=csv,
+                file_name=f"sfa_run_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        
+        # Clear history button
+        if st.button("🗑️ Clear History", type="secondary"):
+                        st.session_state.run_history = []
+            st.success("History cleared!")
+            st.rerun()
+        
+        # Run comparison
+        if len(filtered_df) >= 2:
+            st.subheader("📊 Compare Runs")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                run1_idx = st.selectbox("Select First Run", range(len(filtered_df)), 
+                                       format_func=lambda x: f"{filtered_df.iloc[x]['timestamp']} - {filtered_df.iloc[x]['model']}")
+            with col2:
+                run2_idx = st.selectbox("Select Second Run", range(len(filtered_df)), 
+                                       format_func=lambda x: f"{filtered_df.iloc[x]['timestamp']} - {filtered_df.iloc[x]['model']}")
+            
+            if st.button("Compare Selected Runs"):
+                # Create comparison view
+                st.subheader("Run Comparison")
+                
+                comparison_data = {
+                    "Metric": ["Model", "Target Variable", "Status", "Timestamp"],
+                    "Run 1": [
+                        filtered_df.iloc[run1_idx]['model'],
+                        filtered_df.iloc[run1_idx]['target'],
+                        filtered_df.iloc[run1_idx]['status'],
+                        filtered_df.iloc[run1_idx]['timestamp']
+                    ],
+                    "Run 2": [
+                        filtered_df.iloc[run2_idx]['model'],
+                        filtered_df.iloc[run2_idx]['target'],
+                        filtered_df.iloc[run2_idx]['status'],
+                        filtered_df.iloc[run2_idx]['timestamp']
+                    ]
+                }
+                comparison_df = pd.DataFrame(comparison_data)
+                st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+# Footer
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; color: #666;'>
+        SFA Dashboard v1.0 | Built with Streamlit
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# Sidebar additional information
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("ℹ️ Information")
+    st.info(
+        """
+        **Statistical Factor Analysis (SFA)**
+        
+        This dashboard allows you to:
+        - Configure SFA parameters
+        - Run analysis with multiple models
+        - View comprehensive results
+        - Track run history
+        
+        For support, check the documentation.
+        """
+    )
+    
+    # Quick stats
+    if st.session_state.run_history:
+        st.subheader("📊 Quick Stats")
+        total_runs = len(st.session_state.run_history)
+        successful_runs = len([r for r in st.session_state.run_history if r["status"] == "Success"])
+        st.metric("Total Runs", total_runs)
+        st.metric("Successful Runs", successful_runs)
+        if total_runs > 0:
+            success_rate = (successful_runs / total_runs) * 100
+            st.metric("Success Rate", f"{success_rate:.1f}%")
+
+# Helper functions for loading actual results
+def load_sfa_results(output_path):
+    """Load SFA results from output directory"""
+    results = {}
+    
+    try:
+        # Load various output files
+        # Univariate results
+        univariate_path = os.path.join(output_path, "univariate_analysis.csv")
+        if os.path.exists(univariate_path):
+            results['univariate'] = pd.read_csv(univariate_path)
+        
+        # Model performance
+        performance_path = os.path.join(output_path, "model_performance.csv")
+        if os.path.exists(performance_path):
+            results['performance'] = pd.read_csv(performance_path)
+        
+        # Variable importance
+        importance_path = os.path.join(output_path, "variable_importance.csv")
+        if os.path.exists(importance_path):
+            results['importance'] = pd.read_csv(importance_path)
+        
+        # Correlation matrix
+        correlation_path = os.path.join(output_path, "correlation_matrix.csv")
+        if os.path.exists(correlation_path):
+            results['correlation'] = pd.read_csv(correlation_path)
+        
+        return results
+    except Exception as e:
+        st.error(f"Error loading results: {str(e)}")
+        return None
+
+def create_variable_distribution_plot(data, variable_name, target_col=None):
+    """Create distribution plot for a variable"""
+    fig = go.Figure()
+    
+    if target_col:
+        # Create distribution by target
+        for target_value in data[target_col].unique():
+            subset = data[data[target_col] == target_value][variable_name]
+            fig.add_trace(go.Histogram(
+                x=subset,
+                name=f"Target={target_value}",
+                opacity=0.7,
+                nbinsx=30
+            ))
+    else:
+        # Single distribution
+        fig.add_trace(go.Histogram(
+            x=data[variable_name],
+            name=variable_name,
+            nbinsx=30
+        ))
+    
+    fig.update_layout(
+        title=f"Distribution of {variable_name}",
+        xaxis_title=variable_name,
+        yaxis_title="Frequency",
+        barmode='overlay',
+        height=400
+    )
+    
+    return fig
+
+def create_bivariate_plot(data, var1, var2, target_col=None):
+    """Create bivariate analysis plot"""
+    if target_col:
+        fig = px.scatter(
+            data,
+            x=var1,
+            y=var2,
+            color=target_col,
+            title=f"{var1} vs {var2}",
+            opacity=0.6
+        )
+    else:
+        fig = px.scatter(
+            data,
+            x=var1,
+            y=var2,
+            title=f"{var1} vs {var2}",
+            opacity=0.6
+        )
+    
+    # Add correlation line
+    from scipy import stats
+    slope, intercept, r_value, p_value, std_err = stats.linregress(data[var1], data[var2])
+    line_x = np.array([data[var1].min(), data[var1].max()])
+    line_y = slope * line_x + intercept
+    
+    fig.add_trace(go.Scatter(
+        x=line_x,
+        y=line_y,
+        mode='lines',
+        name=f'R² = {r_value**2:.3f}',
+        line=dict(color='red', dash='dash')
+    ))
+    
+    fig.update_layout(height=500)
+    return fig
+
+def create_model_performance_plots(performance_data):
+    """Create model performance visualization plots"""
+    plots = {}
+    
+    # ROC Curve
+    if 'fpr' in performance_data and 'tpr' in performance_data:
+        roc_fig = go.Figure()
+        roc_fig.add_trace(go.Scatter(
+            x=performance_data['fpr'],
+            y=performance_data['tpr'],
+            mode='lines',
+            name='ROC Curve',
+            line=dict(color='blue', width=2)
+        ))
+        roc_fig.add_trace(go.Scatter(
+            x=[0, 1],
+            y=[0, 1],
+            mode='lines',
+            name='Random',
+            line=dict(color='gray', dash='dash')
+        ))
+        roc_fig.update_layout(
+            title=f"ROC Curve (AUC = {performance_data.get('auc', 'N/A')})",
+            xaxis_title="False Positive Rate",
+            yaxis_title="True Positive Rate",
+            height=400
+        )
+        plots['roc'] = roc_fig
+    
+    # Precision-Recall Curve
+    if 'precision' in performance_data and 'recall' in performance_data:
+        pr_fig = go.Figure()
+        pr_fig.add_trace(go.Scatter(
+            x=performance_data['recall'],
+            y=performance_data['precision'],
+            mode='lines',
+            name='PR Curve',
+            line=dict(color='green', width=2)
+        ))
+        pr_fig.update_layout(
+            title="Precision-Recall Curve",
+            xaxis_title="Recall",
+            yaxis_title="Precision",
+            height=400
+        )
+        plots['pr'] = pr_fig
+    
+    return plots
+
+def generate_summary_report(results):
+    """Generate a summary report from SFA results"""
+    report = {
+        "total_variables": len(results.get('univariate', [])),
+        "selected_variables": len(results.get('importance', [])),
+        "model_performance": results.get('performance', {}).get('gini', 'N/A'),
+        "data_quality_score": calculate_data_quality_score(results)
+    }
+    return report
+
+def calculate_data_quality_score(results):
+    """Calculate overall data quality score"""
+    # This is a placeholder - implement based on your actual data quality metrics
+    return 0.92
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    /* Custom button styles */
+    .stButton > button {
+        border-radius: 5px;
+        transition: all 0.3s;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 10px rgba(0,0,0,0.2);
+    }
+    
+    /* Metric card styling */
+    [data-testid="metric-container"] {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        padding-left: 20px;
+        padding-right: 20px;
+        background-color: #f0f2f6;
+        border-radius: 5px;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #1f77b4;
+        color: white;
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background-color: #f0f2f6;
+        border-radius: 5px;
+    }
+    
+    /* DataFrame styling */
+    .dataframe {
+        font-size: 14px;
+    }
+    
+    /* Success/Error message styling */
+    .stAlert {
+        border-radius: 5px;
+        padding: 15px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Add keyboard shortcuts
+st.markdown("""
+<script>
+document.addEventListener('keydown', function(event) {
+    // Ctrl+S to save configuration
+    if (event.ctrlKey && event.key === 's') {
+        event.preventDefault();
+        // Trigger save button click
+        document.querySelector('[data-testid="stButton"] button').click();
+    }
+    
+    // Ctrl+R to run analysis
+    if (event.ctrlKey && event.key === 'r') {
+        event.preventDefault();
+        // Navigate to Run Analysis page
+        window.location.hash = '#run-analysis';
+    }
+});
+</script>
+""", unsafe_allow_html=True)
+
+# Add a help modal
+if st.button("❓ Help", key="help_button"):
+    st.markdown("""
+    ### SFA Dashboard Help
+    
+    **Navigation:**
+    - Use the sidebar to navigate between pages
+    - Configuration: Set up your SFA parameters
+    - Run Analysis: Execute the SFA workflow
+    - Results: View detailed analysis results
+    - History: Track all your analysis runs
+    
+    **Keyboard Shortcuts:**
+    - `Ctrl+S`: Save configuration
+    - `Ctrl+R`: Go to Run Analysis
+    
+    **Tips:**
+    1. Always save your configuration before running analysis
+    2. Upload your data and variable config files in the Configuration page
+    3. Use the variable filter in Results to explore specific variables
+    4. Compare multiple runs in the History page
+    
+    **Support:**
+    For technical support, please refer to the CLT documentation.
+    """)
+
+# Save state to file for persistence (optional)
+def save_session_state():
+    """Save session state to file for persistence"""
+    state_to_save = {
+        'run_history': st.session_state.run_history,
+        'config_saved': st.session_state.config_saved
+    }
+    with open('session_state.json', 'w') as f:
+        json.dump(state_to_save, f)
+
+def load_session_state():
+    """Load session state from file"""
+    try:
+        with open('session_state.json', 'r') as f:
+            saved_state = json.load(f)
+            st.session_state.run_history = saved_state.get('run_history', [])
+            st.session_state.config_saved = saved_state.get('config_saved', False)
+    except FileNotFoundError:
+        pass
+
+# Load session state on startup
+if 'initialized' not in st.session_state:
+    load_session_state()
+    st.session_state.initialized = True
+
+# Auto-save on state change
+if st.session_state.run_history:
+    save_session_state()
