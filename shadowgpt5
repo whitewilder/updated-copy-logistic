@@ -1,0 +1,823 @@
+Below is a fully automated, regulator-friendly challenger model framework (end-to-end) in Python using only statsmodels (plus pandas/numpy). It builds:
+
+- Shadow rating challenger: linear regression with y = mid_pt_pd and financials as X
+- Default challenger: logistic regression with y = default (binary) and financials as X
+
+The framework:
+- Handles missing values, winsorizes outliers, optional simple log transforms for skewed positive vars, and standardization (train stats only)
+- Selects variables via transparent AIC/BIC stepwise selection and then removes multicollinearity via VIF
+- Checks assumptions (linear: normality, heteroscedasticity; logistic: linearity in the logit, multicollinearity, separation)
+- Computes clear performance metrics (train and test), including robust errors where appropriate
+- Is designed to be simple, auditable, and deterministic, with minimal “tuning magic”
+
+Just change the input data and column selections; everything else runs automatically.
+
+Note: This uses no scikit-learn. Only pandas, numpy, and statsmodels are used.
+
+```python
+import numpy as np
+import pandas as pd
+import warnings
+import statsmodels.api as sm
+from statsmodels.regression.linear_model import OLS
+from statsmodels.discrete.discrete_model import Logit
+from statsmodels.tools.tools import add_constant
+from statsmodels.stats.outliers_influence import variance_inflation_factor, OLSInfluence
+from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.stattools import jarque_bera, durbin_watson
+from statsmodels.tools.sm_exceptions import PerfectSeparationError
+
+# -----------------------------
+# Utilities
+# -----------------------------
+
+def seed_random_state(random_state):
+    return np.random.RandomState(random_state)
+
+def clip_01(arr):
+    return np.clip(arr, 0.0, 1.0)
+
+def train_test_split_indices(y, test_size=0.3, random_state=42, stratify=None):
+    """
+    Pure numpy/pandas split (no sklearn). Supports stratify for binary y.
+    Returns train_idx, test_idx arrays.
+    """
+    rng = seed_random_state(random_state)
+    n = len(y)
+    idx = np.arange(n)
+
+    if stratify is None:
+        rng.shuffle(idx)
+        n_test = int(np.floor(test_size * n))
+        test_idx = idx[:n_test]
+        train_idx = idx[n_test:]
+    else:
+        # stratified by binary labels in stratify
+        df_tmp = pd.DataFrame({'y': stratify, 'idx': idx})
+        test_idx_list = []
+        train_idx_list = []
+        for cls, group in df_tmp.groupby('y'):
+            arr = group['idx'].values.copy()
+            rng.shuffle(arr)
+            n_g = len(arr)
+            n_test_g = int(np.floor(test_size * n_g))
+            test_idx_list.append(arr[:n_test_g])
+            train_idx_list.append(arr[n_test_g:])
+        test_idx = np.concatenate(test_idx_list)
+        train_idx = np.concatenate(train_idx_list)
+        rng.shuffle(test_idx)
+        rng.shuffle(train_idx)
+
+    return train_idx, test_idx
+
+def winsorize_series(s, lower_q=0.01, upper_q=0.99):
+    lo = s.quantile(lower_q)
+    hi = s.quantile(upper_q)
+    return s.clip(lower=lo, upper=hi)
+
+def compute_vif_df(X):
+    """
+    Compute VIF for each column in X (DataFrame). Adds constant internally for VIF calculations.
+    """
+    X = X.copy()
+    X_const = add_constant(X, has_constant='add')
+    vifs = []
+    for i, col in enumerate(X.columns):
+        vif = variance_inflation_factor(X_const.values, i+1)  # +1 because col 0 is constant
+        vifs.append((col, float(vif)))
+    return pd.DataFrame(vifs, columns=['feature', 'VIF']).sort_values('VIF', ascending=False).reset_index(drop=True)
+
+def auc_manual(y_true, y_score):
+    """
+    Manual AUC via rank-sum method (no sklearn). y_true must be binary 0/1.
+    """
+    y_true = np.asarray(y_true).astype(int)
+    y_score = np.asarray(y_score).astype(float)
+    n_pos = np.sum(y_true == 1)
+    n_neg = np.sum(y_true == 0)
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+    # Average ranks for ties
+    ranks = pd.Series(y_score).rank(method='average').values
+    sum_pos_ranks = ranks[y_true == 1].sum()
+    auc = (sum_pos_ranks - n_pos*(n_pos+1)/2.0) / (n_pos*n_neg)
+    return float(auc)
+
+def ks_statistic(y_true, y_score):
+    """
+    Manual KS statistic. y_true must be binary 0/1.
+    """
+    df = pd.DataFrame({'y': y_true, 'score': y_score}).sort_values('score')
+    n_pos = (df['y'] == 1).sum()
+    n_neg = (df['y'] == 0).sum()
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+    df['cum_pos'] = (df['y'] == 1).cumsum() / n_pos
+    df['cum_neg'] = (df['y'] == 0).cumsum() / n_neg
+    ks = (df['cum_pos'] - df['cum_neg']).abs().max()
+    return float(ks)
+
+def brier_score(y_true, y_prob):
+    y_true = np.asarray(y_true).astype(float)
+    y_prob = np.asarray(y_prob).astype(float)
+    return float(np.mean((y_true - y_prob)**2))
+
+def log_loss_manual(y_true, y_prob, eps=1e-12):
+    y_true = np.asarray(y_true).astype(float)
+    p = np.clip(y_prob, eps, 1 - eps)
+    return float(-np.mean(y_true*np.log(p) + (1 - y_true)*np.log(1 - p)))
+
+def confusion_metrics(y_true, y_prob, threshold=0.5):
+    y_true = np.asarray(y_true).astype(int)
+    y_hat = (np.asarray(y_prob) >= threshold).astype(int)
+    tp = int(((y_hat == 1) & (y_true == 1)).sum())
+    tn = int(((y_hat == 0) & (y_true == 0)).sum())
+    fp = int(((y_hat == 1) & (y_true == 0)).sum())
+    fn = int(((y_hat == 0) & (y_true == 1)).sum())
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else np.nan
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else np.nan
+    precision = tp / (tp + fp) if (tp + fp) > 0 else np.nan
+    accuracy = (tp + tn) / max(1, (tp + tn + fp + fn))
+    return {
+        'threshold': threshold,
+        'TP': tp, 'TN': tn, 'FP': fp, 'FN': fn,
+        'sensitivity': sensitivity,
+        'specificity': specificity,
+        'precision': precision,
+        'accuracy': accuracy
+    }
+
+def optimal_threshold_youden(y_true, y_prob, grid_points=200):
+    """
+    Find threshold that maximizes Youden's J = sensitivity + specificity - 1.
+    """
+    y_true = np.asarray(y_true).astype(int)
+    thresholds = np.linspace(0.01, 0.99, grid_points)
+    best_t = 0.5
+    best_j = -np.inf
+    for t in thresholds:
+        m = confusion_metrics(y_true, y_prob, threshold=t)
+        sens = m['sensitivity']
+        spec = m['specificity']
+        if np.isnan(sens) or np.isnan(spec):
+            continue
+        j = sens + spec - 1.0
+        if j > best_j:
+            best_j = j
+            best_t = t
+    return float(best_t), float(best_j)
+
+# -----------------------------
+# Preprocessor (median impute, optional log transform for skewed positive, winsorize, standardize)
+# -----------------------------
+
+class Preprocessor:
+    def __init__(self, 
+                 log_transform_if_skewed=True, skew_threshold=1.0,
+                 winsorize=True, lower_q=0.01, upper_q=0.99,
+                 standardize=True):
+        self.log_transform_if_skewed = log_transform_if_skewed
+        self.skew_threshold = skew_threshold
+        self.winsorize = winsorize
+        self.lower_q = lower_q
+        self.upper_q = upper_q
+        self.standardize = standardize
+        # learned params
+        self.medians_ = {}
+        self.log_vars_ = set()
+        self.winsor_bounds_ = {}  # dict: var -> (lo, hi)
+        self.means_ = {}
+        self.stds_ = {}
+
+    def fit(self, X: pd.DataFrame):
+        X = X.copy()
+        # 1) Median impute
+        for col in X.columns:
+            self.medians_[col] = X[col].median(skipna=True)
+            X[col] = X[col].fillna(self.medians_[col])
+
+        # 2) Optional log transform for skewed positive numeric vars
+        self.log_vars_ = set()
+        if self.log_transform_if_skewed:
+            for col in X.columns:
+                s = X[col]
+                # Consider only strictly positive series
+                if (s > 0).all():
+                    skew = s.skew()
+                    if skew is not None and np.isfinite(skew) and (skew > self.skew_threshold):
+                        # adopt log transform
+                        self.log_vars_.add(col)
+                        X[col] = np.log(s.replace(0, np.nan)).replace(-np.inf, np.nan)
+                        # fill any inf/nans from log(0) fallback with median of transformed
+                        X[col] = X[col].fillna(X[col].median())
+
+        # 3) Winsorize on the (possibly transformed) scale
+        if self.winsorize:
+            for col in X.columns:
+                lo = X[col].quantile(self.lower_q)
+                hi = X[col].quantile(self.upper_q)
+                self.winsor_bounds_[col] = (float(lo), float(hi))
+                X[col] = X[col].clip(lower=lo, upper=hi)
+
+        # 4) Standardize
+        if self.standardize:
+            for col in X.columns:
+                mu = X[col].mean()
+                sd = X[col].std(ddof=0)
+                self.means_[col] = float(mu)
+                self.stds_[col] = float(sd if sd > 0 else 1.0)
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        X = X.copy()
+        # 1) impute
+        for col in X.columns:
+            med = self.medians_.get(col, X[col].median(skipna=True))
+            X[col] = X[col].fillna(med)
+
+        # 2) log transform if learned
+        for col in X.columns:
+            if col in self.log_vars_:
+                X[col] = np.log(X[col].replace(0, np.nan)).replace(-np.inf, np.nan)
+                X[col] = X[col].fillna(X[col].median())
+
+        # 3) winsorize using learned bounds
+        if self.winsorize:
+            for col in X.columns:
+                lo, hi = self.winsor_bounds_.get(col, (None, None))
+                if lo is not None and hi is not None:
+                    X[col] = X[col].clip(lower=lo, upper=hi)
+
+        # 4) standardize using learned stats
+        if self.standardize:
+            for col in X.columns:
+                mu = self.means_.get(col, X[col].mean())
+                sd = self.stds_.get(col, X[col].std(ddof=0))
+                sd = sd if sd > 0 else 1.0
+                X[col] = (X[col] - mu) / sd
+        return X
+
+# -----------------------------
+# Stepwise selection (AIC/BIC)
+# -----------------------------
+
+def _fit_model(X, y, model_type='ols'):
+    Xc = add_constant(X, has_constant='add')
+    if model_type == 'ols':
+        model = OLS(y, Xc)
+        res = model.fit()
+    elif model_type == 'logit':
+        model = Logit(y, Xc)
+        res = model.fit(disp=False, maxiter=200)
+    else:
+        raise ValueError("model_type must be 'ols' or 'logit'")
+    return res
+
+def stepwise_selection(X, y, model_type='ols', criterion='bic', 
+                       pval_in=0.05, pval_out=0.10, 
+                       max_iter=100, verbose=False):
+    """
+    Forward-backward stepwise selection using AIC/BIC and p-values.
+    """
+    remaining = list(X.columns)
+    selected = []
+    current_score = np.inf
+    it = 0
+
+    def model_score(res):
+        return res.bic if criterion.lower() == 'bic' else res.aic
+
+    while it < max_iter:
+        it += 1
+        changed = False
+
+        # Forward step
+        scores_with_candidates = []
+        for candidate in remaining:
+            try:
+                res = _fit_model(X[selected + [candidate]], y, model_type=model_type)
+                score = model_score(res)
+                scores_with_candidates.append((score, candidate, res))
+            except Exception:
+                continue
+        if scores_with_candidates:
+            scores_with_candidates.sort(key=lambda t: t[0])
+            best_new_score, best_candidate, best_res = scores_with_candidates[0]
+            # Check improvement and p-value of the candidate
+            if best_new_score + 1e-9 < current_score:
+                # Also require candidate's p-value < pval_in
+                pvals = best_res.pvalues.drop('const', errors='ignore')
+                if pvals.get(best_candidate, 1.0) <= pval_in:
+                    remaining.remove(best_candidate)
+                    selected.append(best_candidate)
+                    current_score = best_new_score
+                    changed = True
+                    if verbose:
+                        print(f"[Stepwise][Forward] + {best_candidate} | {criterion.upper()}={best_new_score:.3f}")
+
+        # Backward step (remove worst p-value if > pval_out)
+        if selected:
+            try:
+                res_full = _fit_model(X[selected], y, model_type=model_type)
+                pvals = res_full.pvalues.drop('const', errors='ignore')
+                worst_p = pvals.max()
+                worst_var = pvals.idxmax()
+                if worst_p > pval_out:
+                    selected.remove(worst_var)
+                    remaining.append(worst_var)
+                    changed = True
+                    # Recompute current_score after removal
+                    res_tmp = _fit_model(X[selected], y, model_type=model_type)
+                    current_score = model_score(res_tmp)
+                    if verbose:
+                        print(f"[Stepwise][Backward] - {worst_var} (p={worst_p:.3f}) | {criterion.upper()}={current_score:.3f}")
+            except Exception:
+                pass
+
+        if not changed:
+            break
+
+    # Final fit
+    try:
+        final_res = _fit_model(X[selected], y, model_type=model_type)
+    except Exception:
+        final_res = None
+    return selected, final_res
+
+# -----------------------------
+# Multicollinearity pruning (VIF)
+# -----------------------------
+
+def vif_prune(X, y, model_type='ols', vif_threshold=10.0, verbose=False):
+    """
+    Iteratively remove variables with highest VIF above threshold.
+    """
+    selected = list(X.columns)
+    while True:
+        if len(selected) <= 1:
+            break
+        vif_df = compute_vif_df(X[selected])
+        if vif_df.empty:
+            break
+        max_vif = vif_df['VIF'].max()
+        worst_var = vif_df.loc[vif_df['VIF'].idxmax(), 'feature']
+        if np.isfinite(max_vif) and (max_vif > vif_threshold):
+            if verbose:
+                print(f"[VIF] Dropping {worst_var} with VIF={max_vif:.2f} (> {vif_threshold})")
+            selected.remove(worst_var)
+        else:
+            break
+    # Refit
+    try:
+        res = _fit_model(X[selected], y, model_type=model_type)
+    except Exception:
+        res = None
+    return selected, res
+
+# -----------------------------
+# Assumption checks
+# -----------------------------
+
+def linear_assumptions(res, X, y):
+    """
+    Check linear regression assumptions.
+    Returns dict with results and flags.
+    """
+    out = {}
+    try:
+        residuals = res.resid
+        fitted = res.fittedvalues
+        # Normality
+        jb_stat, jb_pvalue, _, _ = jarque_bera(residuals)
+        out['jarque_bera_stat'] = float(jb_stat)
+        out['jarque_bera_pvalue'] = float(jb_pvalue)
+        out['normality_flag'] = (jb_pvalue < 0.05)
+        # Heteroscedasticity (Breusch-Pagan)
+        Xc = add_constant(X, has_constant='add')
+        bp = het_breuschpagan(residuals, Xc)
+        # returns (Lagrange multiplier statistic, p-value, f-value, f p-value)
+        out['bp_lm_stat'] = float(bp[0])
+        out['bp_lm_pvalue'] = float(bp[1])
+        out['heteroscedastic_flag'] = (bp[1] < 0.05)
+        # Autocorrelation (DW) - optional for cross-sectional
+        out['durbin_watson'] = float(durbin_watson(residuals))
+        # Influential points (Cook's distance)
+        infl = OLSInfluence(res)
+        cooks_d = infl.cooks_distance[0]
+        out['max_cooks_distance'] = float(np.nanmax(cooks_d))
+        out['influential_points_n'] = int(np.sum(cooks_d > (4 / max(1, len(X)))))
+    except Exception as e:
+        out['assumption_check_error'] = str(e)
+    return out
+
+def logistic_linearity_of_logit_check(X, y):
+    """
+    Box-Tidwell-like check for linearity in the logit for positive variables.
+    For each variable x > 0: fit logit(y ~ x + x*log(x)) and test p-value of interaction.
+    Returns DataFrame: variable, tested, p_value_interaction, flag_violation(bool)
+    """
+    rows = []
+    for col in X.columns:
+        s = X[col]
+        tested = False
+        pval = np.nan
+        flag = False
+        try:
+            if (s > 0).all():
+                tested = True
+                z = pd.DataFrame({
+                    col: s,
+                    f"{col}_x_log": s * np.log(s)
+                })
+                res = _fit_model(z[[col, f"{col}_x_log"]], y, model_type='logit')
+                # p-value of interaction term
+                pval = float(res.pvalues.get(f"{col}_x_log", np.nan))
+                flag = (pval < 0.05)
+        except Exception:
+            pass
+        rows.append({
+            'variable': col, 'tested': tested,
+            'p_value_interaction': pval,
+            'linearity_violation': flag
+        })
+    return pd.DataFrame(rows)
+
+def calibration_slope_intercept(y_true, y_prob):
+    """
+    Fit: logit(y) ~ a + b * logit(p_hat)
+    Return slope b and intercept a.
+    """
+    p = np.clip(np.asarray(y_prob, dtype=float), 1e-6, 1 - 1e-6)
+    logit_p = np.log(p / (1 - p))
+    df = pd.DataFrame({'logit_p': logit_p})
+    res = sm.GLM(np.asarray(y_true, dtype=float), add_constant(df), family=sm.families.Binomial()).fit()
+    intercept = float(res.params.get('const', np.nan))
+    slope = float(res.params.get('logit_p', np.nan))
+    return intercept, slope
+
+# -----------------------------
+# Metrics
+# -----------------------------
+
+def linear_metrics(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    mse = float(np.mean((y_true - y_pred)**2))
+    rmse = float(np.sqrt(mse))
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    # R^2 on test
+    ss_res = float(np.sum((y_true - y_pred)**2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true))**2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    return {'RMSE': rmse, 'MAE': mae, 'R2': r2}
+
+def logistic_metrics(y_true, y_prob):
+    auc = auc_manual(y_true, y_prob)
+    ks = ks_statistic(y_true, y_prob)
+    bs = brier_score(y_true, y_prob)
+    ll = log_loss_manual(y_true, y_prob)
+    th, j = optimal_threshold_youden(y_true, y_prob)
+    cm = confusion_metrics(y_true, y_prob, threshold=th)
+    return {
+        'AUC': auc, 'KS': ks, 'BrierScore': bs, 'LogLoss': ll,
+        'OptimalThreshold_Youden': th,
+        'Youden_J': j,
+        **cm
+    }
+
+# -----------------------------
+# Shadow Rating Model (Linear: y = mid_pt_pd)
+# -----------------------------
+
+def build_shadow_rating_model(
+        df: pd.DataFrame,
+        y_col: str,
+        x_cols: list,
+        test_size=0.3,
+        random_state=42,
+        stepwise_criterion='bic',
+        vif_threshold=10.0,
+        log_transform_if_skewed=True,
+        verbose=True):
+    """
+    End-to-end OLS challenger model for shadow rating approach.
+    Returns a dict with model, preprocessor, selections, diagnostics, metrics.
+    """
+    df = df.copy()
+    # Basic cleaning
+    df = df.dropna(subset=[y_col])  # drop rows without target
+    y = df[y_col].astype(float).values
+    X_raw = df[x_cols].copy()
+
+    # Split
+    train_idx, test_idx = train_test_split_indices(y, test_size=test_size, random_state=random_state, stratify=None)
+    X_train_raw, X_test_raw = X_raw.iloc[train_idx], X_raw.iloc[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Preprocess
+    pre = Preprocessor(
+        log_transform_if_skewed=log_transform_if_skewed, skew_threshold=1.0,
+        winsorize=True, lower_q=0.01, upper_q=0.99,
+        standardize=True
+    ).fit(X_train_raw)
+
+    X_train = pre.transform(X_train_raw)
+    X_test = pre.transform(X_test_raw)
+
+    # Stepwise selection
+    selected_sw, res_sw = stepwise_selection(X_train, y_train, model_type='ols',
+                                             criterion=stepwise_criterion,
+                                             pval_in=0.05, pval_out=0.10,
+                                             max_iter=100, verbose=verbose)
+    if verbose:
+        print(f"[OLS] Stepwise selected vars: {selected_sw}")
+
+    # VIF pruning
+    if len(selected_sw) >= 2:
+        selected_vif, res_vif = vif_prune(X_train[selected_sw], y_train, model_type='ols',
+                                          vif_threshold=vif_threshold, verbose=verbose)
+    else:
+        selected_vif, res_vif = selected_sw, res_sw
+    if verbose:
+        print(f"[OLS] After VIF pruning vars: {selected_vif}")
+
+    # Final fit
+    final_vars = selected_vif
+    res_final = _fit_model(X_train[final_vars], y_train, model_type='ols')
+
+    # Assumption checks on train
+    assumptions = linear_assumptions(res_final, X_train[final_vars], y_train)
+
+    # If heteroscedastic, compute robust SE results
+    robust_res = None
+    if assumptions.get('heteroscedastic_flag', False):
+        robust_res = res_final.get_robustcov_results(cov_type='HC3')
+
+    # Train metrics
+    yhat_train = res_final.predict(add_constant(X_train[final_vars], has_constant='add'))
+    # PD bounded [0, 1] for reporting
+    yhat_train_bounded = clip_01(yhat_train)
+    train_metrics = linear_metrics(y_train, yhat_train_bounded)
+    train_metrics.update({
+        'AIC': float(res_final.aic),
+        'BIC': float(res_final.bic),
+        'Adj_R2_in_sample': float(res_final.rsquared_adj)
+    })
+
+    # Test metrics
+    yhat_test = res_final.predict(add_constant(X_test[final_vars], has_constant='add'))
+    yhat_test_bounded = clip_01(yhat_test)
+    test_metrics = linear_metrics(y_test, yhat_test_bounded)
+
+    # Coefficient table
+    coef_res = robust_res if robust_res is not None else res_final
+    params = coef_res.params
+    pvals = coef_res.pvalues
+    conf_int = coef_res.conf_int()
+    coef_table = pd.DataFrame({
+        'variable': params.index,
+        'coef': params.values,
+        'p_value': pvals.values,
+        'ci_lower': conf_int[0].values,
+        'ci_upper': conf_int[1].values
+    })
+
+    # VIF table for final vars
+    vif_df = compute_vif_df(X_train[final_vars]) if len(final_vars) > 0 else pd.DataFrame(columns=['feature', 'VIF'])
+
+    return {
+        'model_type': 'OLS',
+        'y_col': y_col,
+        'selected_variables': final_vars,
+        'preprocessor': pre,
+        'model_results': res_final,
+        'robust_results': robust_res,
+        'coef_table': coef_table,
+        'assumptions': assumptions,
+        'train_metrics': train_metrics,
+        'test_metrics': test_metrics,
+        'vif': vif_df,
+        'notes': {
+            'log_transformed_vars': list(pre.log_vars_),
+            'winsor_bounds': pre.winsor_bounds_
+        },
+        'predict': lambda new_df: clip_01(
+            res_final.predict(add_constant(pre.transform(new_df[final_vars]), has_constant='add'))
+        )
+    }
+
+# -----------------------------
+# Default Model (Logistic: y = default)
+# -----------------------------
+
+def build_logistic_default_model(
+        df: pd.DataFrame,
+        y_col: str,
+        x_cols: list,
+        test_size=0.3,
+        random_state=42,
+        stepwise_criterion='bic',
+        vif_threshold=10.0,
+        log_transform_if_skewed=True,
+        verbose=True):
+    """
+    End-to-end Logistic challenger model for default prediction.
+    Returns dict with model, preprocessor, selections, diagnostics, metrics.
+    """
+    df = df.copy()
+    df = df.dropna(subset=[y_col])
+    # Ensure binary 0/1
+    y = df[y_col].astype(int).values
+    X_raw = df[x_cols].copy()
+
+    # Split (stratified)
+    train_idx, test_idx = train_test_split_indices(y, test_size=test_size,
+                                                   random_state=random_state,
+                                                   stratify=y)
+    X_train_raw, X_test_raw = X_raw.iloc[train_idx], X_raw.iloc[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Preprocess (same logic as OLS)
+    pre = Preprocessor(
+        log_transform_if_skewed=log_transform_if_skewed, skew_threshold=1.0,
+        winsorize=True, lower_q=0.01, upper_q=0.99,
+        standardize=True
+    ).fit(X_train_raw)
+
+    X_train = pre.transform(X_train_raw)
+    X_test = pre.transform(X_test_raw)
+
+    # Stepwise selection (with graceful handling of separation)
+    try:
+        selected_sw, res_sw = stepwise_selection(X_train, y_train, model_type='logit',
+                                                 criterion=stepwise_criterion,
+                                                 pval_in=0.05, pval_out=0.10,
+                                                 max_iter=100, verbose=verbose)
+    except PerfectSeparationError:
+        if verbose:
+            print("[LOGIT] Perfect separation encountered during stepwise; attempting to continue by skipping offending combinations.")
+        # Fallback: simple forward selection by p-value
+        selected_sw = []
+        remaining = list(X_train.columns)
+        while remaining:
+            best_candidate = None
+            best_p = 1.0
+            for cand in remaining:
+                try:
+                    res = _fit_model(X_train[selected_sw + [cand]], y_train, model_type='logit')
+                    p = res.pvalues.get(cand, 1.0)
+                    if p < best_p:
+                        best_p = p
+                        best_candidate = cand
+                except Exception:
+                    continue
+            if best_candidate is not None and best_p < 0.05:
+                selected_sw.append(best_candidate)
+                remaining.remove(best_candidate)
+            else:
+                break
+        res_sw = _fit_model(X_train[selected_sw], y_train, model_type='logit') if selected_sw else None
+
+    if verbose:
+        print(f"[LOGIT] Stepwise selected vars: {selected_sw}")
+
+    # VIF pruning
+    if len(selected_sw) >= 2:
+        selected_vif, res_vif = vif_prune(X_train[selected_sw], y_train, model_type='logit',
+                                          vif_threshold=vif_threshold, verbose=verbose)
+    else:
+        selected_vif, res_vif = selected_sw, res_sw
+    if verbose:
+        print(f"[LOGIT] After VIF pruning vars: {selected_vif}")
+
+    # Final fit (guard against separation)
+    try:
+        res_final = _fit_model(X_train[selected_vif], y_train, model_type='logit')
+        separation_flag = False
+    except PerfectSeparationError:
+        separation_flag = True
+        # Fallback: drop variable with largest absolute coefficient from last successful model if any,
+        # else try one-by-one
+        if verbose:
+            print("[LOGIT] Perfect separation in final fit; attempting variable reduction.")
+        # Simple back-off loop
+        vars_try = selected_vif.copy()
+        while vars_try:
+            try:
+                res_final = _fit_model(X_train[vars_try], y_train, model_type='logit')
+                separation_flag = False
+                break
+            except PerfectSeparationError:
+                # drop last variable
+                vars_try = vars_try[:-1]
+        selected_vif = vars_try
+
+    final_vars = selected_vif
+    if verbose:
+        print(f"[LOGIT] Final vars: {final_vars}")
+
+    # Robust covariance for inference (HC3)
+    robust_res = None
+    if final_vars:
+        try:
+            res_tmp = _fit_model(X_train[final_vars], y_train, model_type='logit')
+            robust_res = res_tmp.get_robustcov_results(cov_type='HC3')
+        except Exception:
+            robust_res = None
+
+    # Linearity of the logit checks on final vars
+    linearity_df = logistic_linearity_of_logit_check(X_train[final_vars], y_train) if final_vars else pd.DataFrame()
+
+    # Predictions
+    def predict_proba_df(Xpart):
+        return res_final.predict(add_constant(Xpart, has_constant='add'))
+
+    yhat_train = predict_proba_df(X_train[final_vars]) if final_vars else np.repeat(np.mean(y_train), len(y_train))
+    yhat_test = predict_proba_df(X_test[final_vars]) if final_vars else np.repeat(np.mean(y_train), len(y_test))
+
+    # Metrics
+    train_mx = logistic_metrics(y_train, yhat_train)
+    test_mx = logistic_metrics(y_test, yhat_test)
+
+    # Calibration
+    cal_int, cal_slope = calibration_slope_intercept(y_test, yhat_test)
+
+    # Coefficient table
+    coef_res = robust_res if robust_res is not None else res_final
+    params = coef_res.params if coef_res is not None else pd.Series(dtype=float)
+    pvals = coef_res.pvalues if coef_res is not None else pd.Series(dtype=float)
+    conf_int = coef_res.conf_int() if coef_res is not None else pd.DataFrame(columns=[0,1])
+    coef_table = pd.DataFrame({
+        'variable': params.index if len(params) else [],
+        'coef': params.values if len(params) else [],
+        'p_value': pvals.values if len(pvals) else [],
+        'ci_lower': conf_int[0].values if not conf_int.empty else [],
+        'ci_upper': conf_int[1].values if not conf_int.empty else []
+    })
+
+    # VIF table
+    vif_df = compute_vif_df(X_train[final_vars]) if final_vars else pd.DataFrame(columns=['feature', 'VIF'])
+
+    return {
+        'model_type': 'LOGIT',
+        'y_col': y_col,
+        'selected_variables': final_vars,
+        'preprocessor': pre,
+        'model_results': res_final,
+        'robust_results': robust_res,
+        'coef_table': coef_table,
+        'assumptions': {
+            'separation_flag': separation_flag,
+            'linearity_in_logit': linearity_df.to_dict(orient='records')
+        },
+        'train_metrics': train_mx,
+        'test_metrics': {**test_mx, 'CalibrationIntercept': cal_int, 'CalibrationSlope': cal_slope},
+        'vif': vif_df,
+        'notes': {
+            'log_transformed_vars': list(pre.log_vars_),
+            'winsor_bounds': pre.winsor_bounds_
+        },
+        'predict_proba': lambda new_df: clip_01(
+            res_final.predict(add_constant(pre.transform(new_df[final_vars]), has_constant='add'))
+        )
+    }
+
+# -----------------------------
+# Example usage (commented)
+# -----------------------------
+# df = pd.read_csv('your_data.csv')
+# financial_vars = ['fin_var1', 'fin_var2', 'fin_var3', ...]
+#
+# shadow = build_shadow_rating_model(
+#     df, y_col='mid_pt_pd', x_cols=financial_vars,
+#     test_size=0.3, random_state=42, stepwise_criterion='bic',
+#     vif_threshold=10.0, log_transform_if_skewed=True, verbose=True
+# )
+#
+# logit = build_logistic_default_model(
+#     df, y_col='default', x_cols=financial_vars,
+#     test_size=0.3, random_state=42, stepwise_criterion='bic',
+#     vif_threshold=10.0, log_transform_if_skewed=True, verbose=True
+# )
+#
+# # Access predictions on new data:
+# # new_df = pd.read_csv('new_applications.csv')
+# # shadow_pd = shadow['predict'](new_df)      # bounded [0,1]
+# # default_prob = logit['predict_proba'](new_df)  # bounded [0,1]
+#
+# # Inspect outputs (coefficients, metrics, assumption flags)
+# # print(shadow['coef_table'])
+# # print(shadow['train_metrics'], shadow['test_metrics'], shadow['assumptions'])
+# # print(logit['coef_table'])
+# # print(logit['train_metrics'], logit['test_metrics'], logit['assumptions'])
+```
+
+Notes for regulators and reviewers:
+- Variable selection: stepwise (BIC default) to prefer parsimony; final pruning via VIF ≤ 10 to mitigate multicollinearity
+- Data handling: median imputation, optional log for skewed positive variables, winsorization at 1%/99%, standardization; all parameters are learned on train data only
+- OLS assumptions: Jarque–Bera for normality, Breusch–Pagan for heteroscedasticity (if present, HC3 robust covariance is used for inference), Cook’s distance flagged but not auto-removed (explicit governance)
+- Logistic assumptions: checks linearity of the logit (Box–Tidwell-like), separation handled conservatively (drop offending variables if encountered), VIF for multicollinearity
+- Metrics: OLS reports RMSE/MAE/R2 (test and train), AIC/BIC and adj-R2 in-sample. Logistic reports AUC, KS, Brier score, log loss, optimal threshold by Youden’s J, confusion metrics, and calibration (intercept, slope)
+- Transparency: no black-box regularization or complex transformations unless justified (optional simple log of skewed positive variables). All selections, bounds, and transformations reported in the output dict.
+
+If you want me to switch BIC to AIC, change winsorization limits, or add K-fold cross-validation summaries, I can extend the code accordingly.
