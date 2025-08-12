@@ -1,0 +1,617 @@
+# Model Development Documentation - Logistic Regression
+# =====================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set display options
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', 100)
+pd.set_option('display.float_format', '{:.4f}'.format)
+
+# Create timestamp for documentation
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+# Create a summary dashboard
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+fig.suptitle('Model Development Overview', fontsize=16, fontweight='bold')
+
+# Placeholder for summary metrics
+summary_metrics = {
+    'Total Variables': 0,
+    'Variables After DQ': 0,
+    'Variables After SFA': 0,
+    'Final Model Variables': 0
+}
+
+# We'll update these as we progress through the notebook
+plt.tight_layout()
+
+# ===== 2.1 Completeness Analysis =====
+print("="*80)
+print("DATA QUALITY ASSESSMENT - COMPLETENESS")
+print("="*80)
+
+# Load completeness data
+completeness_df = analysis['accuracy_numerical_overview']
+
+# Create completeness summary
+completeness_summary = completeness_df.groupby('proportion_has_missing').agg({
+    'column_name': 'count'
+}).reset_index()
+completeness_summary.columns = ['Missing_Proportion', 'Variable_Count']
+
+# Visualize completeness
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Missing data distribution
+ax1.bar(completeness_summary['Missing_Proportion'], 
+        completeness_summary['Variable_Count'])
+ax1.set_xlabel('Proportion Missing')
+ax1.set_ylabel('Number of Variables')
+ax1.set_title('Distribution of Missing Data Across Variables')
+ax1.grid(True, alpha=0.3)
+
+# Variables with high missingness
+high_missing = completeness_df[completeness_df['proportion_has_missing'] > 0.3]
+if len(high_missing) > 0:
+    ax2.barh(high_missing['column_name'][:20], 
+             high_missing['proportion_has_missing'])
+    ax2.set_xlabel('Proportion Missing')
+    ax2.set_title('Top 20 Variables with High Missingness (>30%)')
+    ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# ===== 2.2 Uniqueness Analysis =====
+print("\n" + "="*80)
+print("DATA QUALITY ASSESSMENT - UNIQUENESS")
+print("="*80)
+
+print("\nDuplicated Records Summary:")
+analysis['uniqueness_duplicated_records'].show()
+
+# Create data quality flags
+dq_flags = pd.DataFrame()
+dq_flags['variable'] = completeness_df['column_name']
+dq_flags['missing_flag'] = completeness_df['proportion_has_missing'] > 0.5
+dq_flags['all_missing_flag'] = completeness_df['proportion_all_missing'] == 1.0
+
+print(f"\nData Quality Summary:")
+print(f"- Variables with >50% missing: {dq_flags['missing_flag'].sum()}")
+print(f"- Variables with 100% missing: {dq_flags['all_missing_flag'].sum()}")
+
+# ===== 3.1 Missing Value Treatment Strategy =====
+print("="*80)
+print("MISSING VALUE TREATMENT")
+print("="*80)
+
+# Define MVT strategy based on variable characteristics
+mvt_strategy = pd.DataFrame({
+    'Missing_Range': ['0-5%', '5-30%', '30-50%', '>50%'],
+    'Treatment': ['Mean/Mode', 'Worst Value (5th-95th percentile)', 
+                  'Create Missing Indicator + Worst Value', 'Exclude Variable'],
+    'Rationale': ['Low missingness - simple imputation sufficient',
+                  'Moderate missingness - conservative approach',
+                  'High missingness - preserve information about missingness',
+                  'Too high to be reliable']
+})
+
+print("\nMVT Strategy:")
+print(mvt_strategy.to_string(index=False))
+
+# Visualize MVT application
+fig, ax = plt.subplots(figsize=(12, 6))
+mvt_summary = completeness_df.copy()
+mvt_summary['MVT_Category'] = pd.cut(mvt_summary['proportion_has_missing'], 
+                                      bins=[0, 0.05, 0.3, 0.5, 1.0],
+                                      labels=['0-5%', '5-30%', '30-50%', '>50%'])
+
+mvt_counts = mvt_summary['MVT_Category'].value_counts()
+colors = ['green', 'yellow', 'orange', 'red']
+ax.pie(mvt_counts.values, labels=mvt_counts.index, autopct='%1.1f%%', 
+       colors=colors, startangle=90)
+ax.set_title('Distribution of Variables by MVT Category')
+plt.show()
+
+
+# ===== 4.1 Binning Summary =====
+print("="*80)
+print("DATA REPRESENTATIVENESS - BINNING ANALYSIS")
+print("="*80)
+
+# Load distribution test results
+distribution_df = pd.read_csv('SFA_univariate_distribution_test.csv')
+
+# Analyze binning quality
+binning_summary = distribution_df.groupby('no_bins').agg({
+    'variable': 'count',
+    'density': ['mean', 'std'],
+    'monotonicity': 'mean'
+}).round(4)
+
+print("\nBinning Summary by Number of Bins:")
+print(binning_summary)
+
+# Visualize binning distribution
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Number of bins distribution
+ax1.bar(binning_summary.index, binning_summary[('variable', 'count')])
+ax1.set_xlabel('Number of Bins')
+ax1.set_ylabel('Number of Variables')
+ax1.set_title('Distribution of Variables by Bin Count')
+ax1.grid(True, alpha=0.3)
+
+# Monotonicity distribution
+monotonicity_dist = distribution_df['monotonicity'].value_counts()
+ax2.bar(monotonicity_dist.index, monotonicity_dist.values)
+ax2.set_xlabel('Monotonicity Score')
+ax2.set_ylabel('Number of Variables')
+ax2.set_title('Distribution of Monotonicity Scores')
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# ===== 5.1 SFA Stage 1: Distribution Test =====
+print("="*80)
+print("SFA STAGE 1: DISTRIBUTION TEST")
+print("="*80)
+
+# Load variable discard summary
+variable_discard = pd.read_csv('variable_discard.csv')
+
+# Distribution test results
+dist_fail = variable_discard[variable_discard['sfa_univariate_distribution'] == False]
+print(f"\nVariables failing distribution test: {len(dist_fail)}")
+if len(dist_fail) > 0:
+    print("\nReasons for failure:")
+    print(dist_fail[['variable', 'sfa_univariate_distribution']].head(10))
+
+# ===== 5.2 SFA Stage 2: Discrimination Test =====
+print("\n" + "="*80)
+print("SFA STAGE 2: DISCRIMINATION TEST")
+print("="*80)
+
+# Load discrimination test results
+discrimination_df = pd.read_csv('sfa_univariate_discriminatory_test_flags.csv')
+
+# Create discrimination summary
+disc_metrics = ['gini_binned', 'somers_d_binned', 'spearman_correlation_binned']
+disc_summary = discrimination_df[['variable'] + disc_metrics].copy()
+
+# Visualize top discriminatory variables
+top_vars = disc_summary.nlargest(20, 'gini_binned')
+
+fig, ax = plt.subplots(figsize=(12, 8))
+y_pos = np.arange(len(top_vars))
+ax.barh(y_pos, top_vars['gini_binned'])
+ax.set_yticks(y_pos)
+ax.set_yticklabels(top_vars['variable'])
+ax.set_xlabel('Gini Coefficient')
+ax.set_title('Top 20 Variables by Discriminatory Power (Gini)')
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ===== 5.3 SFA Stage 3: Direction Test =====
+print("\n" + "="*80)
+print("SFA STAGE 3: DIRECTION TEST")
+print("="*80)
+
+# Analyze sign consistency
+sign_fail = variable_discard[variable_discard['sfa_univariate_sign'] == False]
+print(f"\nVariables failing sign test: {len(sign_fail)}")
+
+# ===== 5.4 Correlation Analysis =====
+print("\n" + "="*80)
+print("SFA: BIVARIATE CORRELATION ANALYSIS")
+print("="*80)
+
+# Load correlation results
+correlation_df = pd.read_csv('sfa_bivariate_correlation_test_flags.csv')
+
+# Identify highly correlated pairs
+high_corr = correlation_df[abs(correlation_df['pearson_correlation']) > 0.7]
+print(f"\nVariable pairs with |correlation| > 0.7: {len(high_corr)}")
+
+# ===== 5.5 Regression Analysis =====
+print("\n" + "="*80)
+print("SFA: UNIVARIATE REGRESSION ANALYSIS")
+print("="*80)
+
+# Load regression results
+regression_df = pd.read_csv('sfa_regression.csv')
+
+# Summary of significant variables
+significant_vars = regression_df[regression_df['pvalue'] < 0.05]
+print(f"\nStatistically significant variables (p < 0.05): {len(significant_vars)}")
+
+# Top variables by model performance
+top_regression = regression_df.nlargest(15, 'gini')[
+    ['variable', 'coefficient', 'pvalue', 'gini', 'pseudo_rsquared']
+].round(4)
+
+print("\nTop 15 Variables by Univariate Model Performance:")
+print(top_regression.to_string(index=False))
+
+
+# ===== 6.1 Create Comprehensive Variable Summary =====
+print("="*80)
+print("VARIABLE SELECTION SUMMARY")
+print("="*80)
+
+# Combine all test results
+variable_summary = pd.DataFrame()
+variable_summary['variable'] = variable_discard['variable']
+
+# Add flags from each stage
+variable_summary['pass_dq'] = ~dq_flags['missing_flag'] & ~dq_flags['all_missing_flag']
+variable_summary['pass_distribution'] = variable_discard['sfa_univariate_distribution']
+variable_summary['pass_discrimination'] = variable_discard['sfa_univariate_discriminatory']
+variable_summary['pass_sign'] = variable_discard['sfa_univariate_sign']
+variable_summary['pass_correlation'] = variable_discard['sfa_bivariate_correlation']
+
+# Overall pass flag
+variable_summary['pass_all'] = (
+    variable_summary['pass_dq'] & 
+    variable_summary['pass_distribution'] & 
+    variable_summary['pass_discrimination'] & 
+    variable_summary['pass_sign'] & 
+    variable_summary['pass_correlation']
+)
+
+# Create funnel chart
+stages = ['Initial', 'After DQ', 'After Distribution', 
+          'After Discrimination', 'After Sign', 'After Correlation', 'Final']
+counts = [
+    len(variable_summary),
+    variable_summary['pass_dq'].sum(),
+    (variable_summary['pass_dq'] & variable_summary['pass_distribution']).sum(),
+    (variable_summary['pass_dq'] & variable_summary['pass_distribution'] & 
+     variable_summary['pass_discrimination']).sum(),
+    (variable_summary['pass_dq'] & variable_summary['pass_distribution'] & 
+     variable_summary['pass_discrimination'] & variable_summary['pass_sign']).sum(),
+    (variable_summary['pass_dq'] & variable_summary['pass_distribution'] & 
+     variable_summary['pass_discrimination'] & variable_summary['pass_sign'] & 
+     variable_summary['pass_correlation']).sum(),
+    variable_summary['pass_all'].sum()
+]
+
+fig, ax = plt.subplots(figsize=(12, 8))
+y_pos = np.arange(len(stages))
+colors = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(stages)))
+bars = ax.barh(y_pos, counts, color=colors)
+
+# Add value labels
+for i, (bar, count) in enumerate(zip(bars, counts)):
+    ax.text(bar.get_width() + 5, bar.get_y() + bar.get_height()/2, 
+            f'{count}', ha='left', va='center', fontweight='bold')
+
+ax.set_yticks(y_pos)
+ax.set_yticklabels(stages)
+ax.set_xlabel('Number of Variables')
+ax.set_title('Variable Selection Funnel', fontsize=14, fontweight='bold')
+ax.grid(True, alpha=0.3, axis='x')
+plt.tight_layout()
+plt.show()
+
+print(f"\nFinal variable count: {variable_summary['pass_all'].sum()}")
+
+
+# ===== 7.1 Create Comprehensive Excel Report =====
+print("="*80)
+print("CREATING EXCEL REPORT")
+print("="*80)
+
+# Create Excel writer
+excel_filename = f'Model_Development_Report_{timestamp}.xlsx'
+writer = pd.ExcelWriter(excel_filename, engine='xlsxwriter')
+
+# 1. Index/Summary Sheet
+summary_data = pd.DataFrame({
+    'Section': ['1. Data Quality', '2. Data Pipeline (MVT)', 
+                '3. Data Representativeness', '4. Single Factor Analysis',
+                '5. Variable Selection Summary'],
+    'Description': [
+        'Completeness and uniqueness analysis',
+        'Missing value treatment strategy and application',
+        'Binning analysis and distribution assessment',
+        'Distribution, discrimination, sign, and correlation tests',
+        'Final variable selection and summary statistics'
+    ],
+    'Key_Metrics': [
+        f'Variables with >50% missing: {dq_flags["missing_flag"].sum()}',
+        f'Variables requiring MVT: {(completeness_df["proportion_has_missing"] > 0).sum()}',
+        f'Average bins per variable: {distribution_df["no_bins"].mean():.1f}',
+        f'Variables passing all SFA tests: {variable_summary["pass_all"].sum()}',
+        f'Final variable count: {variable_summary["pass_all"].sum()}'
+    ]
+})
+summary_data.to_excel(writer, sheet_name='Index', index=False)
+
+# 2. Data Quality Sheet
+dq_report = pd.merge(completeness_df, dq_flags, 
+                     left_on='column_name', right_on='variable', how='left')
+dq_report.to_excel(writer, sheet_name='1_Data_Quality', index=False)
+
+# 3. MVT Sheet
+# 3. MVT Sheet
+mvt_report = completeness_df.copy()
+mvt_report['MVT_Category'] = pd.cut(mvt_report['proportion_has_missing'], 
+                                     bins=[0, 0.05, 0.3, 0.5, 1.0],
+                                     labels=['0-5%', '5-30%', '30-50%', '>50%'])
+mvt_report['MVT_Treatment'] = mvt_report['MVT_Category'].map({
+    '0-5%': 'Mean/Mode',
+    '5-30%': 'Worst Value (5th-95th percentile)',
+    '30-50%': 'Missing Indicator + Worst Value',
+    '>50%': 'Exclude Variable'
+})
+mvt_report.to_excel(writer, sheet_name='2_MVT_Pipeline', index=False)
+
+# 4. Data Representativeness Sheet
+binning_report = distribution_df.merge(
+    variable_discard[['variable', 'sfa_univariate_distribution']], 
+    on='variable', how='left'
+)
+binning_report.to_excel(writer, sheet_name='3_Data_Representativeness', index=False)
+
+# 5. SFA Results Sheet
+# Combine all SFA results
+sfa_comprehensive = variable_discard.copy()
+
+# Add discrimination metrics
+sfa_comprehensive = sfa_comprehensive.merge(
+    discrimination_df[['variable', 'gini_binned', 'somers_d_binned', 
+                       'spearman_correlation_binned', 'spearman_p_value_binned']],
+    on='variable', how='left'
+)
+
+# Add regression metrics
+sfa_comprehensive = sfa_comprehensive.merge(
+    regression_df[['variable', 'coefficient', 'pvalue', 'gini', 
+                   'pseudo_rsquared', 'transformation']],
+    on='variable', how='left', suffixes=('', '_regression')
+)
+
+# Add correlation flags
+sfa_comprehensive = sfa_comprehensive.merge(
+    correlation_df[['variable', 'pearson_correlation', 'spearman_correlation']],
+    on='variable', how='left', suffixes=('', '_bivariate')
+)
+
+sfa_comprehensive.to_excel(writer, sheet_name='4_SFA_Results', index=False)
+
+# 6. Variable Selection Summary Sheet
+final_selection = variable_summary[variable_summary['pass_all']].copy()
+
+# Add performance metrics for final variables
+final_selection = final_selection.merge(
+    regression_df[['variable', 'gini', 'coefficient', 'pvalue']],
+    on='variable', how='left'
+)
+
+# Sort by Gini
+final_selection = final_selection.sort_values('gini', ascending=False)
+final_selection.to_excel(writer, sheet_name='5_Variable_Selection', index=False)
+
+# 7. Model Development Checklist
+checklist = pd.DataFrame({
+    'Stage': [
+        '1. Data Quality Assessment',
+        '2. Missing Value Treatment',
+        '3. Outlier Treatment',
+        '4. Variable Transformation',
+        '5. Binning Analysis',
+        '6. Distribution Test',
+        '7. Discrimination Test',
+        '8. Direction/Sign Test',
+        '9. Correlation Analysis',
+        '10. Multicollinearity Check',
+        '11. Variable Selection',
+        '12. Model Development',
+        '13. Model Validation',
+        '14. Model Documentation'
+    ],
+    'Status': ['Complete'] * 11 + ['Pending'] * 3,
+    'Comments': [
+        f'{len(completeness_df)} variables assessed',
+        f'MVT applied to {(completeness_df["proportion_has_missing"] > 0).sum()} variables',
+        'Winsorization at 5th-95th percentile',
+        'Log/WOE transformations tested',
+        f'Average {distribution_df["no_bins"].mean():.1f} bins per variable',
+        f'{variable_discard["sfa_univariate_distribution"].sum()} variables passed',
+        f'{variable_discard["sfa_univariate_discriminatory"].sum()} variables passed',
+        f'{variable_discard["sfa_univariate_sign"].sum()} variables passed',
+        f'{variable_discard["sfa_bivariate_correlation"].sum()} variables passed',
+        'VIF analysis pending',
+        f'{variable_summary["pass_all"].sum()} variables selected',
+        'Pending',
+        'Pending',
+        'In progress'
+    ]
+})
+checklist.to_excel(writer, sheet_name='6_Development_Checklist', index=False)
+
+# Format Excel file
+workbook = writer.book
+
+# Define formats
+header_format = workbook.add_format({
+    'bold': True,
+    'text_wrap': True,
+    'valign': 'top',
+    'fg_color': '#D7E4BD',
+    'border': 1
+})
+
+# Apply formatting to all sheets
+for sheet_name in writer.sheets:
+    worksheet = writer.sheets[sheet_name]
+    worksheet.set_zoom(85)
+    
+    # Set column widths
+    if sheet_name == 'Index':
+        worksheet.set_column('A:A', 30)
+        worksheet.set_column('B:B', 50)
+        worksheet.set_column('C:C', 40)
+    else:
+        worksheet.set_column('A:Z', 15)
+
+# Save Excel file
+writer.close()
+
+print(f"\nExcel report created: {excel_filename}")
+
+# ===== 9.1 Create Regulatory Summary =====
+print("\n" + "="*80)
+print("REGULATORY DOCUMENTATION SUMMARY")
+print("="*80)
+
+regulatory_summary = {
+    'Model Information': {
+        'Model Type': 'Logistic Regression',
+        'Purpose': 'Binary Classification',
+        'Development Date': datetime.now().strftime('%Y-%m-%d'),
+        'Developer': 'Model Development Team'
+    },
+    'Data Summary': {
+        'Initial Variables': len(variable_summary),
+        'Post-DQ Variables': variable_summary['pass_dq'].sum(),
+        'Final Variables': variable_summary['pass_all'].sum(),
+        'Missing Value Treatment': 'Applied based on missingness levels',
+        'Outlier Treatment': 'Winsorization at 5th-95th percentile'
+    },
+    'Methodology': {
+        'Variable Selection': 'Single Factor Analysis (SFA)',
+        'Distribution Test': 'Minimum bin density and monotonicity',
+        'Discrimination Test': 'Gini > threshold, p-value < 0.05',
+        'Direction Test': 'Business logic alignment',
+        'Correlation Test': 'Pearson correlation < 0.7'
+    },
+    'Key Metrics': {
+        'Average Gini (univariate)': f"{regression_df['gini'].mean():.4f}",
+        'Variables with p < 0.05': len(significant_vars),
+        'Highly correlated pairs removed': len(high_corr)
+    }
+}
+
+# Create summary visualization
+fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+fig.suptitle('Model Development Summary Dashboard', fontsize=16, fontweight='bold')
+
+# 1. Variable Selection Funnel (repeated for dashboard)
+ax1.barh(stages, counts, color=colors)
+ax1.set_xlabel('Number of Variables')
+ax1.set_title('Variable Selection Funnel')
+ax1.grid(True, alpha=0.3)
+
+# 2. Gini Distribution
+ax2.hist(regression_df['gini'], bins=30, edgecolor='black', alpha=0.7)
+ax2.axvline(regression_df['gini'].mean(), color='red', linestyle='--', 
+            label=f'Mean: {regression_df["gini"].mean():.3f}')
+ax2.set_xlabel('Gini Coefficient')
+ax2.set_ylabel('Frequency')
+ax2.set_title('Distribution of Univariate Gini Coefficients')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
+
+# 3. P-value Distribution
+ax3.hist(regression_df['pvalue'], bins=30, edgecolor='black', alpha=0.7)
+ax3.axvline(0.05, color='red', linestyle='--', label='p = 0.05')
+ax3.set_xlabel('P-value')
+ax3.set_ylabel('Frequency')
+ax3.set_title('Distribution of P-values')
+ax3.legend()
+ax3.grid(True, alpha=0.3)
+
+# 4. Missing Data Summary
+missing_categories = ['0-5%', '5-30%', '30-50%', '>50%']
+missing_counts = [
+    len(completeness_df[(completeness_df['proportion_has_missing'] >= 0) & 
+                        (completeness_df['proportion_has_missing'] <= 0.05)]),
+    len(completeness_df[(completeness_df['proportion_has_missing'] > 0.05) & 
+                        (completeness_df['proportion_has_missing'] <= 0.3)]),
+    len(completeness_df[(completeness_df['proportion_has_missing'] > 0.3) & 
+                        (completeness_df['proportion_has_missing'] <= 0.5)]),
+    len(completeness_df[completeness_df['proportion_has_missing'] > 0.5])
+]
+ax4.pie(missing_counts, labels=missing_categories, autopct='%1.1f%%', 
+        colors=['green', 'yellow', 'orange', 'red'])
+ax4.set_title('Missing Data Distribution')
+
+plt.tight_layout()
+plt.savefig('model_development_summary.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\nRegulatory documentation summary created.")
+print("Dashboard saved as: model_development_summary.png")
+
+# ===== 10.1 Generate Executive Summary =====
+print("\n" + "="*80)
+print("EXECUTIVE SUMMARY")
+print("="*80)
+
+print(f"""
+MODEL DEVELOPMENT SUMMARY
+========================
+
+1. DATA QUALITY
+   - Total variables assessed: {len(variable_summary)}
+   - Variables with acceptable missing levels: {variable_summary['pass_dq'].sum()}
+   - Data quality pass rate: {variable_summary['pass_dq'].mean():.1%}
+
+2. SINGLE FACTOR ANALYSIS
+   - Distribution test pass rate: {variable_discard['sfa_univariate_distribution'].mean():.1%}
+   - Discrimination test pass rate: {variable_discard['sfa_univariate_discriminatory'].mean():.1%}
+   - Sign test pass rate: {variable_discard['sfa_univariate_sign'].mean():.1%}
+   - Correlation test pass rate: {variable_discard['sfa_bivariate_correlation'].mean():.1%}
+
+3. FINAL SELECTION
+   - Variables passing all criteria: {variable_summary['pass_all'].sum()}
+   - Overall selection rate: {variable_summary['pass_all'].mean():.1%}
+   - Average univariate Gini: {regression_df['gini'].mean():.4f}
+
+4. NEXT STEPS
+   - Develop multivariate logistic regression model
+   - Perform stepwise selection if needed
+   - Validate on out-of-time sample
+   - Document model assumptions and limitations
+
+RECOMMENDATIONS
+===============
+1. Review variables failing sign test for business logic
+2. Consider variable transformations for improved linearity
+3. Monitor variables with 30-50% missing in production
+4. Establish model monitoring framework
+""")
+
+# Save all outputs
+print(f"\n{'='*80}")
+print("ALL OUTPUTS SAVED:")
+print(f"1. Excel Report: {excel_filename}")
+print(f"2. Model Template: model_development_template.py")
+print(f"3. Summary Dashboard: model_development_summary.png")
+print(f"{'='*80}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
