@@ -4,6 +4,63 @@ from sklearn.metrics import r2_score
 import statsmodels.api as sm
 from itertools import chain
 
+
+# --------------------
+# Optimized Forward Selection (Adj R² Gain)
+# --------------------
+def forward_selection_adjR2_fast(X, y):
+    remaining = list(X.columns)
+    selected = []
+    best_adj_r2 = -np.inf
+    y_arr = y.values
+    n = len(y_arr)
+
+    while remaining:
+        best_var = None
+        best_r2_adj = best_adj_r2
+        for var in remaining:
+            trial_vars = selected + [var]
+            X_trial = np.column_stack([np.ones(n), X[trial_vars].values])
+            beta, _, _, _ = np.linalg.lstsq(X_trial, y_arr, rcond=None)
+            y_pred = X_trial @ beta
+            rss = np.sum((y_arr - y_pred) ** 2)
+            tss = np.sum((y_arr - y_arr.mean()) ** 2)
+            r2 = 1 - rss / tss
+            adj_r2 = 1 - (1 - r2) * (n - 1) / (n - X_trial.shape[1])
+            if adj_r2 > best_r2_adj + 1e-6:
+                best_r2_adj = adj_r2
+                best_var = var
+        if best_var is None:
+            break
+        selected.append(best_var)
+        remaining.remove(best_var)
+        best_adj_r2 = best_r2_adj
+    return selected
+
+# --------------------
+# Optimized Backward Elimination
+# --------------------
+def backward_elimination_fast(X, y, sl=0.05):
+    cols = list(X.columns)
+    n = len(y)
+    while True:
+        Xc = np.column_stack([np.ones(n), X[cols].values])
+        beta, _, _, _ = np.linalg.lstsq(Xc, y.values, rcond=None)
+        y_pred = Xc @ beta
+        mse = np.sum((y.values - y_pred) ** 2) / (n - Xc.shape[1])
+        var_beta = mse * np.linalg.inv(Xc.T @ Xc).diagonal()
+        se_beta = np.sqrt(var_beta)
+        t_stats = beta / se_beta
+        pvals = 2 * (1 - t.cdf(np.abs(t_stats), df=n - Xc.shape[1]))
+        pvals_dict = dict(zip(["const"] + cols, pvals))
+        max_pval_var = max(cols, key=lambda c: pvals_dict[c])
+        if pvals_dict[max_pval_var] > sl:
+            cols.remove(max_pval_var)
+        else:
+            break
+    return cols
+
+
 # ----------------------------
 # Transformation functions
 # ----------------------------
