@@ -1,0 +1,390 @@
+import pandas as pd
+import numpy as np
+from sklearn.metrics import r2_score
+import statsmodels.api as sm
+from scipy import stats
+
+# ----------------------------
+# Transformation functions
+# ----------------------------
+def linear_transform(x_sample, y_sample, data):
+    return data
+
+def quadratic_transform(x_sample, y_sample, data):
+    return data ** 2
+
+def square_root_transform(data):
+    return np.sqrt(np.maximum(data, 0))
+
+def exp_transform(data):
+    return np.exp(np.clip(data, -10, 10))
+
+def symmetric_transform(data):
+    return np.abs(data)
+
+def log_transform(data):
+    return np.log(np.maximum(data, 1e-10))
+
+TRANSFORM_FUNCS = {
+    'linear': linear_transform,
+    'quadratic': quadratic_transform,
+    'sqrt': square_root_transform,
+    'exp': exp_transform,
+    'symmetric': symmetric_transform,
+    'log': log_transform
+}
+
+# ----------------------------
+# Single Factor Analysis (with constant)
+# ----------------------------
+def single_factor_analysis(df, target, variables):
+    results = []
+    y = df[target].values
+    n = len(y)
+    
+    for var in variables:
+        x_orig = df[var]
+        
+        for tname, tfunc in TRANSFORM_FUNCS.items():
+            try:
+                # Apply transformation
+                if tname in ['linear', 'quadratic']:
+                    x_trans = tfunc(x_orig, df[target], x_orig).values
+                else:
+                    x_trans = tfunc(x_orig).values
+                
+                # Skip if transformation produces invalid values
+                if np.any(~np.isfinite(x_trans)):
+                    continue
+                
+                # OLS with constant
+                X = np.column_stack([np.ones(n), x_trans])  # Add constant
+                XtX = X.T @ X
+                XtX_inv = np.linalg.inv(XtX)
+                beta = XtX_inv @ X.T @ y
+                y_pred = X @ beta
+                
+                # Calculate statistics
+                rss = np.sum((y - y_pred) ** 2)
+                tss = np.sum((y - y.mean()) ** 2)
+                r2 = 1 - rss / tss
+                
+                # Calculate p-value for slope coefficient
+                mse = rss / (n - 2)
+                se = np.sqrt(mse * XtX_inv[1, 1])  # SE for slope
+                t_stat = beta[1] / se
+                pval = 2 * (1 - stats.t.cdf(np.abs(t_stat), n - 2))
+                
+                # Pearson correlation
+                corr = np.corrcoef(x_trans, y)[0, 1]
+                
+                results.append({
+                    'variable': var,
+                    'transform': tname,
+                    'transformed_var': f"{var}_{tname}",
+                    'R2': r2,
+                    'pval': pval,
+                    'sign': np.sign(beta[1]),
+                    'pearson_corr': corr,
+                    'coef': beta[1],
+                    'intercept': beta[0]
+                })
+            except:
+                continue
+    
+    return pd.DataFrame(results)
+
+# ----------------------------
+# Hybrid Selection (Forward then Backward)
+# ----------------------------
+def hybrid_selection(df, target, candidates, sl_enter=0.05, sl_remove=0.05):
+    """
+    Performs forward selection followed by backward elimination
+    sl_enter: significance level to enter (forward)
+    sl_remove: significance level to remove (backward)
+    """
+    y = df[target]
+    n = len(y)
+    
+    # Forward Selection Phase
+    selected = []
+    remaining = candidates.copy()
+    
+    while remaining:
+        best_pval = 1.0
+        best_var = None
+        best_adj_r2 = -np.inf
+        
+        # Try adding each remaining variable
+        for var in remaining:
+            trial_vars = selected + [var]
+            X = sm.add_constant(df[trial_vars])
+            
+            try:
+                model = sm.OLS(y, X).fit()
+                # Get p-value of the newly added variable
+                var_pval = model.pvalues[var]
+                
+                if var_pval < sl_enter and var_pval < best_pval:
+                    best_pval = var_pval
+                    best_var = var
+                    best_adj_r2 = model.rsquared_adj
+            except:
+                continue
+        
+        # Add best variable if significant
+        if best_var is not None:
+            selected.append(best_var)
+            remaining.remove(best_var)
+            print(f"Forward: Added {best_var}, p-value: {best_pval:.4f}, Adj R²: {best_adj_r2:.4f}")
+        else:
+            break
+    
+    # Backward Elimination Phase
+    if len(selected) > 1:
+        improved = True
+        while improved and len(selected) > 1:
+            improved = False
+            
+            # Fit model with all selected variables
+            X = sm.add_constant(df[selected])
+            model = sm.OLS(y, X).fit()
+            
+            # Find variable with highest p-value
+            pvals = model.pvalues[1:]  # Exclude constant
+            max_pval = pvals.max()
+            
+            if max_pval > sl_remove:
+                remove_var = pvals.idxmax()
+                selected.remove(remove_var)
+                improved = True
+                print(f"Backward: Removed {remove_var}, p-value: {max_pval:.4f}")
+    
+    return selected
+
+# ----------------------------
+# Forward Selection with Adj R²
+# ----------------------------
+def forward_selection_adjR2(df, target, candidates):
+    y = df[target].values
+    n = len(y)
+    selected = []
+    remaining = candidates.copy()
+    best_adj_r2 = -np.inf
+    
+    while remaining:
+        best_var = None
+        best_score = best_adj_r2
+        
+        for var in remaining:
+            trial_vars = selected + [var]
+            X = df[trial_vars].values
+            X = np.column_stack([np.ones(n), X])  # Add constant
+            
+            try:
+                XtX_inv = np.linalg.inv(X.T @ X)
+                beta = XtX_inv @ X.T @ y
+                y_pred = X @ beta
+                rss = np.sum((y - y_pred) ** 2)
+                r2 = 1 - rss / np.sum((y - y.mean()) ** 2)
+                adj_r2 = 1 - (1 - r2) * (n - 1) / (n - len(trial_vars) - 1)
+                
+                if adj_r2 > best_score:
+                    best_score = adj_r2
+                    best_var = var
+            except:
+                continue
+        
+        if best_var is None or best_score <= best_adj_r2:
+            break
+            
+        selected.append(best_var)
+        remaining.remove(best_var)
+        best_adj_r2 = best_score
+    
+    return selected
+
+# ----------------------------
+# Backward Elimination
+# ----------------------------
+def backward_elimination(df, target, candidates, sl=0.05):
+    y = df[target]
+    cols = candidates.copy()
+    
+    while len(cols) > 0:
+        X = sm.add_constant(df[cols])
+        model = sm.OLS(y, X).fit()
+        pvals = model.pvalues[1:]  # Exclude constant
+        
+        max_pval = pvals.max()
+        if max_pval > sl:
+            remove_var = pvals.idxmax()
+            cols.remove(remove_var)
+        else:
+            break
+    
+    return cols
+
+# ----------------------------
+# Score function
+# ----------------------------
+def calculate_scores(df, selected_vars, coefficients):
+    """Calculate scores using coefficients (includes constant)"""
+    X = np.column_stack([np.ones(len(df)), df[selected_vars].values])
+    return X @ coefficients
+
+# ----------------------------
+# Segment R²
+# ----------------------------
+def segment_r2(y_true, y_pred, segments):
+    results = []
+    for seg in segments.unique():
+        mask = segments == seg
+        if mask.sum() > 1:
+            r2 = r2_score(y_true[mask], y_pred[mask])
+            results.append({"Segment": seg, "R2": r2, "Count": mask.sum()})
+    return pd.DataFrame(results)
+
+# ----------------------------
+# Main Pipeline
+# ----------------------------
+def run_pipeline(df, target, variables, segment_col, output_excel, selection_method='hybrid'):
+    # Step 1: Single Factor Analysis
+    print("Running SFA...")
+    sfa_results = single_factor_analysis(df, target, variables)
+    
+    # Step 2: Filter significant variables
+    significant_vars = sfa_results[sfa_results['pval'] < 0.05].copy()
+    
+    # Create transformed variables in dataframe
+    for _, row in significant_vars.iterrows():
+        var = row['variable']
+        transform = row['transform']
+        new_var = row['transformed_var']
+        
+        if transform in ['linear', 'quadratic']:
+            df[new_var] = TRANSFORM_FUNCS[transform](df[var], df[target], df[var])
+        else:
+            df[new_var] = TRANSFORM_FUNCS[transform](df[var])
+    
+    candidate_vars = significant_vars['transformed_var'].tolist()
+    
+    if not candidate_vars:
+        print("No significant variables found!")
+        return None
+    
+    # Step 3: Variable selection
+    print(f"\nUsing {selection_method} selection...")
+    
+    if selection_method == 'hybrid':
+        selected_vars = hybrid_selection(df, target, candidate_vars)
+    elif selection_method == 'forward':
+        selected_vars = forward_selection_adjR2(df, target, candidate_vars)
+    elif selection_method == 'backward':
+        selected_vars = backward_elimination(df, target, candidate_vars)
+    else:
+        # Compare all methods
+        vars_hybrid = hybrid_selection(df, target, candidate_vars)
+        vars_forward = forward_selection_adjR2(df, target, candidate_vars)
+        vars_backward = backward_elimination(df, target, candidate_vars)
+        
+        # Evaluate each
+        y = df[target]
+        models = {}
+        for name, vars_list in [('hybrid', vars_hybrid), 
+                                ('forward', vars_forward), 
+                                ('backward', vars_backward)]:
+            if vars_list:
+                X = sm.add_constant(df[vars_list])
+                model = sm.OLS(y, X).fit()
+                models[name] = (vars_list, model)
+        
+        # Choose best by adj R²
+        best_method = max(models.items(), key=lambda x: x[1][1].rsquared_adj)
+        selected_vars = best_method[1][0]
+        print(f"Best method: {best_method[0]} with Adj R²: {best_method[1][1].rsquared_adj:.4f}")
+    
+    # Step 4: Fit final model
+    y = df[target]
+    X = sm.add_constant(df[selected_vars])
+    final_model = sm.OLS(y, X).fit()
+    
+    # Step 5: Calculate scores
+    df["model_score"] = calculate_scores(df, selected_vars, final_model.params.values)
+    
+    # Step 6: Calculate R² metrics
+    overall_r2 = r2_score(y, df["model_score"])
+    segment_r2_df = segment_r2(y.values, df["model_score"].values, df[segment_col])
+    
+    # Step 7: Prepare outputs
+    coef_summary = pd.DataFrame({
+        'Variable': ['const'] + selected_vars,
+        'Coefficient': final_model.params.values,
+        'Std_Error': final_model.bse.values,
+        'T_Stat': final_model.tvalues.values,
+        'P_Value': final_model.pvalues.values
+    })
+    
+    model_summary = pd.DataFrame({
+        'Metric': ['R-squared', 'Adj. R-squared', 'F-statistic', 
+                   'Prob (F-statistic)', 'AIC', 'BIC', 'No. Observations'],
+        'Value': [final_model.rsquared, final_model.rsquared_adj, 
+                  final_model.fvalue, final_model.f_pvalue,
+                  final_model.aic, final_model.bic, final_model.nobs]
+    })
+    
+    # Save to Excel
+    with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
+        sfa_results.to_excel(writer, sheet_name="SFA_Results", index=False)
+        pd.DataFrame({"Selected_Variables": selected_vars}).to_excel(
+            writer, sheet_name="Selected_Variables", index=False)
+        coef_summary.to_excel(writer, sheet_name="Model_Coefficients", index=False)
+        model_summary.to_excel(writer, sheet_name="Model_Summary", index=False)
+        pd.DataFrame({"Overall_R2": [overall_r2]}).to_excel(
+            writer, sheet_name="Overall_R2", index=False)
+        segment_r2_df.to_excel(writer, sheet_name="Segment_R2", index=False)
+        df[[target, "model_score"]].head(100).to_excel(
+            writer, sheet_name="Sample_Scores", index=False)
+    
+    print(f"\nResults saved to {output_excel}")
+    print(f"Final model has {len(selected_vars)} variables")
+    print(f"Overall R²: {overall_r2:.4f}")
+    
+    return {
+        "selected_vars": selected_vars,
+        "overall_r2": overall_r2,
+        "segment_r2": segment_r2_df,
+        "model": final_model,
+        "coefficients": final_model.params.values
+    }
+
+# ----------------------------
+# Test
+# ----------------------------
+if __name__ == "__main__":
+    np.random.seed(42)
+    n = 40000
+    
+    training_df = pd.DataFrame({
+        "var1": np.random.randn(n),
+        "var2": np.random.exponential(2, n),
+        "var3": np.random.gamma(2, 2, n),
+        "segment": np.random.choice(["A", "B", "C"], n)
+    })
+    
+    training_df["logit_pd"] = (
+        0.5 * training_df["var1"] + 
+        0.3 * np.log(training_df["var2"] + 1) + 
+        0.2 * np.sqrt(training_df["var3"]) + 
+        np.random.randn(n) * 0.5
+    )
+    
+    # Test hybrid selection
+    result = run_pipeline(
+        df=training_df,
+        target="logit_pd",
+        variables=["var1", "var2", "var3"],
+        segment_col="segment",
+        output_excel="model_output_hybrid.xlsx",
+        selection_method='hybrid'  # Can be 'hybrid', 'forward', 'backward', or 'best'
+    )
