@@ -1,1314 +1,150 @@
-import streamlit as st
 import pandas as pd
-import plotly.express as px
-from datetime import datetime
-import plotly.graph_objects as go
-
-# Set page configuration
-st.set_page_config(page_title="Data Quality Dashboard", layout="wide")
-
-# Title
-st.title("Data Quality Dashboard")
-
-# File uploader
-uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
-
-if uploaded_file is not None:
-    # Read Excel file
-    try:
-        df = pd.read_excel(uploaded_file)
-        st.success("File uploaded successfully!")
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        st.stop()
-        
-
-
-    # Ensure required columns exist
-    required_columns = ['customer_id', 'name', 'active_flag', 'default_flag', 'cohort_date', 'turnover', 'ead']
-    missing_cols = [col for col in required_columns if col not in df.columns]
-    if missing_cols:
-        st.error(f"Missing columns: {missing_cols}")
-        st.stop()
-        # Check for entity_type column
-    has_entity_type = 'entity_type' in df.columns
-    if not has_entity_type:
-        st.warning("No 'entity_type' column found. All data will be treated as a single entity type.")
-        df['entity_type'] = 'Unknown'
-
-    # Convert cohort_date to datetime
-    try:
-        df['cohort_date'] = pd.to_datetime(df['cohort_date'])
-    except:
-        st.warning("Invalid format in 'cohort_date'. Please ensure it's a valid date.")
-
- 
-  # Create tabs
-    tab1, tab2, tab3 = st.tabs(["Data Quality Summary", "Customer History", "Default History Check"])
-
-
-    with tab1:
-        st.header("Data Quality Summary")
-
-        # Entity type filter
-        entity_types = df['entity_type'].unique().tolist()
-        selected_entities = st.multiselect("Select Entity Type(s)", entity_types, default=entity_types)
-
-        # Filter data based on selected entity types
-        if selected_entities:
-            filtered_df = df[df['entity_type'].isin(selected_entities)]
-        else:
-            filtered_df = df
-            st.warning("No entity types selected. Showing all data.")
-
-        # Data Quality Checks
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Missing Values
-            st.subheader("Missing Values")
-            missing_data = filtered_df.isnull().sum()
-            missing_df = pd.DataFrame({
-                'Column': missing_data.index,
-                'Missing Count': missing_data.values,
-                'Missing %': (missing_data / len(filtered_df) * 100).round(2)
-            })
-            missing_df = missing_df[missing_df['Missing Count'] > 0]
-            if not missing_df.empty:
-                st.dataframe(missing_df)
-            else:
-                st.write("No missing values found.")
-
-            # Duplicates
-            st.subheader("Duplicate Records")
-            duplicates = filtered_df.duplicated(subset=['customer_id', 'cohort_date']).sum()
-            st.write(f"Number of duplicate records: {duplicates}")
-            if duplicates > 0:
-                st.write("Duplicate customer_id and cohort_date combinations found.")
-
-        with col2:
-            # Data Type Issues
-            st.subheader("Data Type Validation")
-            type_issues = []
-            if not filtered_df['customer_id'].apply(lambda x: isinstance(x, (int, str))).all():
-                type_issues.append("Invalid customer_id format (should be string or integer).")
-            if not filtered_df['active_flag'].isin([0, 1, True, False]).all():
-                type_issues.append("Invalid active_flag values (should be 0/1 or True/False).")
-            if not filtered_df['default_flag'].isin([0, 1, True, False]).all():
-                type_issues.append("Invalid default_flag values (should be 0/1 or True/False).")
-            if not filtered_df['turnover'].apply(lambda x: isinstance(x, (int, float))).all():
-                type_issues.append("Invalid turnover values (should be numeric).")
-            if not filtered_df['ead'].apply(lambda x: isinstance(x, (int, float))).all():
-                type_issues.append("Invalid EAD values (should be numeric).")
-
-            if type_issues:
-                for issue in type_issues:
-                    st.write(f"- {issue}")
-            else:
-                st.write("No data type issues found.")
-
-        # Summary Statistics
-        st.subheader("Summary Statistics")
-        st.dataframe(filtered_df.describe(include='all'))
-
-    with tab2:
-        st.header("Customer History")
-
-        # Customer selection
-        customer_id = st.selectbox("Select Customer ID", df['customer_id'].unique())
-        customer_data = df[df['customer_id'] == customer_id]
-
-        # Display customer details
-        st.subheader(f"Details for Customer: {customer_data['name'].iloc[0]} (ID: {customer_id})")
-        st.dataframe(customer_data[['cohort_date', 'active_flag', 'default_flag', 'turnover', 'ead']])
-
-# Visualize turnover (line chart) and EAD (bar chart)
-        if not customer_data.empty:
-            # Line chart for turnover
-            fig_line = px.line(customer_data, x='cohort_date', y='turnover',
-                               title=f"Turnover Over Time for Customer {customer_id}",
-                               labels={'turnover': 'Turnover', 'cohort_date': 'Cohort Date'})
-            st.plotly_chart(fig_line, use_container_width=True)
-
-            # Bar chart for EAD
-            fig_bar = px.bar(customer_data, x='cohort_date', y='ead',
-                             title=f"EAD Over Time for Customer {customer_id}",
-                             labels={'ead': 'EAD', 'cohort_date': 'Cohort Date'})
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-
-            # Active and Default Flag Status
-            st.subheader("Flag Status Over Time")
-            flag_data = customer_data[['cohort_date', 'active_flag', 'default_flag']].melt(
-                id_vars='cohort_date', var_name='Flag', value_name='Status'
-            )
-            fig_flags = px.scatter(flag_data, x='cohort_date', y='Flag', color='Status',
-                                   title="Active and Default Flag Status",
-                                   color_continuous_scale='Viridis')
-            st.plotly_chart(fig_flags, use_container_width=True)
-            
-            
-    with tab3:
-        st.header("Default History Check")
-
-        # Filter data for defaulted customers
-        default_data = df[df['default_flag'] == 1]
-        if default_data.empty:
-            st.warning("No customers with default_flag = 1 found.")
-        else:
-            # Display defaulted customers
-            st.subheader("Customers with Default Flag = 1")
-            st.dataframe(default_data[['customer_id', 'name', 'cohort_date', 'active_flag', 'turnover', 'ead']])
-
-            # Summary of defaults by cohort date
-            st.subheader("Default Count by Cohort Date")
-            default_count = default_data.groupby('cohort_date').size().reset_index(name='Default Count')
-            fig_default_count = px.bar(default_count, x='cohort_date', y='Default Count',
-                                      title="Number of Defaults by Cohort Date",
-                                      labels={'cohort_date': 'Cohort Date', 'Default Count': 'Number of Defaults'})
-            st.plotly_chart(fig_default_count, use_container_width=True)
-
-            # Flag Status Over Time (Stacked Bar Chart)
-            st.subheader("Flag Status Over Time for Defaulted Customers")
-            # Prepare data for stacked bar chart
-            flag_summary = default_data.groupby(['cohort_date', 'active_flag']).size().unstack(fill_value=0).reset_index()
-            flag_summary.columns = ['cohort_date', 'Inactive (0)', 'Active (1)']
-            
-            fig_flags_bar = go.Figure()
-            fig_flags_bar.add_trace(go.Bar(
-                x=flag_summary['cohort_date'],
-                y=flag_summary['Inactive (0)'],
-                name='Inactive (0)',
-                marker_color='red'
-            ))
-            fig_flags_bar.add_trace(go.Bar(
-                x=flag_summary['cohort_date'],
-                y=flag_summary['Active (1)'],
-                name='Active (1)',
-                marker_color='green'
-            ))
-            fig_flags_bar.update_layout(
-                title="Active Flag Status for Defaulted Customers Over Time",
-                xaxis_title="Cohort Date",
-                yaxis_title="Count of Defaulted Customers",
-                barmode='stack',
-                legend=dict(x=0.1, y=1.1, orientation='h')
-            )
-            st.plotly_chart(fig_flags_bar, use_container_width=True)
-
-            # Heatmap for Flag Status
-            st.subheader("Flag Status Heatmap")
-            flag_heatmap_data = default_data.pivot_table(
-                index='cohort_date', 
-                columns='active_flag', 
-                values='customer_id', 
-                aggfunc='count', 
-                fill_value=0
-            ).reset_index()
-            flag_heatmap_data.columns = ['cohort_date', 'Inactive (0)', 'Active (1)']
-            
-            fig_heatmap = go.Figure(data=go.Heatmap(
-                x=flag_heatmap_data['cohort_date'],
-                y=['Active Flag'],
-                z=[flag_heatmap_data['Active (1)'] / (flag_heatmap_data['Active (1)'] + flag_heatmap_data['Inactive (0)'])],
-                colorscale='Viridis',
-                showscale=True,
-                text=[flag_heatmap_data['Active (1)'] / (flag_heatmap_data['Active (1)'] + flag_heatmap_data['Inactive (0)'])],
-                texttemplate="%{text:.2f}",
-                colorbar=dict(title="Proportion of Active (1)")
-            ))
-            fig_heatmap.update_layout(
-                title="Proportion of Active Flag for Defaulted Customers",
-                xaxis_title="Cohort Date",
-                yaxis_title="Flag"
-            )
-            st.plotly_chart(fig_heatmap, use_container_width=True)
-
-            # EAD and Turnover for defaulted customers
-            st.subheader("EAD and Turnover for Defaulted Customers")
-            fig_default_metrics = go.Figure()
-            fig_default_metrics.add_trace(go.Bar(
-                x=default_data['cohort_date'],
-                y=default_data['ead'],
-                name='EAD',
-                marker_color='blue'
-            ))
-            fig_default_metrics.add_trace(go.Scatter(
-                x=default_data['cohort_date'],
-                y=default_data['turnover'],
-                name='Turnover',
-                mode='lines+markers',
-                yaxis='y2',
-                line=dict(color='red')
-            ))
-            fig_default_metrics.update_layout(
-                title="EAD (Bar) and Turnover (Line) for Defaulted Customers",
-                xaxis=dict(title="Cohort Date"),
-                yaxis=dict(title="EAD", titlefont=dict(color='blue'), tickfont=dict(color='blue')),
-                yaxis2=dict(title="Turnover", titlefont=dict(color='red'), tickfont=dict(color='red'), overlaying='y', side='right'),
-                legend=dict(x=0.1, y=1.1, orientation='h')
-            )
-            st.plotly_chart(fig_default_metrics, use_container_width=True)
-else:
-    st.info("Please upload an Excel file to proceed.")
-
-# Footer
-st.markdown("---")
-st.write("Built with Streamlit | Data Dashboard for Customer Analysis")import streamlit as st
-import polars as pl
-import plotly.express as px
-from st_aggrid import AgGrid, GridOptionsBuilder
-
-# --- CONFIG ---
-st.set_page_config(page_title="Customer Data Dashboard", layout="wide", initial_sidebar_state="expanded")
-
-# --- DATA LOADING ---
-@st.cache_resource(show_spinner="Loading data...", max_entries=1)
-def load_data():
-    # Simulate loading a large dataset
-    # Replace with: pl.read_csv("your_file.csv") or pl.read_parquet("your_file.parquet")
-    import numpy as np
-    import random
-    n_rows = 5_000_000
-    n_cols = 500
-    data = {
-        "customer_id": np.arange(n_rows),
-        "age": np.random.randint(18, 80, n_rows),
-        "gender": np.random.choice(["Male", "Female", "Other"], n_rows),
-        "country": np.random.choice(["USA", "UK", "Canada", "India", "Germany"], n_rows),
-        "spend": np.random.exponential(1000, n_rows).round(2),
-        "signup_date": np.random.choice(
-            pd.date_range("2020-01-01", "2024-01-01", freq="D"), n_rows
-        ),
-    }
-    # Add more columns for demonstration
-    for i in range(6, n_cols+1):
-        data[f"feature_{i}"] = np.random.randn(n_rows)
-    df = pl.DataFrame(data)
-    return df
-
-df = load_data()
-
-# --- SIDEBAR FILTERS ---
-st.sidebar.header("Filter Customers")
-country = st.sidebar.multiselect("Country", options=df["country"].unique().to_list(), default=None)
-gender = st.sidebar.multiselect("Gender", options=df["gender"].unique().to_list(), default=None)
-age_range = st.sidebar.slider("Age Range", int(df["age"].min()), int(df["age"].max()), (18, 80))
-spend_range = st.sidebar.slider("Spend Range", float(df["spend"].min()), float(df["spend"].max()), (0.0, 5000.0))
-
-# --- FILTERING ---
-filtered_df = df
-if country:
-    filtered_df = filtered_df.filter(pl.col("country").is_in(country))
-if gender:
-    filtered_df = filtered_df.filter(pl.col("gender").is_in(gender))
-filtered_df = filtered_df.filter(
-    (pl.col("age") >= age_range[0]) & (pl.col("age") <= age_range[1]) &
-    (pl.col("spend") >= spend_range[0]) & (pl.col("spend") <= spend_range[1])
-)
-
-# --- SUMMARY METRICS ---
-st.title("📊 Customer Data Dashboard")
-st.markdown("Elegant, fast dashboard for large-scale customer analytics.")
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Customers", f"{filtered_df.height:,}")
-col2.metric("Avg. Age", f"{filtered_df['age'].mean():.1f}")
-col3.metric("Avg. Spend", f"${filtered_df['spend'].mean():,.2f}")
-col4.metric("Countries", f"{filtered_df['country'].n_unique()}")
-
-# --- CHARTS ---
-st.subheader("Customer Demographics & Spend")
-
-c1, c2 = st.columns(2)
-with c1:
-    fig1 = px.histogram(filtered_df.to_pandas(), x="age", nbins=40, color="gender", title="Age Distribution")
-    st.plotly_chart(fig1, use_container_width=True)
-with c2:
-    fig2 = px.box(filtered_df.to_pandas(), x="country", y="spend", color="country", title="Spend by Country")
-    st.plotly_chart(fig2, use_container_width=True)
-
-st.subheader("Customer Table (first 1000 rows)")
-# --- AGGRID TABLE ---
-gb = GridOptionsBuilder.from_dataframe(filtered_df.head(1000).to_pandas())
-gb.configure_pagination()
-gb.configure_side_bar()
-gb.configure_default_column(groupable=True, value=True, enableRowGroup=True, aggFunc='sum', editable=False)
-gridOptions = gb.build()
-AgGrid(filtered_df.head(1000).to_pandas(), gridOptions=gridOptions, height=400, theme="streamlit")
-
-# --- SUMMARY ---
-st.subheader("Summary")
-st.write(f"Showing **{filtered_df.height:,}** customers after filtering. Use the sidebar to refine your analysis.")
-
-# --- FOOTER ---
-st.markdown(
-    """
-    <style>
-    footer {visibility: hidden;}
-    .css-1v0mbdj {background: #f8f9fa;}
-    </style>
-    """, unsafe_allow_html=True
-)
-
-#-------------------
-#----------New---------
-#----------------------
-
-import streamlit as st
-import polars as pl
-import plotly.express as px
-import plotly.graph_objects as go
-
-# 1. Load Data Efficiently
-@st.cache_resource(show_spinner="Loading data...", max_entries=1)
-def load_data():
-    # Adjust dtypes for speed/memory
-    dtypes = {
-        "customer_id": pl.Utf8,
-        "cohort_date": pl.Date,
-        "turnover": pl.Float64,
-        "active_flag": pl.Boolean,
-        "ead": pl.Float64,
-        # Add more columns as needed
-    }
-    df = pl.read_csv("customer_data.csv", dtypes=dtypes, parse_dates=True)
-    return df
-
-df = load_data()
-
-# 2. Sidebar Filters
-st.sidebar.header("Filter Data")
-cohort_dates = df["cohort_date"].unique().sort()
-selected_cohort = st.sidebar.multiselect("Cohort Date", cohort_dates, default=cohort_dates[:3])
-
-turnover_min, turnover_max = float(df["turnover"].min()), float(df["turnover"].max())
-turnover_range = st.sidebar.slider("Turnover Range", min_value=turnover_min, max_value=turnover_max, value=(turnover_min, turnover_max))
-
-active_flag = st.sidebar.selectbox("Active Flag", options=["All", True, False], index=0)
-
-top_n = st.sidebar.slider("Top N Customers by EAD", min_value=10, max_value=100, value=20)
-
-# Optional: Add more filters (e.g., region, segment)
-# region_list = df["region"].unique().to_list()
-# selected_region = st.sidebar.multiselect("Region", region_list, default=region_list)
-
-# 3. Apply Filters
-filtered_df = df.filter(
-    (pl.col("cohort_date").is_in(selected_cohort)) &
-    (pl.col("turnover") >= turnover_range[0]) &
-    (pl.col("turnover") <= turnover_range[1])
-)
-if active_flag != "All":
-    filtered_df = filtered_df.filter(pl.col("active_flag") == active_flag)
-
-# 4. Summarize Data
-st.title("Customer Data Dashboard")
-st.markdown("### Data Summary")
-st.write(f"**Total Customers:** {filtered_df['customer_id'].n_unique()}")
-st.write(f"**Total EAD:** {filtered_df['ead'].sum():,.2f}")
-st.write(f"**Average Turnover:** {filtered_df['turnover'].mean():,.2f}")
-
-# 5. Elegant Plots
-
-# Cohort Date Distribution
-st.markdown("#### Customers by Cohort Date")
-cohort_counts = filtered_df.groupby("cohort_date").agg(pl.count("customer_id").alias("count")).sort("cohort_date")
-fig1 = px.bar(cohort_counts.to_pandas(), x="cohort_date", y="count", color="count", color_continuous_scale="Blues")
-st.plotly_chart(fig1, use_container_width=True)
-
-# Turnover Distribution
-st.markdown("#### Turnover Distribution")
-fig2 = px.histogram(filtered_df.to_pandas(), x="turnover", nbins=50, color_discrete_sequence=["#636EFA"])
-st.plotly_chart(fig2, use_container_width=True)
-
-# Active vs Inactive Pie Chart
-st.markdown("#### Active vs Inactive Customers")
-active_counts = filtered_df.groupby("active_flag").agg(pl.count("customer_id").alias("count"))
-fig3 = px.pie(active_counts.to_pandas(), names="active_flag", values="count", color_discrete_sequence=px.colors.sequential.RdBu)
-st.plotly_chart(fig3, use_container_width=True)
-
-# Top N Customers by EAD
-st.markdown(f"#### Top {top_n} Customers by EAD")
-top_customers = filtered_df.sort("ead", descending=True).head(top_n)
-fig4 = px.bar(top_customers.to_pandas(), x="customer_id", y="ead", color="ead", color_continuous_scale="Viridis")
-st.plotly_chart(fig4, use_container_width=True)
-
-# EAD Over Time (Line Chart)
-st.markdown("#### EAD Over Time by Cohort")
-ead_time = filtered_df.groupby("cohort_date").agg(pl.sum("ead").alias("total_ead")).sort("cohort_date")
-fig5 = px.line(ead_time.to_pandas(), x="cohort_date", y="total_ead", markers=True, line_shape="spline", color_discrete_sequence=["#00CC96"])
-st.plotly_chart(fig5, use_container_width=True)
-
-# 6. Show Data Table (optional)
-with st.expander("Show Filtered Data Table"):
-    st.dataframe(filtered_df.head(100).to_pandas())
-
-# 7. Download Option
-st.sidebar.download_button(
-    label="Download Filtered Data (CSV)",
-    data=filtered_df.to_pandas().to_csv(index=False),
-    file_name="filtered_customer_data.csv",
-    mime="text/csv"
-)
-
-#--------------
-#------New code 2
---------
-
-import streamlit as st
-import polars as pl
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-
-# 1. Load Data Efficiently from Parquet
-@st.cache_resource(show_spinner="Loading data...", max_entries=1)
-def load_data():
-    # Adjust dtypes for speed/memory
-    dtypes = {
-        "gid": pl.Utf8,
-        "cohort_date": pl.Date,
-        "approval_date": pl.Date,
-        "default_flag": pl.Boolean,
-        "active_flag": pl.Boolean,
-        "execution_entity": pl.Utf8,
-        "entity_type": pl.Utf8,
-        "financial_statement_date": pl.Date,
-        "turnover": pl.Float64,
-        "total_assets": pl.Float64,
-        # Add more columns as needed
-    }
-    df = pl.read_parquet("financials_data.parquet")
-    return df
-
-df = load_data()
-
-# 2. Sidebar Filters
-st.sidebar.header("Filter Data")
-
-# Cohort Date
-cohort_dates = df["cohort_date"].unique().sort()
-selected_cohort = st.sidebar.multiselect("Cohort Date", cohort_dates, default=cohort_dates[:3])
-
-# Approval Date
-approval_dates = df["approval_date"].unique().sort()
-selected_approval = st.sidebar.multiselect("Approval Date", approval_dates, default=approval_dates[:3])
-
-# Default Flag
-default_flag = st.sidebar.selectbox("Default Flag", options=["All", True, False], index=0)
-
-# Active Flag
-active_flag = st.sidebar.selectbox("Active Flag", options=["All", True, False], index=0)
-
-# Entity Type
-entity_types = df["entity_type"].unique().to_list()
-selected_entity_type = st.sidebar.multiselect("Entity Type", entity_types, default=entity_types)
-
-# Execution Entity
-execution_entities = df["execution_entity"].unique().to_list()
-selected_execution_entity = st.sidebar.multiselect("Execution Entity", execution_entities, default=execution_entities)
-
-# Turnover Range
-turnover_min, turnover_max = float(df["turnover"].min()), float(df["turnover"].max())
-turnover_range = st.sidebar.slider("Turnover Range", min_value=turnover_min, max_value=turnover_max, value=(turnover_min, turnover_max))
-
-# 3. Apply Filters
-filtered_df = df
-
-if selected_cohort:
-    filtered_df = filtered_df.filter(pl.col("cohort_date").is_in(selected_cohort))
-if selected_approval:
-    filtered_df = filtered_df.filter(pl.col("approval_date").is_in(selected_approval))
-if default_flag != "All":
-    filtered_df = filtered_df.filter(pl.col("default_flag") == default_flag)
-if active_flag != "All":
-    filtered_df = filtered_df.filter(pl.col("active_flag") == active_flag)
-if selected_entity_type:
-    filtered_df = filtered_df.filter(pl.col("entity_type").is_in(selected_entity_type))
-if selected_execution_entity:
-    filtered_df = filtered_df.filter(pl.col("execution_entity").is_in(selected_execution_entity))
-filtered_df = filtered_df.filter(
-    (pl.col("turnover") >= turnover_range[0]) &
-    (pl.col("turnover") <= turnover_range[1])
-)
-
-# 4. Data Quality Checks
-st.title("Financials Data Quality Dashboard")
-
-st.markdown("### Data Quality Summary")
-
-# Missing financial_statement_date
-missing_fs = filtered_df.filter(pl.col("financial_statement_date").is_null()).height
-
-# Stale financials: older than 18 months from today
-today = datetime.today().date()
-stale_threshold = today - timedelta(days=18*30)
-stale_fs = filtered_df.filter(
-    (pl.col("financial_statement_date").is_not_null()) &
-    (pl.col("financial_statement_date") < stale_threshold)
-).height
-
-# Duplicates by gid + cohort_date
-duplicates = (
-    filtered_df
-    .groupby(["gid", "cohort_date"])
-    .agg(pl.count().alias("count"))
-    .filter(pl.col("count") > 1)
-    .height
-)
-
-# Missing turnover or total_assets
-missing_turnover = filtered_df.filter(pl.col("turnover").is_null()).height
-missing_assets = filtered_df.filter(pl.col("total_assets").is_null()).height
-
-# Show summary
-st.write(f"**Total Records (after filter):** {filtered_df.height:,}")
-st.write(f"**Missing Financial Statement Date:** {missing_fs:,}")
-st.write(f"**Stale Financials (>18 months old):** {stale_fs:,}")
-st.write(f"**Duplicate GID + Cohort Date:** {duplicates:,}")
-st.write(f"**Missing Turnover:** {missing_turnover:,}")
-st.write(f"**Missing Total Assets:** {missing_assets:,}")
-
-# 5. Elegant Plots
-
-# Pie: Default vs Non-default
-st.markdown("#### Default vs Non-default")
-default_counts = filtered_df.groupby("default_flag").agg(pl.count().alias("count"))
-fig1 = px.pie(default_counts.to_pandas(), names="default_flag", values="count", color_discrete_sequence=px.colors.sequential.RdBu)
-st.plotly_chart(fig1, use_container_width=True)
-
-# Bar: Active vs Inactive
-st.markdown("#### Active vs Inactive")
-active_counts = filtered_df.groupby("active_flag").agg(pl.count().alias("count"))
-fig2 = px.bar(active_counts.to_pandas(), x="active_flag", y="count", color="count", color_continuous_scale="Blues")
-st.plotly_chart(fig2, use_container_width=True)
-
-# Line: Number of records by Cohort Date
-st.markdown("#### Records by Cohort Date")
-cohort_counts = filtered_df.groupby("cohort_date").agg(pl.count().alias("count")).sort("cohort_date")
-fig3 = px.line(cohort_counts.to_pandas(), x="cohort_date", y="count", markers=True, line_shape="spline", color_discrete_sequence=["#00CC96"])
-st.plotly_chart(fig3, use_container_width=True)
-
-# Bar: Top 10 Execution Entities by Count
-st.markdown("#### Top 10 Execution Entities")
-entity_counts = (
-    filtered_df.groupby("execution_entity")
-    .agg(pl.count().alias("count"))
-    .sort("count", descending=True)
-    .head(10)
-)
-fig4 = px.bar(entity_counts.to_pandas(), x="execution_entity", y="count", color="count", color_continuous_scale="Viridis")
-st.plotly_chart(fig4, use_container_width=True)
-
-# Histogram: Turnover Distribution
-st.markdown("#### Turnover Distribution")
-fig5 = px.histogram(filtered_df.to_pandas(), x="turnover", nbins=50, color_discrete_sequence=["#636EFA"])
-st.plotly_chart(fig5, use_container_width=True)
-
-# 6. Show Sample Data Table (restricted)
-st.markdown("### Sample Data (First 100 Rows)")
-st.dataframe(filtered_df.head(100).to_pandas())
-
-# 7. Download Option
-st.sidebar.download_button(
-    label="Download Filtered Data (CSV)",
-    data=filtered_df.to_pandas().to_csv(index=False),
-    file_name="filtered_financials_data.csv",
-    mime="text/csv"
-)
-
-# 8. Info
-st.info("This dashboard is optimized for large datasets using Parquet and Polars. For privacy, only the first 100 rows are shown in the table. Use the sidebar to filter and download your dat
-a.")
-
-#------------------
------------
-import streamlit as st
-import polars as pl
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
 import numpy as np
+import statsmodels.api as sm
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from sklearn.feature_selection import RFE
+from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Page configuration
-st.set_page_config(
-    page_title="Financial Data Quality Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- 1. Data Loading and Preparation ---
+# We'll use the mtcars dataset, a classic dataset for regression.
+# The goal is to predict 'mpg' (miles per gallon).
+print("--- 1. Loading and Preparing Data ---")
+data = sm.datasets.get_rdataset("mtcars")
+df = data.data
+print("Dataset columns:", df.columns.tolist())
+print("Dataset shape:", df.shape)
 
-# Custom CSS for elegant styling
-st.markdown("""
-<style>
-    .main {
-        padding: 0rem 1rem;
-    }
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    div[data-testid="metric-container"] {
-        background-color: #f0f2f6;
-        border: 1px solid #e0e0e0;
-        padding: 10px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-</style>
-""", unsafe_allow_html=True)
+# Define the dependent variable (y) and potential independent variables (X)
+y = df['mpg']
+# Exclude the target variable 'mpg' from the predictors
+X = df.drop('mpg', axis=1)
+print("\nDependent variable (y): 'mpg'")
+print("Potential independent variables (X):", X.columns.tolist())
+print("-" * 50, "\n")
 
-# 1. Efficient Data Loading with Caching
-@st.cache_resource(show_spinner=False)
-def load_data():
-    """Load data from parquet file with optimized settings"""
-    with st.spinner('Loading data... This may take a moment for large datasets'):
-        # Read parquet with specific columns if needed for memory optimization
-        df = pl.scan_parquet("financial_data.parquet")
-        
-        # For demo purposes, let's create sample data if file doesn't exist
-        try:
-            df = df.collect()
-        except:
-            # Generate sample data
-            np.random.seed(42)
-            n_rows = 100000  # Reduced for demo
-            
-            df = pl.DataFrame({
-                "gid": [f"GID_{i:07d}" for i in range(n_rows)],
-                "cohort_date": pl.date_range(
-                    datetime(2020, 1, 1), 
-                    datetime(2024, 12, 31), 
-                    interval="1d", 
-                    eager=True
-                ).sample(n_rows, with_replacement=True),
-                "approval_date": pl.date_range(
-                    datetime(2020, 1, 1), 
-                    datetime(2024, 12, 31), 
-                    interval="1d", 
-                    eager=True
-                ).sample(n_rows, with_replacement=True),
-                "financial_statement_date": pl.concat([
-                    pl.date_range(
-                        datetime(2019, 1, 1), 
-                        datetime(2024, 12, 31), 
-                        interval="1d", 
-                        eager=True
-                    ).sample(int(n_rows * 0.95), with_replacement=True),
-                    [None] * int(n_rows * 0.05)
-                ]),
-                "default_flag": np.random.choice([True, False], n_rows, p=[0.15, 0.85]),
-                "active_flag": np.random.choice([True, False], n_rows, p=[0.7, 0.3]),
-                "execution_entity": np.random.choice(["Entity_A", "Entity_B", "Entity_C", "Entity_D", "Entity_E"], n_rows),
-                "entity_type": np.random.choice(["Corporate", "SME", "Retail", "Institution"], n_rows),
-                "turnover": np.random.lognormal(10, 2, n_rows),
-                "total_assets": np.random.lognormal(12, 2, n_rows),
-                "ead": np.random.lognormal(8, 1.5, n_rows),
-                "region": np.random.choice(["North", "South", "East", "West", "Central"], n_rows),
-                "industry": np.random.choice(["Manufacturing", "Services", "Retail", "Technology", "Finance"], n_rows),
-            })
-            
-    return df
 
-# Load data
-df = load_data()
+# --- 2. Initial Variable Selection using RFE ---
+# RFE provides a good starting list of potentially significant features.
+print("--- 2. Initial Variable Selection using RFE ---")
+num_features_to_select = 5
+model_for_rfe = LinearRegression()
+rfe = RFE(model_for_rfe, n_features_to_select=num_features_to_select)
+fit = rfe.fit(X, y)
 
-# 2. Sidebar Configuration
-st.sidebar.header("🔍 Data Filters")
+initial_features = X.columns[fit.support_].tolist()
+print(f"Initial features selected by RFE: {initial_features}")
+print("-" * 50, "\n")
 
-# Create tabs in sidebar
-tab1, tab2, tab3 = st.sidebar.tabs(["📅 Date Filters", "🏢 Entity Filters", "💰 Financial Filters"])
 
-with tab1:
-    # Cohort Date Filter
-    cohort_dates = sorted(df["cohort_date"].unique().to_list())
-    cohort_date_range = st.date_input(
-        "Cohort Date Range",
-        value=(cohort_dates[0], cohort_dates[-1]),
-        min_value=cohort_dates[0],
-        max_value=cohort_dates[-1]
-    )
+# --- 3. Automated Assumption Checking and Variable Elimination ---
+# This loop will iteratively check assumptions and remove variables that cause tests to fail.
+# The process continues until a stable model that passes all checks is found.
+print("--- 3. Automated Assumption Checking and Variable Elimination ---")
+features_to_check = initial_features.copy()
+vif_threshold = 5.0
+p_value_threshold = 0.05 # For Breusch-Pagan and Jarque-Bera
+
+while True:
+    if len(features_to_check) < 2:
+        print("\nStopping: Too few features left to build a reliable model.")
+        break
+
+    X_current = X[features_to_check]
+    X_current_const = sm.add_constant(X_current)
+    variable_removed = False
+
+    # Check 1: Multicollinearity (VIF)
+    vif_data = pd.DataFrame()
+    vif_data["feature"] = X_current.columns
+    vif_data["VIF"] = [variance_inflation_factor(X_current.values, i) for i in range(X_current.shape[1])]
     
-    # Approval Date Filter
-    approval_dates = sorted(df["approval_date"].unique().to_list())
-    approval_date_range = st.date_input(
-        "Approval Date Range",
-        value=(approval_dates[0], approval_dates[-1]),
-        min_value=approval_dates[0],
-        max_value=approval_dates[-1]
-    )
+    max_vif = vif_data['VIF'].max()
+    if max_vif > vif_threshold:
+        feature_to_remove = vif_data.sort_values('VIF', ascending=False)['feature'].iloc[0]
+        features_to_check.remove(feature_to_remove)
+        print(f"VIF Check Failed (Max VIF = {max_vif:.2f}). Removing '{feature_to_remove}'.")
+        variable_removed = True
+        continue # Restart the loop with the new set of features
 
-with tab2:
-    # Entity Type Filter
-    entity_types = ["All"] + sorted(df["entity_type"].unique().to_list())
-    selected_entity_type = st.multiselect(
-        "Entity Type",
-        entity_types[1:],
-        default=entity_types[1:]
-    )
+    # If VIF check passes, fit a model to check other assumptions
+    model_iter = sm.OLS(y, X_current_const).fit()
+
+    # Check 2: Homoscedasticity (Breusch-Pagan Test)
+    _, bp_p_value, _, _ = sm.stats.het_breuschpagan(model_iter.resid, X_current_const)
+    if bp_p_value < p_value_threshold:
+        # Remove the least significant variable (highest p-value)
+        feature_to_remove = model_iter.pvalues.idxmax()
+        if feature_to_remove == 'const': # Don't remove the constant
+             # Find the feature with the next highest p-value
+             feature_to_remove = model_iter.pvalues.drop('const').idxmax()
+        features_to_check.remove(feature_to_remove)
+        print(f"Homoscedasticity Check Failed (p={bp_p_value:.3f}). Removing least significant feature '{feature_to_remove}'.")
+        variable_removed = True
+        continue
+
+    # Check 3: Normality of Residuals (Jarque-Bera Test)
+    jb_prob = model_iter.summary2().tables[2].iloc[0, 3] # Prob(JB)
+    if jb_prob < p_value_threshold:
+        feature_to_remove = model_iter.pvalues.idxmax()
+        if feature_to_remove == 'const':
+             feature_to_remove = model_iter.pvalues.drop('const').idxmax()
+        features_to_check.remove(feature_to_remove)
+        print(f"Normality Check Failed (Prob(JB)={jb_prob:.3f}). Removing least significant feature '{feature_to_remove}'.")
+        variable_removed = True
+        continue
+
+    # If all checks passed
+    if not variable_removed:
+        print("\nAll assumption checks passed. Finalizing model.")
+        break
+
+robust_features = features_to_check
+print(f"\nRobust features selected: {robust_features}")
+print("-" * 50, "\n")
+
+
+# --- 4. Fit and Summarize the Final Robust Model ---
+print("--- 4. Fitting the Final Robust Model ---")
+if not robust_features:
+    print("No robust features were found that satisfy all assumptions.")
+else:
+    X_final = sm.add_constant(X[robust_features])
+    final_model = sm.OLS(y, X_final).fit()
+
+    print("\nFinal Robust OLS Model Summary:")
+    print(final_model.summary())
+    print("-" * 50, "\n")
+
+    # --- 5. Final Assumption Visualization on the Robust Model ---
+    print("--- 5. Final Assumption Visualization ---")
+    y_pred = final_model.predict(X_final)
+    residuals = final_model.resid
+
+    # Linearity Plot
+    plt.figure(figsize=(8, 5))
+    sns.residplot(x=y_pred, y=residuals, lowess=True, scatter_kws={'alpha': 0.5}, line_kws={'color': 'red', 'lw': 2})
+    plt.title('Residuals vs. Fitted Values (Final Model)')
+    plt.xlabel('Fitted Values')
+    plt.ylabel('Residuals')
+    plt.grid(True)
+    plt.show()
+
+    # Normality Q-Q Plot
+    plt.figure(figsize=(8, 5))
+    sm.qqplot(residuals, line='45', fit=True)
+    plt.title('Normal Q-Q Plot of Residuals (Final Model)')
+    plt.grid(True)
+    plt.show()
     
-    # Execution Entity Filter
-    execution_entities = ["All"] + sorted(df["execution_entity"].unique().to_list())
-    selected_execution_entity = st.multiselect(
-        "Execution Entity",
-        execution_entities[1:],
-        default=execution_entities[1:]
-    )
-    
-    # Region Filter
-    regions = ["All"] + sorted(df["region"].unique().to_list())
-    selected_regions = st.multiselect(
-        "Region",
-        regions[1:],
-        default=regions[1:]
-    )
-
-with tab3:
-    # Default Flag Filter
-    default_flag = st.selectbox("Default Flag", ["All", "Default", "Non-Default"])
-    
-    # Active Flag Filter
-    active_flag = st.selectbox("Active Flag", ["All", "Active", "Inactive"])
-    
-    # Turnover Range
-    turnover_min = float(df["turnover"].min())
-    turnover_max = float(df["turnover"].max())
-    turnover_range = st.slider(
-        "Turnover Range (Log Scale)",
-        min_value=np.log10(turnover_min + 1),
-        max_value=np.log10(turnover_max + 1),
-        value=(np.log10(turnover_min + 1), np.log10(turnover_max + 1))
-    )
-    turnover_range = (10**turnover_range[0] - 1, 10**turnover_range[1] - 1)
-    
-    # EAD Range
-    ead_min = float(df["ead"].min())
-    ead_max = float(df["ead"].max())
-    top_n_ead = st.slider("Top N Customers by EAD", 10, 100, 20)
-
-# 3. Apply Filters
-filtered_df = df.filter(
-    (pl.col("cohort_date") >= cohort_date_range[0]) &
-    (pl.col("cohort_date") <= cohort_date_range[1]) &
-    (pl.col("approval_date") >= approval_date_range[0]) &
-    (pl.col("approval_date") <= approval_date_range[1]) &
-    (pl.col("turnover") >= turnover_range[0]) &
-    (pl.col("turnover") <= turnover_range[1])
-)
-
-if selected_entity_type:
-    filtered_df = filtered_df.filter(pl.col("entity_type").is_in(selected_entity_type))
-if selected_execution_entity:
-    filtered_df = filtered_df.filter(pl.col("execution_entity").is_in(selected_execution_entity))
-if selected_regions:
-    filtered_df = filtered_df.filter(pl.col("region").is_in(selected_regions))
-
-if default_flag == "Default":
-    filtered_df = filtered_df.filter(pl.col("default_flag") == True)
-elif default_flag == "Non-Default":
-    filtered_df = filtered_df.filter(pl.col("default_flag") == False)
-
-if active_flag == "Active":
-    filtered_df = filtered_df.filter(pl.col("active_flag") == True)
-elif active_flag == "Inactive":
-    filtered_df = filtered_df.filter(pl.col("active_flag") == False)
-
-# 4. Main Dashboard
-st.title("📊 Financial Data Quality Dashboard")
-st.markdown("---")
-
-# Data Quality Metrics
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-
-# Calculate metrics
-total_records = filtered_df.height
-missing_fs_date = filtered_df.filter(pl.col("financial_statement_date").is_null()).height
-stale_threshold = datetime.now().date() - timedelta(days=540)  # 18 months
-stale_financials = filtered_df.filter(
-    (pl.col("financial_statement_date").is_not_null()) &
-    (pl.col("financial_statement_date") < stale_threshold)
-).height
-default_rate = (filtered_df.filter(pl.col("default_flag") == True).height / total_records * 100) if total_records > 0 else 0
-active_rate = (filtered_df.filter(pl.col("active_flag") == True).height / total_records * 100) if total_records > 0 else 0
-avg_ead = filtered_df["ead"].mean()
-
-with col1:
-    st.metric("Total Records", f"{total_records:,}")
-with col2:
-    st.metric("Missing FS Date", f"{missing_fs_date:,}", f"{missing_fs_date/total_records*100:.1f}%" if total_records > 0 else "0%")
-with col3:
-    st.metric("Stale Financials", f"{stale_financials:,}", f"{stale_financials/total_records*100:.1f}%" if total_records > 0 else "0%")
-with col4:
-    st.metric("Default Rate", f"{default_rate:.1f}%")
-with col5:
-    st.metric("Active Rate", f"{active_rate:.1f}%")
-with col6:
-    st.metric("Avg EAD", f"${avg_ead:,.0f}")
-
-st.markdown("---")
-
-# Visualization Tabs
-viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(["📈 Time Series", "🥧 Distributions", "🏆 Rankings", "🔍 Data Quality"])
-
-with viz_tab1:
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Cohort Analysis Over Time
-        cohort_analysis = (
-            filtered_df.groupby("cohort_date")
-            .agg([
-                pl.count().alias("count"),
-                pl.col("ead").sum().alias("total_ead"),
-                pl.col("default_flag").sum().alias("defaults")
-            ])
-            .sort("cohort_date")
-        )
-        
-        fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=("Customer Count by Cohort", "Default Rate by Cohort"),
-            vertical_spacing=0.15
-        )
-        
-        fig.add_trace(
-            go.Scatter(
-                x=cohort_analysis["cohort_date"],
-                y=cohort_analysis["count"],
-                mode='lines+markers',
-                name='Customer Count',
-                line=dict(color='#1f77b4', width=3),
-                marker=dict(size=6)
-            ),
-            row=1, col=1
-        )
-        
-        fig.add_trace(
-            go.Scatter(
-                x=cohort_analysis["cohort_date"],
-                y=(cohort_analysis["defaults"] / cohort_analysis["count"] * 100),
-                mode='lines+markers',
-                name='Default Rate %',
-                line=dict(color='#ff7f0e', width=3),
-                marker=dict(size=6)
-            ),
-            row=2, col=1
-        )
-        
-        fig.update_layout(height=600, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        # EAD Trend Over Time
-        ead_trend = (
-            filtered_df.groupby("cohort_date")
-            .agg([
-                pl.col("ead").mean().alias("avg_ead"),
-                pl.col("ead").sum().alias("total_ead")
-            ])
-            .sort("cohort_date")
-        )
-        
-        fig2 = go.Figure()
-        fig2.add_trace(
-            go.Scatter(
-                x=ead_trend["cohort_date"],
-                y=ead_trend["total_ead"],
-                mode='lines+markers',
-                name='Total EAD',
-                line=dict(color='#2ca02c', width=3),
-                fill='tozeroy',
-                fillcolor='rgba(44, 160, 44, 0.2)'
-            )
-        )
-        
-        fig2.update_layout(
-            title="Total EAD Over Time",
-            height=600,
-            yaxis_title="Total EAD ($)"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-with viz_tab2:
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Active vs Inactive Pie Chart
-        active_dist = filtered_df.groupby("active_flag").agg(pl.count().alias("count"))
-        fig3 = px.pie(
-            active_dist.to_pandas(),
-            values='count',
-            names='active_flag',
-            title="Active vs Inactive Distribution",
-            color_discrete_map={True: '#2ca02c', False: '#d62728'}
-        )
-        fig3.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig3, use_container_width=True)
-        
-        # Entity Type Distribution
-        entity_dist = filtered_df.groupby("entity_type").agg(pl.count().alias("count"))
-        fig4 = px.bar(
-            entity_dist.to_pandas(),
-            x='entity_type',
-            y='count',
-            title="Distribution by Entity Type",
-            color='count',
-            color_continuous_scale='Blues'
-        )
-        st.plotly_chart(fig4, use_container_width=True)
-    
-    with col2:
-        # Default vs Non-Default Donut Chart
-        default_dist = filtered_df.groupby("default_flag").agg(pl.count().alias("count"))
-        fig5 = px.pie(
-            default_dist.to_pandas(),
-            values='count',
-            names='default_flag',
-            title="Default vs Non-Default Distribution",
-            hole=0.4,
-            color_discrete_map={True: '#ff7f0e', False: '#1f77b4'}
-        )
-        fig5.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig5, use_container_width=True)
-        
-        # Turnover Distribution
-        fig6 = px.histogram(
-            filtered_df.to_pandas(),
-            x='turnover',
-            nbins=50,
-            title="Turnover Distribution
-
-            title="Turnover Distribution",
-            color_discrete_sequence=['#9467bd']
-        )
-        fig6.update_xaxis(type="log")
-        fig6.update_layout(bargap=0.1)
-        st.plotly_chart(fig6, use_container_width=True)
-
-with viz_tab3:
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Top N Customers by EAD
-        top_customers = (
-            filtered_df.sort("ead", descending=True)
-            .head(top_n_ead)
-            .select(["gid", "ead", "entity_type", "default_flag"])
-        )
-        
-        fig7 = px.bar(
-            top_customers.to_pandas(),
-            x='gid',
-            y='ead',
-            title=f"Top {top_n_ead} Customers by EAD",
-            color='entity_type',
-            color_discrete_sequence=px.colors.qualitative.Set3,
-            hover_data=['default_flag']
-        )
-        fig7.update_xaxis(tickangle=-45)
-        fig7.update_layout(height=500)
-        st.plotly_chart(fig7, use_container_width=True)
-    
-    with col2:
-        # Execution Entity Performance
-        exec_performance = (
-            filtered_df.groupby("execution_entity")
-            .agg([
-                pl.count().alias("count"),
-                pl.col("ead").sum().alias("total_ead"),
-                pl.col("default_flag").sum().alias("defaults")
-            ])
-            .with_columns(
-                (pl.col("defaults") / pl.col("count") * 100).alias("default_rate")
-            )
-            .sort("total_ead", descending=True)
-        )
-        
-        fig8 = go.Figure()
-        fig8.add_trace(
-            go.Bar(
-                x=exec_performance["execution_entity"],
-                y=exec_performance["total_ead"],
-                name="Total EAD",
-                marker_color='lightblue',
-                yaxis='y'
-            )
-        )
-        fig8.add_trace(
-            go.Scatter(
-                x=exec_performance["execution_entity"],
-                y=exec_performance["default_rate"],
-                name="Default Rate %",
-                mode='lines+markers',
-                marker_color='red',
-                yaxis='y2',
-                line=dict(width=3)
-            )
-        )
-        
-        fig8.update_layout(
-            title="Execution Entity Performance",
-            yaxis=dict(title="Total EAD ($)", side="left"),
-            yaxis2=dict(title="Default Rate (%)", overlaying="y", side="right"),
-            height=500,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig8, use_container_width=True)
-
-with viz_tab4:
-    # Data Quality Heatmap
-    st.subheader("Data Quality Heatmap by Entity")
-    
-    # Calculate data quality metrics by entity
-    dq_metrics = (
-        filtered_df.groupby("execution_entity")
-        .agg([
-            pl.col("financial_statement_date").is_null().sum().alias("missing_fs_date"),
-            pl.col("turnover").is_null().sum().alias("missing_turnover"),
-            pl.col("total_assets").is_null().sum().alias("missing_assets"),
-            pl.count().alias("total_records")
-        ])
-        .with_columns([
-            (pl.col("missing_fs_date") / pl.col("total_records") * 100).alias("missing_fs_date_pct"),
-            (pl.col("missing_turnover") / pl.col("total_records") * 100).alias("missing_turnover_pct"),
-            (pl.col("missing_assets") / pl.col("total_records") * 100).alias("missing_assets_pct")
-        ])
-    )
-    
-    # Create heatmap data
-    heatmap_data = dq_metrics.select([
-        "execution_entity",
-        "missing_fs_date_pct",
-        "missing_turnover_pct",
-        "missing_assets_pct"
-    ]).to_pandas()
-    
-    heatmap_values = heatmap_data.set_index('execution_entity').T
-    
-    fig9 = px.imshow(
-        heatmap_values,
-        labels=dict(x="Execution Entity", y="Data Quality Metric", color="Missing %"),
-        y=['Missing FS Date', 'Missing Turnover', 'Missing Assets'],
-        color_continuous_scale='Reds',
-        aspect="auto"
-    )
-    fig9.update_layout(height=400)
-    st.plotly_chart(fig9, use_container_width=True)
-    
-    # Stale Financial Analysis
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Calculate age of financial statements
-        current_date = datetime.now().date()
-        fs_age_analysis = (
-            filtered_df.filter(pl.col("financial_statement_date").is_not_null())
-            .with_columns(
-                ((pl.lit(current_date) - pl.col("financial_statement_date")).dt.total_days() / 30).alias("months_old")
-            )
-            .with_columns(
-                pl.when(pl.col("months_old") <= 6).then(pl.lit("0-6 months"))
-                .when(pl.col("months_old") <= 12).then(pl.lit("6-12 months"))
-                .when(pl.col("months_old") <= 18).then(pl.lit("12-18 months"))
-                .when(pl.col("months_old") <= 24).then(pl.lit("18-24 months"))
-                .otherwise(pl.lit(">24 months"))
-                .alias("age_category")
-            )
-            .groupby("age_category")
-            .agg(pl.count().alias("count"))
-        )
-        
-        # Define order for categories
-        category_order = ["0-6 months", "6-12 months", "12-18 months", "18-24 months", ">24 months"]
-        fs_age_df = fs_age_analysis.to_pandas()
-        fs_age_df['age_category'] = pd.Categorical(fs_age_df['age_category'], categories=category_order, ordered=True)
-        fs_age_df = fs_age_df.sort_values('age_category')
-        
-        fig10 = px.bar(
-            fs_age_df,
-            x='age_category',
-            y='count',
-            title="Financial Statement Age Distribution",
-            color='count',
-            color_continuous_scale='Viridis'
-        )
-        st.plotly_chart(fig10, use_container_width=True)
-    
-    with col2:
-        # Data Completeness by Region
-        completeness_by_region = (
-            filtered_df.groupby("region")
-            .agg([
-                pl.count().alias("total"),
-                pl.col("financial_statement_date").is_not_null().sum().alias("has_fs_date"),
-                pl.col("turnover").is_not_null().sum().alias("has_turnover"),
-                pl.col("total_assets").is_not_null().sum().alias("has_assets")
-            ])
-            .with_columns(
-                ((pl.col("has_fs_date") + pl.col("has_turnover") + pl.col("has_assets")) / (pl.col("total") * 3) * 100).alias("completeness_score")
-            )
-        )
-        
-        fig11 = px.bar(
-            completeness_by_region.to_pandas(),
-            x='region',
-            y='completeness_score',
-            title="Data Completeness Score by Region",
-            color='completeness_score',
-            color_continuous_scale='RdYlGn',
-            range_color=[0, 100]
-        )
-        fig11.update_yaxis(range=[0, 100])
-        st.plotly_chart(fig11, use_container_width=True)
-
-# 5. Data Sample Section
-st.markdown("---")
-st.subheader("📋 Data Sample")
-
-# Sample size selector
-sample_size = st.slider("Sample Size", min_value=10, max_value=1000, value=100, step=10)
-
-# Display options
-col1, col2, col3 = st.columns(3)
-with col1:
-    show_missing = st.checkbox("Show only records with missing data", value=False)
-with col2:
-    show_stale = st.checkbox("Show only stale financials", value=False)
-with col3:
-    show_defaults = st.checkbox("Show only defaults", value=False)
-
-# Apply sample filters
-sample_df = filtered_df
-
-if show_missing:
-    sample_df = sample_df.filter(
-        pl.col("financial_statement_date").is_null() |
-        pl.col("turnover").is_null() |
-        pl.col("total_assets").is_null()
-    )
-
-if show_stale:
-    sample_df = sample_df.filter(
-        (pl.col("financial_statement_date").is_not_null()) &
-        (pl.col("financial_statement_date") < stale_threshold)
-    )
-
-if show_defaults:
-    sample_df = sample_df.filter(pl.col("default_flag") == True)
-
-# Display sample
-display_columns = [
-    "gid", "cohort_date", "approval_date", "financial_statement_date",
-    "default_flag", "active_flag", "execution_entity", "entity_type",
-    "turnover", "total_assets", "ead", "region"
-]
-
-sample_display = sample_df.select(display_columns).head(sample_size).to_pandas()
-
-# Format numeric columns
-numeric_cols = ['turnover', 'total_assets', 'ead']
-for col in numeric_cols:
-    sample_display[col] = sample_display[col].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
-
-st.dataframe(
-    sample_display,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "gid": st.column_config.TextColumn("Group ID"),
-        "cohort_date": st.column_config.DateColumn("Cohort Date"),
-        "approval_date": st.column_config.DateColumn("Approval Date"),
-        "financial_statement_date": st.column_config.DateColumn("FS Date"),
-        "default_flag": st.column_config.CheckboxColumn("Default"),
-        "active_flag": st.column_config.CheckboxColumn("Active"),
-        "execution_entity": st.column_config.TextColumn("Exec Entity"),
-        "entity_type": st.column_config.TextColumn("Entity Type"),
-        "turnover": st.column_config.TextColumn("Turnover"),
-        "total_assets": st.column_config.TextColumn("Total Assets"),
-        "ead": st.column_config.TextColumn("EAD"),
-        "region": st.column_config.TextColumn("Region")
-    }
-)
-
-# 6. Export Section
-st.markdown("---")
-st.subheader("📥 Export Options")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    # Export filtered data
-    csv_data = filtered_df.to_pandas().to_csv(index=False)
-    st.download_button(
-        label="📊 Download Filtered Data (CSV)",
-        data=csv_data,
-        file_name=f"filtered_financial_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv"
-    )
-
-with col2:
-    # Export data quality report
-    dq_report = f"""
-    Data Quality Report
-    Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    
-    Total Records: {total_records:,}
-    Missing Financial Statement Dates: {missing_fs_date:,} ({missing_fs_date/total_records*100:.2f}%)
-    Stale Financials (>18 months): {stale_financials:,} ({stale_financials/total_records*100:.2f}%)
-    Default Rate: {default_rate:.2f}%
-    Active Rate: {active_rate:.2f}%
-    Average EAD: ${avg_ead:,.2f}
-    
-    Filters Applied:
-    - Cohort Date: {cohort_date_range[0]} to {cohort_date_range[1]}
-    - Approval Date: {approval_date_range[0]} to {approval_date_range[1]}
-    - Turnover Range: ${turnover_range[0]:,.2f} to ${turnover_range[1]:,.2f}
-    - Entity Types: {', '.join(selected_entity_type) if selected_entity_type else 'All'}
-    - Execution Entities: {', '.join(selected_execution_entity) if selected_execution_entity else 'All'}
-    - Regions: {', '.join(selected_regions) if selected_regions else 'All'}
-    - Default Flag: {default_flag}
-    - Active Flag: {active_flag}
-    """
-    
-    st.download_button(
-        label="📄 Download DQ Report (TXT)",
-        data=dq_report,
-        file_name=f"dq_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-        mime="text/plain"
-    )
-
-with col3:
-    # Export sample data
-    sample_csv = sample_display.to_csv(index=False)
-    st.download_button(
-        label="📋 Download Sample Data (CSV)",
-        data=sample_csv,
-        file_name=f"sample_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv"
-    )
-
-# 7. Footer
-st.markdown("---")
-st.info("""
-    💡 **Tips for optimal performance:**
-    - Use date range filters to limit data volume
-    - Apply entity filters to focus on specific segments
-    - For large exports, consider using the filtered data option
-    - Data is loaded from parquet files for maximum speed
-""")
-
-# Add refresh button
-if st.button("🔄 Refresh Dashboard"):
-    st.cache_resource.clear()
-    st.rerun()
+    # --- 6. Check for Influential Points (Final Model) ---
+    print("\n--- 6. Checking for Influential Points (Final Model) ---")
+    fig, ax = plt.subplots(figsize=(12, 8))
+    sm.graphics.influence_plot(final_model, ax=ax, criterion="cooks")
+    plt.title("Influence Plot (Leverage vs. Standardized Residuals)")
+    plt.grid(True)
+    plt.show()
 
 
-
-
-
-
-
+print("\n--- Pipeline Complete ---")
