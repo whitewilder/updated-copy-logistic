@@ -2,218 +2,187 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+from scipy import stats
 
-def analyze_prediction_segments(y_actual, y_pred, n_segments=10):
+# Assuming your data is in a DataFrame or you have arrays
+# Replace these with your actual data
+# df = pd.DataFrame({'final_score': final_score, 'logit_pd': y})
+
+def fit_regression_and_analyze(final_score, logit_pd, outlier_threshold=2):
     """
-    Analyze which segments of predictions have poor fit
-    
-    Parameters:
-    y_actual: actual dependent variable
-    y_pred: predicted values (final_score)
-    n_segments: number of segments to analyze
+    Fit regression line: logit_pd = final_score * beta + c
+    Identify outliers and create visualizations
     """
     
-    # Convert to numpy arrays
-    y_actual = np.array(y_actual).flatten()
-    y_pred = np.array(y_pred).flatten()
+    # Reshape for sklearn
+    X = final_score.values.reshape(-1, 1) if hasattr(final_score, 'values') else final_score.reshape(-1, 1)
+    y = logit_pd.values if hasattr(logit_pd, 'values') else logit_pd
     
-    # Calculate overall metrics
-    overall_r2 = r2_score(y_actual, y_pred)
-    residuals = y_actual - y_pred
+    # Fit linear regression
+    model = LinearRegression()
+    model.fit(X, y)
     
-    print(f"Overall R²: {overall_r2:.4f}\n")
+    # Get coefficients
+    beta = model.coef_[0]
+    c = model.intercept_
     
-    # Method 1: Analyze by prediction value ranges
-    print("="*60)
-    print("ANALYSIS BY PREDICTION VALUE RANGES")
-    print("="*60)
+    # Make predictions
+    y_pred = model.predict(X)
     
-    # Create segments based on predicted values
-    pred_percentiles = np.percentile(y_pred, np.linspace(0, 100, n_segments + 1))
+    # Calculate residuals
+    residuals = y - y_pred
     
-    segment_analysis = []
+    # Calculate metrics
+    r2 = r2_score(y, y_pred)
+    rmse = np.sqrt(mean_squared_error(y, y_pred))
     
-    for i in range(n_segments):
-        if i < n_segments - 1:
-            mask = (y_pred >= pred_percentiles[i]) & (y_pred < pred_percentiles[i+1])
-        else:
-            mask = (y_pred >= pred_percentiles[i]) & (y_pred <= pred_percentiles[i+1])
-        
-        if np.sum(mask) > 1:  # Need at least 2 points for R²
-            segment_r2 = r2_score(y_actual[mask], y_pred[mask])
-            segment_mae = mean_absolute_error(y_actual[mask], y_pred[mask])
-            segment_bias = np.mean(residuals[mask])
-            
-            segment_analysis.append({
-                'segment': i+1,
-                'pred_range': f"[{pred_percentiles[i]:.2f}, {pred_percentiles[i+1]:.2f}]",
-                'n_samples': np.sum(mask),
-                'r2': segment_r2,
-                'mae': segment_mae,
-                'bias': segment_bias,
-                'actual_mean': np.mean(y_actual[mask]),
-                'pred_mean': np.mean(y_pred[mask])
-            })
+    # Identify outliers using standardized residuals
+    std_residuals = (residuals - np.mean(residuals)) / np.std(residuals)
+    outliers = np.abs(std_residuals) > outlier_threshold
     
-    # Convert to DataFrame for easy viewing
-    segment_df = pd.DataFrame(segment_analysis)
+    # Create comprehensive visualization
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
-    # Sort by R² to identify worst segments
-    segment_df_sorted = segment_df.sort_values('r2')
+    # 1. Scatter plot with regression line
+    ax1 = axes[0, 0]
+    ax1.scatter(X[~outliers], y[~outliers], alpha=0.6, label='Normal points', color='blue')
+    ax1.scatter(X[outliers], y[outliers], alpha=0.8, label='Outliers', color='red', s=100, marker='x')
     
-    print("\nWorst performing segments (by R²):")
-    print(segment_df_sorted[['segment', 'pred_range', 'n_samples', 'r2', 'mae', 'bias']].head())
+    # Plot regression line
+    x_range = np.linspace(X.min(), X.max(), 100)
+    y_range = beta * x_range + c
+    ax1.plot(x_range, y_range, 'g-', linewidth=2, label=f'y = {beta:.4f}x + {c:.4f}')
     
-    # Method 2: Analyze by actual value ranges
-    print("\n" + "="*60)
-    print("ANALYSIS BY ACTUAL VALUE RANGES")
-    print("="*60)
+    # Add confidence interval
+    predict_mean_se = np.sqrt(np.sum((X - X.mean())**2) / len(X))
+    margin = 1.96 * predict_mean_se * np.sqrt(1 + 1/len(X) + (x_range - X.mean())**2 / np.sum((X - X.mean())**2))
+    ax1.fill_between(x_range, y_range - margin, y_range + margin, alpha=0.2, color='green')
     
-    actual_percentiles = np.percentile(y_actual, np.linspace(0, 100, n_segments + 1))
+    ax1.set_xlabel('Final Score')
+    ax1.set_ylabel('Logit PD')
+    ax1.set_title(f'Regression Analysis\nR² = {r2:.4f}, RMSE = {rmse:.4f}')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
     
-    actual_segment_analysis = []
+    # 2. Residual plot
+    ax2 = axes[0, 1]
+    ax2.scatter(y_pred[~outliers], residuals[~outliers], alpha=0.6, color='blue')
+    ax2.scatter(y_pred[outliers], residuals[outliers], alpha=0.8, color='red', s=100, marker='x')
+    ax2.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+    ax2.axhline(y=outlier_threshold*np.std(residuals), color='red', linestyle='--', alpha=0.5)
+    ax2.axhline(y=-outlier_threshold*np.std(residuals), color='red', linestyle='--', alpha=0.5)
+    ax2.set_xlabel('Predicted Logit PD')
+    ax2.set_ylabel('Residuals')
+    ax2.set_title('Residual Plot')
+    ax2.grid(True, alpha=0.3)
     
-    for i in range(n_segments):
-        if i < n_segments - 1:
-            mask = (y_actual >= actual_percentiles[i]) & (y_actual < actual_percentiles[i+1])
-        else:
-            mask = (y_actual >= actual_percentiles[i]) & (y_actual <= actual_percentiles[i+1])
-        
-        if np.sum(mask) > 1:
-            segment_r2 = r2_score(y_actual[mask], y_pred[mask])
-            segment_mae = mean_absolute_error(y_actual[mask], y_pred[mask])
-            segment_bias = np.mean(residuals[mask])
-            
-            actual_segment_analysis.append({
-                'segment': i+1,
-                'actual_range': f"[{actual_percentiles[i]:.2f}, {actual_percentiles[i+1]:.2f}]",
-                'n_samples': np.sum(mask),
-                'r2': segment_r2,
-                'mae': segment_mae,
-                'bias': segment_bias
-            })
+    # 3. Q-Q plot
+    ax3 = axes[1, 0]
+    stats.probplot(residuals, dist="norm", plot=ax3)
+    ax3.set_title('Q-Q Plot of Residuals')
+    ax3.grid(True, alpha=0.3)
     
-    actual_segment_df = pd.DataFrame(actual_segment_analysis)
-    actual_segment_df_sorted = actual_segment_df.sort_values('r2')
-    
-    print("\nWorst performing segments by actual value ranges:")
-    print(actual_segment_df_sorted[['segment', 'actual_range', 'n_samples', 'r2', 'mae', 'bias']].head())
-    
-    # Method 3: Identify specific problem areas
-    print("\n" + "="*60)
-    print("SPECIFIC PROBLEM AREAS")
-    print("="*60)
-    
-    # Check for systematic over/under prediction
-    large_overpredict = residuals < -np.std(residuals) * 2
-    large_underpredict = residuals > np.std(residuals) * 2
-    
-    print(f"\nLarge overpredictions (pred >> actual): {np.sum(large_overpredict)} samples")
-    if np.sum(large_overpredict) > 0:
-        print(f"  Actual value range: [{y_actual[large_overpredict].min():.2f}, {y_actual[large_overpredict].max():.2f}]")
-        print(f"  Predicted value range: [{y_pred[large_overpredict].min():.2f}, {y_pred[large_overpredict].max():.2f}]")
-    
-    print(f"\nLarge underpredictions (pred << actual): {np.sum(large_underpredict)} samples")
-    if np.sum(large_underpredict) > 0:
-        print(f"  Actual value range: [{y_actual[large_underpredict].min():.2f}, {y_actual[large_underpredict].max():.2f}]")
-        print(f"  Predicted value range: [{y_pred[large_underpredict].min():.2f}, {y_pred[large_underpredict].max():.2f}]")
-    
-    # Create visualization
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    
-    # Plot 1: Actual vs Predicted with color-coded segments
-    scatter = axes[0, 0].scatter(y_actual, y_pred, c=np.abs(residuals), 
-                                cmap='YlOrRd', alpha=0.6, s=30)
-    axes[0, 0].plot([y_actual.min(), y_actual.max()], 
-                    [y_actual.min(), y_actual.max()], 'k--', lw=2)
-    axes[0, 0].set_xlabel('Actual')
-    axes[0, 0].set_ylabel('Predicted')
-    axes[0, 0].set_title('Actual vs Predicted (colored by absolute error)')
-    plt.colorbar(scatter, ax=axes[0, 0])
-    
-    # Plot 2: R² by prediction segments
-    axes[0, 1].bar(segment_df['segment'], segment_df['r2'])
-    axes[0, 1].axhline(y=overall_r2, color='r', linestyle='--', label=f'Overall R²={overall_r2:.3f}')
-    axes[0, 1].set_xlabel('Prediction Segment')
-    axes[0, 1].set_ylabel('R²')
-    axes[0, 1].set_title('R² by Prediction Value Segments')
-    axes[0, 1].legend()
-    
-    # Plot 3: Residuals by predicted value
-    axes[1, 0].scatter(y_pred, residuals, alpha=0.5, s=30)
-    axes[1, 0].axhline(y=0, color='r', linestyle='--')
-    
-    # Add rolling mean of residuals
-    sorted_indices = np.argsort(y_pred)
-    window = len(y_pred) // 20
-    rolling_mean = pd.Series(residuals[sorted_indices]).rolling(window=window, center=True).mean()
-    axes[1, 0].plot(y_pred[sorted_indices], rolling_mean, 'g-', lw=2, label='Rolling mean')
-    
-    axes[1, 0].set_xlabel('Predicted Value')
-    axes[1, 0].set_ylabel('Residual')
-    axes[1, 0].set_title('Residuals vs Predicted Values')
-    axes[1, 0].legend()
-    
-    # Plot 4: Bias by actual value segments
-    axes[1, 1].bar(actual_segment_df['segment'], actual_segment_df['bias'])
-    axes[1, 1].axhline(y=0, color='r', linestyle='--')
-    axes[1, 1].set_xlabel('Actual Value Segment')
-    axes[1, 1].set_ylabel('Mean Bias (Actual - Predicted)')
-    axes[1, 1].set_title('Prediction Bias by Actual Value Segments')
+    # 4. Histogram of residuals
+    ax4 = axes[1, 1]
+    ax4.hist(residuals, bins=30, alpha=0.7, color='blue', edgecolor='black')
+    ax4.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+    ax4.set_xlabel('Residuals')
+    ax4.set_ylabel('Frequency')
+    ax4.set_title('Distribution of Residuals')
+    ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.show()
     
-    return segment_df, actual_segment_df
+    # Summary statistics
+    print("=" * 60)
+    print("REGRESSION SUMMARY")
+    print("=" * 60)
+    print(f"Equation: logit_pd = {beta:.6f} * final_score + {c:.6f}")
+    print(f"R-squared: {r2:.4f}")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"Number of observations: {len(X)}")
+    print(f"Number of outliers: {np.sum(outliers)} ({np.sum(outliers)/len(X)*100:.1f}%)")
+    print("\nCoefficients:")
+    print(f"  Beta (slope): {beta:.6f}")
+    print(f"  C (intercept): {c:.6f}")
+    
+    # Outlier details
+    if np.sum(outliers) > 0:
+        print("\nOutlier Details (sorted by absolute residual):")
+        outlier_df = pd.DataFrame({
+            'index': np.where(outliers)[0],
+            'final_score': X[outliers].flatten(),
+            'actual_logit_pd': y[outliers],
+            'predicted_logit_pd': y_pred[outliers],
+            'residual': residuals[outliers],
+            'std_residual': std_residuals[outliers]
+        })
+        outlier_df = outlier_df.sort_values('std_residual', key=abs, ascending=False)
+        print(outlier_df.to_string())
+    
+    # Return results
+    results = {
+        'model': model,
+        'beta': beta,
+        'intercept': c,
+        'r2': r2,
+        'rmse': rmse,
+        'predictions': y_pred,
+        'residuals': residuals,
+        'outliers': outliers,
+        'outlier_indices': np.where(outliers)[0]
+    }
+    
+    return results
 
 # Example usage:
-# segment_df, actual_segment_df = analyze_prediction_segments(y_actual, y_pred, n_segments=10)
+# results = fit_regression_and_analyze(final_score, logit_pd, outlier_threshold=2)
 
-# Additional function to get detailed statistics for worst segments
-def get_worst_segment_details(y_actual, y_pred, segment_df, top_n=3):
-    """Get detailed analysis of worst performing segments"""
+# Additional analysis function for outlier investigation
+def analyze_outlier_patterns(final_score, logit_pd, results):
+    """
+    Deeper analysis of outlier patterns
+    """
+    outliers = results['outliers']
     
-    y_actual = np.array(y_actual).flatten()
-    y_pred = np.array(y_pred).flatten()
+    if np.sum(outliers) == 0:
+        print("No outliers detected.")
+        return
     
-    worst_segments = segment_df.nsmallest(top_n, 'r2')
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     
-    print("\n" + "="*60)
-    print(f"DETAILED ANALYSIS OF {top_n} WORST SEGMENTS")
-    print("="*60)
+    # Distribution comparison
+    ax1 = axes[0]
+    ax1.hist(final_score[~outliers], bins=20, alpha=0.5, label='Normal', color='blue', density=True)
+    ax1.hist(final_score[outliers], bins=10, alpha=0.5, label='Outliers', color='red', density=True)
+    ax1.set_xlabel('Final Score')
+    ax1.set_ylabel('Density')
+    ax1.set_title('Final Score Distribution: Normal vs Outliers')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
     
-    for _, segment in worst_segments.iterrows():
-        print(f"\nSegment {segment['segment']} - Prediction range: {segment['pred_range']}")
-        print(f"R²: {segment['r2']:.4f}, MAE: {segment['mae']:.4f}, Bias: {segment['bias']:.4f}")
-        print(f"Number of samples: {segment['n_samples']}")
-        
-        # Extract the range values
-        range_str = segment['pred_range'].strip('[]')
-        low, high = map(float, range_str.split(', '))
-        
-        # Get mask for this segment
-        mask = (y_pred >= low) & (y_pred <= high)
-        
-        # Calculate additional statistics
-        segment_actual = y_actual[mask]
-        segment_pred = y_pred[mask]
-        
-        print(f"Actual values - Mean: {np.mean(segment_actual):.2f}, Std: {np.std(segment_actual):.2f}")
-        print(f"Predicted values - Mean: {np.mean(segment_pred):.2f}, Std: {np.std(segment_pred):.2f}")
-        print(f"Correlation in segment: {np.corrcoef(segment_actual, segment_pred)[0,1]:.4f}")
-        
-        # Check if predictions are too narrow/wide
-        actual_range = segment_actual.max() - segment_actual.min()
-        pred_range = segment_pred.max() - segment_pred.min()
-        range_ratio = pred_range / actual_range if actual_range > 0 else 0
-        
-        print(f"Range ratio (pred/actual): {range_ratio:.2f}")
-        if range_ratio < 0.5:
-            print("  -> Model predictions are too narrow in this segment")
-        elif range_ratio > 2:
-            print("  -> Model predictions are too wide in this segment")
+    ax2 = axes[1]
+    ax2.hist(logit_pd[~outliers], bins=20, alpha=0.5, label='Normal', color='blue', density=True)
+    ax2.hist(logit_pd[outliers], bins=10, alpha=0.5, label='Outliers', color='red', density=True)
+    ax2.set_xlabel('Logit PD')
+    ax2.set_ylabel('Density')
+    ax2.set_title('Logit PD Distribution: Normal vs Outliers')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
 
-# Example usage:
-# analyze_prediction_segments(y_actual, y_pred)
-# get_worst_segment_details(y_actual, y_pred, segment_df)
+# Example with synthetic data (replace with your actual data)
+# np.random.seed(42)
+# final_score = np.random.normal(50, 10, 200)
+# logit_pd = 0.5 * final_score + 10 + np.random.normal(0, 5, 200)
+# # Add some outliers
+# logit_pd[180:185] += 30
+# logit_pd[190:195] -= 25
+
+# results = fit_regression_and_analyze(final_score, logit_pd)
+# analyze_outlier_patterns(final_score, logit_pd, results)
