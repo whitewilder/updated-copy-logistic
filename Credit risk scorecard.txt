@@ -1,188 +1,20 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_squared_error
-from scipy import stats
-
-# Assuming your data is in a DataFrame or you have arrays
-# Replace these with your actual data
-# df = pd.DataFrame({'final_score': final_score, 'logit_pd': y})
-
-def fit_regression_and_analyze(final_score, logit_pd, outlier_threshold=2):
+def redistribute_weights(weights, dummy_vars, dummy_cap=0.05):
     """
-    Fit regression line: logit_pd = final_score * beta + c
-    Identify outliers and create visualizations
+    Redistributes weights so that dummy vars collectively have at most dummy_cap (5%).
+    Remaining vars share 1 - dummy_cap proportionally.
     """
-    
-    # Reshape for sklearn
-    X = final_score.values.reshape(-1, 1) if hasattr(final_score, 'values') else final_score.reshape(-1, 1)
-    y = logit_pd.values if hasattr(logit_pd, 'values') else logit_pd
-    
-    # Fit linear regression
-    model = LinearRegression()
-    model.fit(X, y)
-    
-    # Get coefficients
-    beta = model.coef_[0]
-    c = model.intercept_
-    
-    # Make predictions
-    y_pred = model.predict(X)
-    
-    # Calculate residuals
-    residuals = y - y_pred
-    
-    # Calculate metrics
-    r2 = r2_score(y, y_pred)
-    rmse = np.sqrt(mean_squared_error(y, y_pred))
-    
-    # Identify outliers using standardized residuals
-    std_residuals = (residuals - np.mean(residuals)) / np.std(residuals)
-    outliers = np.abs(std_residuals) > outlier_threshold
-    
-    # Create comprehensive visualization
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    
-    # 1. Scatter plot with regression line
-    ax1 = axes[0, 0]
-    ax1.scatter(X[~outliers], y[~outliers], alpha=0.6, label='Normal points', color='blue')
-    ax1.scatter(X[outliers], y[outliers], alpha=0.8, label='Outliers', color='red', s=100, marker='x')
-    
-    # Plot regression line
-    x_range = np.linspace(X.min(), X.max(), 100)
-    y_range = beta * x_range + c
-    ax1.plot(x_range, y_range, 'g-', linewidth=2, label=f'y = {beta:.4f}x + {c:.4f}')
-    
-    # Add confidence interval
-    predict_mean_se = np.sqrt(np.sum((X - X.mean())**2) / len(X))
-    margin = 1.96 * predict_mean_se * np.sqrt(1 + 1/len(X) + (x_range - X.mean())**2 / np.sum((X - X.mean())**2))
-    ax1.fill_between(x_range, y_range - margin, y_range + margin, alpha=0.2, color='green')
-    
-    ax1.set_xlabel('Final Score')
-    ax1.set_ylabel('Logit PD')
-    ax1.set_title(f'Regression Analysis\nR² = {r2:.4f}, RMSE = {rmse:.4f}')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. Residual plot
-    ax2 = axes[0, 1]
-    ax2.scatter(y_pred[~outliers], residuals[~outliers], alpha=0.6, color='blue')
-    ax2.scatter(y_pred[outliers], residuals[outliers], alpha=0.8, color='red', s=100, marker='x')
-    ax2.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-    ax2.axhline(y=outlier_threshold*np.std(residuals), color='red', linestyle='--', alpha=0.5)
-    ax2.axhline(y=-outlier_threshold*np.std(residuals), color='red', linestyle='--', alpha=0.5)
-    ax2.set_xlabel('Predicted Logit PD')
-    ax2.set_ylabel('Residuals')
-    ax2.set_title('Residual Plot')
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. Q-Q plot
-    ax3 = axes[1, 0]
-    stats.probplot(residuals, dist="norm", plot=ax3)
-    ax3.set_title('Q-Q Plot of Residuals')
-    ax3.grid(True, alpha=0.3)
-    
-    # 4. Histogram of residuals
-    ax4 = axes[1, 1]
-    ax4.hist(residuals, bins=30, alpha=0.7, color='blue', edgecolor='black')
-    ax4.axvline(x=0, color='red', linestyle='--', alpha=0.5)
-    ax4.set_xlabel('Residuals')
-    ax4.set_ylabel('Frequency')
-    ax4.set_title('Distribution of Residuals')
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Summary statistics
-    print("=" * 60)
-    print("REGRESSION SUMMARY")
-    print("=" * 60)
-    print(f"Equation: logit_pd = {beta:.6f} * final_score + {c:.6f}")
-    print(f"R-squared: {r2:.4f}")
-    print(f"RMSE: {rmse:.4f}")
-    print(f"Number of observations: {len(X)}")
-    print(f"Number of outliers: {np.sum(outliers)} ({np.sum(outliers)/len(X)*100:.1f}%)")
-    print("\nCoefficients:")
-    print(f"  Beta (slope): {beta:.6f}")
-    print(f"  C (intercept): {c:.6f}")
-    
-    # Outlier details
-    if np.sum(outliers) > 0:
-        print("\nOutlier Details (sorted by absolute residual):")
-        outlier_df = pd.DataFrame({
-            'index': np.where(outliers)[0],
-            'final_score': X[outliers].flatten(),
-            'actual_logit_pd': y[outliers],
-            'predicted_logit_pd': y_pred[outliers],
-            'residual': residuals[outliers],
-            'std_residual': std_residuals[outliers]
-        })
-        outlier_df = outlier_df.sort_values('std_residual', key=abs, ascending=False)
-        print(outlier_df.to_string())
-    
-    # Return results
-    results = {
-        'model': model,
-        'beta': beta,
-        'intercept': c,
-        'r2': r2,
-        'rmse': rmse,
-        'predictions': y_pred,
-        'residuals': residuals,
-        'outliers': outliers,
-        'outlier_indices': np.where(outliers)[0]
-    }
-    
-    return results
+    total_dummy = weights.loc[dummy_vars, "Rel_Weight"].sum()
+    total_other = weights.drop(dummy_vars)["Rel_Weight"].sum()
 
-# Example usage:
-# results = fit_regression_and_analyze(final_score, logit_pd, outlier_threshold=2)
+    new_weights = weights.copy()
 
-# Additional analysis function for outlier investigation
-def analyze_outlier_patterns(final_score, logit_pd, results):
-    """
-    Deeper analysis of outlier patterns
-    """
-    outliers = results['outliers']
-    
-    if np.sum(outliers) == 0:
-        print("No outliers detected.")
-        return
-    
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Distribution comparison
-    ax1 = axes[0]
-    ax1.hist(final_score[~outliers], bins=20, alpha=0.5, label='Normal', color='blue', density=True)
-    ax1.hist(final_score[outliers], bins=10, alpha=0.5, label='Outliers', color='red', density=True)
-    ax1.set_xlabel('Final Score')
-    ax1.set_ylabel('Density')
-    ax1.set_title('Final Score Distribution: Normal vs Outliers')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    ax2 = axes[1]
-    ax2.hist(logit_pd[~outliers], bins=20, alpha=0.5, label='Normal', color='blue', density=True)
-    ax2.hist(logit_pd[outliers], bins=10, alpha=0.5, label='Outliers', color='red', density=True)
-    ax2.set_xlabel('Logit PD')
-    ax2.set_ylabel('Density')
-    ax2.set_title('Logit PD Distribution: Normal vs Outliers')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.show()
+    # Scale dummy group
+    if total_dummy > 0:
+        scale_dummy = dummy_cap / total_dummy
+        new_weights.loc[dummy_vars, "Rel_Weight"] *= scale_dummy
 
-# Example with synthetic data (replace with your actual data)
-# np.random.seed(42)
-# final_score = np.random.normal(50, 10, 200)
-# logit_pd = 0.5 * final_score + 10 + np.random.normal(0, 5, 200)
-# # Add some outliers
-# logit_pd[180:185] += 30
-# logit_pd[190:195] -= 25
+    # Scale other group
+    scale_other = (1 - dummy_cap) / total_other
+    new_weights.loc[~weights.index.isin(dummy_vars), "Rel_Weight"] *= scale_other
 
-# results = fit_regression_and_analyze(final_score, logit_pd)
-# analyze_outlier_patterns(final_score, logit_pd, results)
+    return new_weights
