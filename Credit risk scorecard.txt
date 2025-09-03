@@ -1,37 +1,78 @@
 import cv2
+import numpy as np
+import string
+from PIL import Image, ImageFont, ImageDraw
 import docx
 import io
-from PIL import Image
-import numpy as np
 
-# ---------- Function to extract text from an image using OpenCV ----------
-def extract_text_from_image(image_path):
+# --------- Build Templates for Characters (A-Z, 0-9) ----------
+def build_templates(font_path=None, font_size=36):
+    chars = string.ascii_uppercase + string.digits
+    templates = {}
+
+    # Use PIL to draw characters
+    font = ImageFont.load_default() if font_path is None else ImageFont.truetype(font_path, font_size)
+
+    for ch in chars:
+        img = Image.new("L", (40, 40), color=255)
+        draw = ImageDraw.Draw(img)
+        w, h = draw.textsize(ch, font=font)
+        draw.text(((40 - w) / 2, (40 - h) / 2), ch, font=font, fill=0)
+        templates[ch] = np.array(img)
+
+    return templates
+
+
+# --------- Recognize Characters in Image ----------
+def recognize_characters(image, templates):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    # Find contours (each char candidate)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    results = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if h < 15 or w < 5:  # ignore noise
+            continue
+        roi = thresh[y:y+h, x:x+w]
+        roi_resized = cv2.resize(roi, (40, 40))
+
+        # Template matching
+        scores = {}
+        for ch, tmpl in templates.items():
+            result = cv2.matchTemplate(roi_resized, tmpl, cv2.TM_CCOEFF_NORMED)
+            scores[ch] = result.max()
+
+        best_match = max(scores, key=scores.get)
+        results.append((x, best_match))
+
+    # Sort left-to-right
+    results = sorted(results, key=lambda x: x[0])
+    return "".join([ch for _, ch in results])
+
+
+# --------- Extract Text from Image ----------
+def extract_text_from_image(image_path, templates):
     img = cv2.imread(image_path)
     if img is None:
-        return "[Error: Could not open image]"
-
-    # Convert to gray and apply threshold
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-
-    # Use OpenCV's OCR (requires contrib)
-    ocr = cv2.text.OCRTesseract_create()  # bundled model
-    text = ocr.run(gray, 0)
-    return text.strip()
+        return "[Error: could not open image]"
+    return recognize_characters(img, templates)
 
 
-# ---------- Function to extract text from Word (docx), including OCR on images ----------
-def extract_text_from_docx(docx_path):
+# --------- Extract Text from Word (with OCR on Images) ----------
+def extract_text_from_docx(docx_path, templates):
     text_content = []
 
     doc = docx.Document(docx_path)
 
-    # Extract normal text
+    # Normal text
     for para in doc.paragraphs:
         if para.text.strip():
             text_content.append(para.text.strip())
 
-    # Extract images and run OCR
+    # OCR on images
     rels = doc.part._rels
     for rel in rels:
         if "image" in rels[rel].target_ref:
@@ -39,32 +80,29 @@ def extract_text_from_docx(docx_path):
             image_bytes = img_part.blob
             image_stream = io.BytesIO(image_bytes)
             img = Image.open(image_stream).convert("RGB")
-
-            # Convert PIL -> OpenCV
             img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-
-            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-            ocr = cv2.text.OCRTesseract_create()
-            ocr_text = ocr.run(gray, 0)
+            ocr_text = recognize_characters(img_cv, templates)
             if ocr_text.strip():
                 text_content.append(ocr_text.strip())
 
     return "\n".join(text_content)
 
 
-# ---------- Save to TXT ----------
+# --------- Save to TXT ----------
 def save_to_txt(text, output_file="extracted_text.txt"):
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"✅ Extracted text saved to {output_file}")
 
 
-# ----------------- Example Usage -----------------
+# ---------------- Example Usage ----------------
 if __name__ == "__main__":
-    # Example 1: Extract from an image
-    img_text = extract_text_from_image("sample_image.png")
+    templates = build_templates()  # Build A-Z, 0-9 templates
+
+    # From image
+    img_text = extract_text_from_image("sample_image.png", templates)
     save_to_txt(img_text, "image_text.txt")
 
-    # Example 2: Extract from Word doc with images
-    doc_text = extract_text_from_docx("sample_doc.docx")
+    # From Word
+    doc_text = extract_text_from_docx("sample_doc.docx", templates)
     save_to_txt(doc_text, "doc_text.txt")
