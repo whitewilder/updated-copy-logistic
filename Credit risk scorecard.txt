@@ -1,61 +1,57 @@
-
-import pytesseract
-from PIL import Image
+import easyocr
 import docx
 import io
-import os
+from PIL import Image
+
+# Initialize EasyOCR reader for English
+reader = easyocr.Reader(['en'])
 
 # ---------- Function to extract text from an image ----------
 def extract_text_from_image(image_path):
-    try:
-        img = Image.open(image_path)
-        text = pytesseract.image_to_string(img, lang="eng")
-        return text.strip()
-    except Exception as e:
-        return f"Error processing image {image_path}: {e}"
+    results = reader.readtext(image_path, detail=0)
+    return "\n".join(results)
 
 
 # ---------- Function to extract text from Word (docx), including OCR on images ----------
 def extract_text_from_docx(docx_path):
     text_content = []
 
-    try:
-        doc = docx.Document(docx_path)
+    doc = docx.Document(docx_path)
 
-        # Extract normal text
-        for para in doc.paragraphs:
-            if para.text.strip():
-                text_content.append(para.text.strip())
+    # Extract normal text
+    for para in doc.paragraphs:
+        if para.text.strip():
+            text_content.append(para.text.strip())
 
-        # Extract images and run OCR
-        rels = doc.part._rels
-        for rel in rels:
-            if "image" in rels[rel].target_ref:  # only process image relationships
-                img_part = rels[rel].target_part
-                image_bytes = img_part.blob
-                image_stream = io.BytesIO(image_bytes)
+    # Extract images and run OCR
+    rels = doc.part._rels
+    for rel in rels:
+        if "image" in rels[rel].target_ref:
+            img_part = rels[rel].target_part
+            image_bytes = img_part.blob
+            image_stream = io.BytesIO(image_bytes)
+            img = Image.open(image_stream)
 
-                try:
-                    img = Image.open(image_stream)
-                    ocr_text = pytesseract.image_to_string(img, lang="eng")
-                    if ocr_text.strip():
-                        text_content.append(ocr_text.strip())
-                except Exception as e:
-                    text_content.append(f"[Error OCR on image: {e}]")
+            results = reader.readtext(img, detail=0)
+            if results:
+                text_content.extend(results)
 
-        return "\n".join(text_content)
+    return "\n".join(text_content)
 
-    except Exception as e:
-        return f"Error processing Word file {docx_path}: {e}"
+
+# ---------- Function to save extracted text to a .txt file ----------
+def save_to_txt(text, output_file="extracted_text.txt"):
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"✅ Extracted text saved to {output_file}")
 
 
 # ----------------- Example Usage -----------------
-
 if __name__ == "__main__":
     # Example 1: Extract from an image
-    image_path = "sample_image.png"  # replace with your image file
-    print("Text from Image:\n", extract_text_from_image(image_path))
+    img_text = extract_text_from_image("sample_image.png")
+    save_to_txt(img_text, "image_text.txt")
 
     # Example 2: Extract from Word doc with images
-    docx_path = "sample_doc.docx"  # replace with your docx file
-    print("\nText from Word Doc:\n", extract_text_from_docx(docx_path))
+    doc_text = extract_text_from_docx("sample_doc.docx")
+    save_to_txt(doc_text, "doc_text.txt")
