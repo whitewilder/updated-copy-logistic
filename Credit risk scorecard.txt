@@ -1,311 +1,61 @@
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from openpyxl import Workbook
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.chart import BarChart, LineChart, Reference, ScatterChart
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.formatting.rule import ColorScaleRule
-import warnings
-warnings.filterwarnings('ignore')
+import pytesseract
+from PIL import Image
+import docx
+import io
+import os
 
-# Create a function to read the data files
-def read_data_files():
-    """Read all CSV and XLSX files into a dictionary"""
-    data_dict = {}
-    
-    # List of CSV files to read
-    csv_files = [
-        'variable_discarded_status.csv',
-        'sfa_univariate_distribution_test_flags.csv',
-        'sfa_univariate_discriminatory_test_flags.csv',
-        'sfa_regression.csv',
-        'sfa_bivariate_correlation_test_flags.csv'
-    ]
-    
-    # Read CSV files
-    for file in csv_files:
-        try:
-            data_dict[file.replace('.csv', '')] = pd.read_csv(file)
-        except:
-            print(f"Could not read {file}")
-    
-    # Read XLSX file
+# ---------- Function to extract text from an image ----------
+def extract_text_from_image(image_path):
     try:
-        xlsx_data = pd.ExcelFile('sfa_univariate_distribution_summary_tables.xlsx')
-        for sheet in xlsx_data.sheet_names:
-            data_dict[f'distribution_{sheet}'] = pd.read_excel(xlsx_data, sheet_name=sheet)
-    except:
-        print("Could not read XLSX file")
-    
-    return data_dict
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img, lang="eng")
+        return text.strip()
+    except Exception as e:
+        return f"Error processing image {image_path}: {e}"
 
-def create_summary_dashboard(writer, data_dict):
-    """Create a summary dashboard sheet"""
-    summary_data = []
-    
-    # Variable status summary
-    if 'variable_discarded_status' in data_dict:
-        df = data_dict['variable_discarded_status']
-        total_vars = len(df.columns) - 1  # Excluding the status column
-        discarded = df.iloc[0].sum()
-        kept = total_vars - discarded
-        summary_data.append({
-            'Metric': 'Total Variables',
-            'Value': total_vars,
-            'Percentage': '100%'
-        })
-        summary_data.append({
-            'Metric': 'Variables Kept',
-            'Value': kept,
-            'Percentage': f'{kept/total_vars*100:.1f}%'
-        })
-        summary_data.append({
-            'Metric': 'Variables Discarded',
-            'Value': discarded,
-            'Percentage': f'{discarded/total_vars*100:.1f}%'
-        })
-    
-    # Model performance summary
-    if 'sfa_regression' in data_dict:
-        df = data_dict['sfa_regression']
-        avg_gini = df['gini'].mean() if 'gini' in df.columns else 0
-        avg_pseudo_r2 = df['pseudo_rsquared'].mean() if 'pseudo_rsquared' in df.columns else 0
-        summary_data.append({
-            'Metric': 'Average Gini Coefficient',
-            'Value': f'{avg_gini:.4f}',
-            'Percentage': f'{avg_gini*100:.2f}%'
-        })
-        summary_data.append({
-            'Metric': 'Average Pseudo R-squared',
-            'Value': f'{avg_pseudo_r2:.4f}',
-            'Percentage': f'{avg_pseudo_r2*100:.2f}%'
-        })
-    
-    summary_df = pd.DataFrame(summary_data)
-    summary_df.to_excel(writer, sheet_name='Dashboard', index=False)
-    
-    # Format the dashboard
-    worksheet = writer.sheets['Dashboard']
-    for row in worksheet.iter_rows(min_row=1, max_row=1):
-        for cell in row:
-            cell.font = Font(bold=True, size=12)
-            cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            cell.font = Font(color="FFFFFF", bold=True)
 
-def create_variable_analysis(writer, data_dict):
-    """Create detailed variable analysis"""
-    analysis_data = []
-    
-    variables = ['var1', 'var2', 'var3', 'var4', 'var5']
-    
-    for var in variables:
-        var_info = {'Variable': var}
-        
-        # Get regression info
-        if 'sfa_regression' in data_dict:
-            df = data_dict['sfa_regression']
-            var_row = df[df['variable'] == var]
-            if not var_row.empty:
-                var_info['Coefficient'] = var_row['coefficient'].iloc[0]
-                var_info['P-value'] = var_row['coef_pval'].iloc[0]
-                var_info['Gini'] = var_row['gini'].iloc[0] if 'gini' in var_row.columns else None
-                var_info['Somers D'] = var_row['somers_d'].iloc[0] if 'somers_d' in var_row.columns else None
-        
-        # Get correlation info
-        if 'sfa_bivariate_correlation_test_flags' in data_dict:
-            df = data_dict['sfa_bivariate_correlation_test_flags']
-            if 'variable' in df.columns:
-                var_row = df[df['variable'] == var]
-                if not var_row.empty:
-                    var_info['Spearman Correlation'] = var_row['spearman_correlation'].iloc[0] if 'spearman_correlation' in var_row.columns else None
-                    var_info['Pearson Correlation'] = var_row['pearson_correlation'].iloc[0] if 'pearson_correlation' in var_row.columns else None
-        
-        analysis_data.append(var_info)
-    
-    analysis_df = pd.DataFrame(analysis_data)
-    analysis_df.to_excel(writer, sheet_name='Variable_Analysis', index=False)
-    
-    # Add conditional formatting
-    worksheet = writer.sheets['Variable_Analysis']
-    # Add color scale for Gini values
-    if 'Gini' in analysis_df.columns:
-        gini_col = analysis_df.columns.get_loc('Gini') + 1
-        worksheet.conditional_formatting.add(f'{chr(64+gini_col)}2:{chr(64+gini_col)}{len(analysis_df)+1}',
-                                           ColorScaleRule(start_type='min', start_color='FF0000',
-                                                        end_type='max', end_color='00FF00'))
+# ---------- Function to extract text from Word (docx), including OCR on images ----------
+def extract_text_from_docx(docx_path):
+    text_content = []
 
-def create_visualizations(writer, data_dict):
-    """Create visualization sheets"""
-    # Create a figure for variable importance
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    
-    # Plot 1: Variable Gini Coefficients
-    if 'sfa_regression' in data_dict:
-        df = data_dict['sfa_regression']
-        if 'gini' in df.columns:
-            ax = axes[0, 0]
-            df_sorted = df.sort_values('gini', ascending=True)
-            ax.barh(df_sorted['variable'], df_sorted['gini'])
-            ax.set_xlabel('Gini Coefficient')
-            ax.set_title('Variable Discriminatory Power (Gini)')
-            ax.grid(True, alpha=0.3)
-    
-    # Plot 2: P-values
-    if 'sfa_regression' in data_dict:
-        df = data_dict['sfa_regression']
-        if 'coef_pval' in df.columns:
-            ax = axes[0, 1]
-            ax.bar(df['variable'], -np.log10(df['coef_pval']))
-            ax.axhline(y=-np.log10(0.05), color='r', linestyle='--', label='p=0.05')
-            ax.set_ylabel('-log10(p-value)')
-            ax.set_title('Statistical Significance of Variables')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-    
-    # Plot 3: Correlation heatmap
-    if 'sfa_bivariate_correlation_test_flags' in data_dict:
-        df = data_dict['sfa_bivariate_correlation_test_flags']
-        if 'spearman_correlation' in df.columns:
-            ax = axes[1, 0]
-            corr_data = df.pivot_table(values='spearman_correlation', 
-                                       index='variable', 
-                                       columns='variable', 
-                                       fill_value=0)
-            sns.heatmap(corr_data, annot=True, fmt='.3f', cmap='coolwarm', 
-                       center=0, ax=ax, cbar_kws={'label': 'Spearman Correlation'})
-            ax.set_title('Variable Correlations')
-    
-    # Plot 4: Model Performance Metrics
-    if 'sfa_regression' in data_dict:
-        df = data_dict['sfa_regression']
-        ax = axes[1, 1]
-        metrics = ['pseudo_rsquared', 'gini', 'somers_d']
-        available_metrics = [m for m in metrics if m in df.columns]
-        if available_metrics:
-            metric_data = df[['variable'] + available_metrics].set_index('variable')
-            metric_data.plot(kind='bar', ax=ax)
-            ax.set_ylabel('Value')
-            ax.set_title('Model Performance Metrics by Variable')
-            ax.legend(loc='best')
-            ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    # Save the figure to a temporary file and then add to Excel
-    plt.savefig('temp_viz.png', dpi=150, bbox_inches='tight')
-    
-    # Create a new sheet for visualizations
-    viz_df = pd.DataFrame({'Note': ['Visualizations are saved as separate image files']})
-    viz_df.to_excel(writer, sheet_name='Visualizations', index=False)
-    
-    plt.close()
+    try:
+        doc = docx.Document(docx_path)
 
-def create_innovative_analysis(writer, data_dict):
-    """Create innovative analyses"""
-    
-    # 1. Variable Stability Score
-    stability_scores = []
-    variables = ['var1', 'var2', 'var3', 'var4', 'var5']
-    
-    for var in variables:
-        score = 100  # Start with perfect score
-        
-        # Deduct points for various issues
-        if 'sfa_regression' in data_dict:
-            df = data_dict['sfa_regression']
-            var_row = df[df['variable'] == var]
-            if not var_row.empty:
-                # High p-value reduces score
-                if var_row['coef_pval'].iloc[0] > 0.05:
-                    score -= 20
-                # Low Gini reduces score
-                if 'gini' in var_row.columns and var_row['gini'].iloc[0] < 0.3:
-                    score -= 15
-        
-        stability_scores.append({
-            'Variable': var,
-            'Stability Score': score,
-            'Risk Level': 'Low' if score >= 80 else 'Medium' if score >= 60 else 'High'
-        })
-    
-    stability_df = pd.DataFrame(stability_scores)
-    
-    # 2. Variable Interaction Analysis
-    interaction_data = []
-    if 'sfa_bivariate_correlation_test_flags' in data_dict:
-        df = data_dict['sfa_bivariate_correlation_test_flags']
-        for i, var1 in enumerate(variables):
-            for var2 in variables[i+1:]:
-                interaction_data.append({
-                    'Variable Pair': f'{var1}-{var2}',
-                    'Interaction Strength': np.random.uniform(0.1, 0.9),  # Placeholder
-                    'Recommendation': 'Consider interaction term' if np.random.random() > 0.7 else 'No action needed'
-                })
-    
-    interaction_df = pd.DataFrame(interaction_data)
-    
-    # Write to Excel
-    stability_df.to_excel(writer, sheet_name='Stability_Analysis', index=False)
-    interaction_df.to_excel(writer, sheet_name='Interaction_Analysis', index=False)
+        # Extract normal text
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text_content.append(para.text.strip())
 
-def main():
-    """Main function to create the consolidated Excel report"""
-    
-    # Read all data files
-    print("Reading data files...")
-    data_dict = read_data_files()
-    
-    # Create Excel writer
-    with pd.ExcelWriter('consolidated_sfa_analysis.xlsx', engine='openpyxl') as writer:
-        
-        # 1. Create summary dashboard
-        print("Creating dashboard...")
-        create_summary_dashboard(writer, data_dict)
-        
-        # 2. Write all original data to separate sheets
-        print("Writing original data...")
-        for name, df in data_dict.items():
-            sheet_name = name[:31]  # Excel sheet names limited to 31 chars
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
-        # 3. Create variable analysis
-        print("Creating variable analysis...")
-        create_variable_analysis(writer, data_dict)
-        
-        # 4. Create visualizations
-        print("Creating visualizations...")
-        create_visualizations(writer, data_dict)
-        
-        # 5. Create innovative analyses
-        print("Creating innovative analyses...")
-        create_innovative_analysis(writer, data_dict)
-        
-        # 6. Create a summary statistics sheet
-        print("Creating summary statistics...")
-        summary_stats = []
-        for name, df in data_dict.items():
-            summary_stats.append({
-                'Dataset': name,
-                'Rows': len(df),
-                'Columns': len(df.columns),
-                'Memory (KB)': df.memory_usage(deep=True).sum() / 1024
-            })
-        
-        summary_stats_df = pd.DataFrame(summary_stats)
-        summary_stats_df.to_excel(writer, sheet_name='Data_Summary', index=False)
-    
-    print("Consolidated Excel file created: consolidated_sfa_analysis.xlsx")
-    print("\nThe file contains the following sheets:")
-    print("1. Dashboard - High-level summary of key metrics")
-    print("2. Variable_Analysis - Detailed analysis of each variable")
-    print("3. Stability_Analysis - Variable stability scores")
-    print("4. Interaction_Analysis - Variable interaction recommendations")
-    print("5. Data_Summary - Summary of all datasets")
-    print("6. All original data sheets")
-    print("\nVisualization saved as: temp_viz.png")
+        # Extract images and run OCR
+        rels = doc.part._rels
+        for rel in rels:
+            if "image" in rels[rel].target_ref:  # only process image relationships
+                img_part = rels[rel].target_part
+                image_bytes = img_part.blob
+                image_stream = io.BytesIO(image_bytes)
+
+                try:
+                    img = Image.open(image_stream)
+                    ocr_text = pytesseract.image_to_string(img, lang="eng")
+                    if ocr_text.strip():
+                        text_content.append(ocr_text.strip())
+                except Exception as e:
+                    text_content.append(f"[Error OCR on image: {e}]")
+
+        return "\n".join(text_content)
+
+    except Exception as e:
+        return f"Error processing Word file {docx_path}: {e}"
+
+
+# ----------------- Example Usage -----------------
 
 if __name__ == "__main__":
-    main()
+    # Example 1: Extract from an image
+    image_path = "sample_image.png"  # replace with your image file
+    print("Text from Image:\n", extract_text_from_image(image_path))
+
+    # Example 2: Extract from Word doc with images
+    docx_path = "sample_doc.docx"  # replace with your docx file
+    print("\nText from Word Doc:\n", extract_text_from_docx(docx_path))
