@@ -1,15 +1,18 @@
-import easyocr
+from paddleocr import PaddleOCR
+from PIL import Image
 import docx
 import io
-from PIL import Image
 
-# Initialize EasyOCR reader for English
-reader = easyocr.Reader(['en'])
+# Initialize OCR (English only)
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
 
 # ---------- Function to extract text from an image ----------
 def extract_text_from_image(image_path):
-    results = reader.readtext(image_path, detail=0)
-    return "\n".join(results)
+    results = ocr.ocr(image_path, cls=True)
+    text_lines = []
+    for line in results[0]:
+        text_lines.append(line[1][0])
+    return "\n".join(text_lines)
 
 
 # ---------- Function to extract text from Word (docx), including OCR on images ----------
@@ -32,9 +35,9 @@ def extract_text_from_docx(docx_path):
             image_stream = io.BytesIO(image_bytes)
             img = Image.open(image_stream)
 
-            results = reader.readtext(img, detail=0)
-            if results:
-                text_content.extend(results)
+            results = ocr.ocr(img, cls=True)
+            for line in results[0]:
+                text_content.append(line[1][0])
 
     return "\n".join(text_content)
 
