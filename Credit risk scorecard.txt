@@ -1,17 +1,23 @@
-import keras_ocr
+import cv2
 import docx
 import io
 from PIL import Image
+import numpy as np
 
-# Build OCR pipeline (downloads weights once via pip, then offline)
-pipeline = keras_ocr.pipeline.Pipeline()
-
-# ---------- Function to extract text from an image ----------
+# ---------- Function to extract text from an image using OpenCV ----------
 def extract_text_from_image(image_path):
-    images = [keras_ocr.tools.read(image_path)]
-    prediction_groups = pipeline.recognize(images)
-    text_lines = [text for text, box in prediction_groups[0]]
-    return "\n".join(text_lines)
+    img = cv2.imread(image_path)
+    if img is None:
+        return "[Error: Could not open image]"
+
+    # Convert to gray and apply threshold
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    # Use OpenCV's OCR (requires contrib)
+    ocr = cv2.text.OCRTesseract_create()  # bundled model
+    text = ocr.run(gray, 0)
+    return text.strip()
 
 
 # ---------- Function to extract text from Word (docx), including OCR on images ----------
@@ -32,16 +38,21 @@ def extract_text_from_docx(docx_path):
             img_part = rels[rel].target_part
             image_bytes = img_part.blob
             image_stream = io.BytesIO(image_bytes)
-            img = Image.open(image_stream)
+            img = Image.open(image_stream).convert("RGB")
 
-            prediction_groups = pipeline.recognize([keras_ocr.tools.read(img)])
-            for text, box in prediction_groups[0]:
-                text_content.append(text)
+            # Convert PIL -> OpenCV
+            img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            ocr = cv2.text.OCRTesseract_create()
+            ocr_text = ocr.run(gray, 0)
+            if ocr_text.strip():
+                text_content.append(ocr_text.strip())
 
     return "\n".join(text_content)
 
 
-# ---------- Function to save extracted text to a .txt file ----------
+# ---------- Save to TXT ----------
 def save_to_txt(text, output_file="extracted_text.txt"):
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(text)
