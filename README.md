@@ -1,97 +1,143 @@
-# Index of Functions and Classes
+# 📘 Professional Jupyter Notebook Template
 
-This document provides an overview of all the functions and classes included in the library, along with links to their detailed descriptions.
-
-## General Index
-
-### Functions
-
-1. [corr_drop](#corr_drop)
-2. [multicollinearity_check](#multicollinearity_check)
-3. [find_columns_with_high_duplicates](#find_columns_with_high_duplicates)
-4. [remove_high_vif_vars](#remove_high_vif_vars)
-
-### Classes
-
-1. [Transformation](#transformation)
-2. [CapturePrint](#captureprint)
+This template can be used for **assignments, research work, professional reports, interviews, and data science projects**.
+It also includes **best practices** for writing clean and maintainable Python code in notebooks.
 
 ---
 
-### Function Details
+# 🏷️ Notebook Title
 
-#### corr_drop
-Removes highly correlated variables from a dataset based on a specified threshold.
-- **File**: `mfa.py`
-- **Args**:
-  - `df`: Input DataFrame
-  - `target`: Target variable to exclude
-  - `threshold`: Correlation threshold
-  - `how`: Method for dropping variables (`max_corr` or `order_list`)
-  - `order_list`: Variable order for `order_list` method
+*A clear and descriptive title of the project.*
 
-[See Full Documentation](#corr_drop)
+**Author:** Your Name
+**Date:** YYYY-MM-DD
+**Environment:** Python 3.x, Jupyter Notebook
 
 ---
 
-#### multicollinearity_check
-Evaluates multicollinearity using Variance Inflation Factor (VIF).
-- **File**: `mfa.py`
-- **Args**:
-  - `df`: Input DataFrame
-  - `y`: Dependent variable/target column
-  - `threshold`: VIF threshold for filtering
-  - `only_final_vif`: Return only final VIF values
+# 📂 Table of Contents
 
-[See Full Documentation](#multicollinearity_check)
-
----
-
-#### find_columns_with_high_duplicates
-Identifies columns with a high percentage of duplicate values.
-- **File**: `mfa.py`
-- **Args**:
-  - `df`: Input DataFrame
-  - `threshold`: Minimum percentage of duplicate values to consider
-
-[See Full Documentation](#find_columns_with_high_duplicates)
+1. [Introduction](#introduction)
+2. [Objectives](#objectives)
+3. [Dataset Description](#dataset-description)
+4. [Setup & Imports](#setup-imports)
+5. [Data Loading](#data-loading)
+6. [Data Cleaning](#data-cleaning)
+7. [Exploratory Data Analysis](#eda)
+8. [Feature Engineering](#feature-engineering)
+9. [Modeling](#modeling)
+10. [Evaluation](#evaluation)
+11. [Conclusion](#conclusion)
+12. [References](#references)
 
 ---
 
-#### remove_high_vif_vars
-Removes variables with high VIF to address multicollinearity.
-- **File**: `mfa.py`
-- **Args**:
-  - `df`: Input DataFrame
-  - `vif_threshold`: Threshold for VIF
-  - `corr_threshold`: Correlation threshold
-  - `dup_threshold`: Threshold for duplicate values
-  - `target_col`: Target variable column
-  - `how`: Method for handling correlations
-  - `order_list`: Variable order preference
+# <a id="introduction"></a>1. Introduction
 
-[See Full Documentation](#remove_high_vif_vars)
+Describe the context, background, and purpose of the notebook.
+
+Example:
+
+> In this notebook, we analyze the XYZ dataset to identify patterns and build a predictive model.
 
 ---
 
-### Class Details
+# <a id="objectives"></a>2. Objectives
 
-#### Transformation
-Applies various data transformation techniques.
-- **File**: `utils.py`
-
-[See Full Documentation](#transformation)
+* Define clear goals
+* What you plan to analyze
+* What you want to predict or understand
 
 ---
 
-#### CapturePrint
-Captures printed output for logging or debugging.
-- **File**: `utils.py`
+# <a id="dataset-description"></a>3. Dataset Description
 
-[See Full Documentation](#captureprint)
+* Source of data
+* Number of features
+* Target variable
+* Brief description of each key variable
 
 ---
 
-For detailed usage and examples, refer to the [Full Documentation](functions_and_classes.md).
+# <a id="setup-imports"></a>4. Setup & Imports
 
+```python
+# Core Python Libraries
+import numpy as np
+import pandas as pd
+
+# Visualization
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Machine Learning
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, confusion_matrix
+
+# Settings
+pd.set_option('display.max_columns', None)
+sns.set(style='whitegrid')
+```
+
+---
+
+# <a id="data-loading"></a>5. Data Loading
+
+```python
+df = pd.read_csv('data.csv')
+df.head()
+```
+
+---
+
+# <a id="data-cleaning"></a>6. Data Cleaning
+
+```python
+# Check missing values
+df.isnull().sum()
+
+# Handle missing
+df.fillna(method='ffill', inplace=True)
+```
+
+---
+
+# <a id="eda"></a>7. Exploratory Data Analysis
+
+```python
+plt.figure(figsize=(8,5))
+sns.histplot(df['age'])
+plt.title('Age Distribution')
+plt.show()
+```
+
+---
+
+# <a id="feature-engineering"></a>8. Feature Engineering
+
+```python
+df['log_income'] = np.log(df['income'] + 1)
+```
+
+---
+
+# <a id="modeling"></a>9. Modeling
+
+```python
+X = df.drop('target', axis=1)
+y = df['target']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+```
+
+---
+
+# <a id="evaluation"></a>10. Evaluation
+
+```python
+y_pred = model.predict(X_test)
+print('Accuracy:', accuracy_score(y_test, y_pred))
+```
+
+---
 
