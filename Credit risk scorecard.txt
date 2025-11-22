@@ -1,509 +1,114 @@
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
-from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix
-import xgboost as xgb
-from scipy import stats
-import warnings
-warnings.filterwarnings('ignore')
+EMAIL_ENABLED = True
+TEAMS_ENABLED = True
 
-def calculate_gini(y_true, y_pred):
-    """Calculate Gini coefficient from predictions"""
-    auc = roc_auc_score(y_true, y_pred)
-    gini = 2 * auc - 1
-    return gini
+# --- Email Settings ---
+SMTP_SERVER = "smtp.gmail.com"      # update as needed
+SMTP_PORT = 587
+EMAIL_SENDER = "your_email@example.com"
+EMAIL_PASSWORD = "YOUR_EMAIL_APP_PASSWORD"   # use app password!
+EMAIL_RECIPIENTS = ["recipient1@example.com", "recipient2@example.com"]
 
-def feature_importance_selection(X, y, feature_names, top_k=None, method='gain'):
-    """
-    Select features using XGBoost feature importance
-    method: 'gain', 'weight', 'cover'
-    """
-    print(f"\n{'='*60}")
-    print(f"FEATURE IMPORTANCE SELECTION (Method: {method})")
-    print(f"{'='*60}")
-    
-    # Train initial XGBoost model
-    dtrain = xgb.DMatrix(X, label=y)
-    params = {
-        'objective': 'binary:logistic',
-        'eval_metric': 'auc',
-        'max_depth': 4,
-        'eta': 0.1,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'seed': 42
+# --- Teams Webhook ---
+TEAMS_WEBHOOK_URL = "https://outlook.office.com/webhook/..."   # paste your webhook
+
+import smtplib
+from email.mime.text import MIMEText
+
+def send_email(subject, body):
+    if not EMAIL_ENABLED:
+        return
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = ", ".join(EMAIL_RECIPIENTS)
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENTS, msg.as_string())
+        log(f"[EMAIL SENT] {subject}")
+    except Exception as e:
+        log(f"[EMAIL ERROR] {e}")
+
+import requests
+
+def send_teams(message):
+    if not TEAMS_ENABLED:
+        return
+
+    payload = {
+        "text": message
     }
-    
-    bst = xgb.train(params, dtrain, num_boost_round=100)
-    
-    # Get feature importance
-    importance_dict = bst.get_score(importance_type=method)
-    
-    # Create dataframe with importance scores
-    importance_df = pd.DataFrame({
-        'feature': feature_names,
-        'importance': [importance_dict.get(f'f{i}', 0) for i in range(len(feature_names))]
-    }).sort_values('importance', ascending=False)
-    
-    print("\nTop 20 Features by Importance:")
-    print(importance_df.head(20))
-    
-    if top_k:
-        selected_features = importance_df.head(top_k)['feature'].tolist()
-        print(f"\nSelected top {top_k} features")
-    else:
-        # Keep features with non-zero importance
-        selected_features = importance_df[importance_df['importance'] > 0]['feature'].tolist()
-        print(f"\nSelected {len(selected_features)} features with non-zero importance")
-    
-    return selected_features, importance_df
 
-def univariate_feature_selection(X, y, feature_names, top_k=20, score_func=f_classif):
-    """
-    Perform univariate feature selection using statistical tests
-    """
-    print(f"\n{'='*60}")
-    print(f"UNIVARIATE FEATURE SELECTION")
-    print(f"{'='*60}")
-    
-    selector = SelectKBest(score_func=score_func, k=min(top_k, X.shape[1]))
-    selector.fit(X, y)
-    
-    # Get scores and p-values
-    scores = selector.scores_
-    pvalues = selector.pvalues_
-    
-    # Create dataframe
-    selection_df = pd.DataFrame({
-        'feature': feature_names,
-        'score': scores,
-        'pvalue': pvalues
-    }).sort_values('score', ascending=False)
-    
-    print("\nTop 20 Features by Statistical Score:")
-    print(selection_df.head(20))
-    
-    # Select statistically significant features (p < 0.05)
-    significant_features = selection_df[selection_df['pvalue'] < 0.05]['feature'].tolist()
-    print(f"\nSelected {len(significant_features)} statistically significant features (p < 0.05)")
-    
-    return significant_features, selection_df
+    try:
+        resp = requests.post(TEAMS_WEBHOOK_URL, json=payload)
+        if resp.status_code == 200:
+            log("[TEAMS SENT] " + message)
+        else:
+            log(f"[TEAMS ERROR] HTTP {resp.status_code}")
+    except Exception as e:
+        log(f"[TEAMS ERROR] {e}")
+def run_notebook(input_path):
+    rel = os.path.relpath(input_path, NOTEBOOK_ROOT)
+    output_path = os.path.join(OUTPUT_DIR, rel)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-def mutual_information_selection(X, y, feature_names, top_k=20):
-    """
-    Select features using mutual information
-    """
-    print(f"\n{'='*60}")
-    print(f"MUTUAL INFORMATION FEATURE SELECTION")
-    print(f"{'='*60}")
-    
-    selector = SelectKBest(score_func=mutual_info_classif, k=min(top_k, X.shape[1]))
-    selector.fit(X, y)
-    
-    scores = selector.scores_
-    
-    mi_df = pd.DataFrame({
-        'feature': feature_names,
-        'mi_score': scores
-    }).sort_values('mi_score', ascending=False)
-    
-    print("\nTop 20 Features by Mutual Information:")
-    print(mi_df.head(20))
-    
-    # Select top k features
-    selected_features = mi_df.head(top_k)['feature'].tolist()
-    
-    return selected_features, mi_df
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            log(f"[START] {input_path} — attempt {attempt+1}")
 
-def check_pca_feasibility(X, y, variance_threshold=0.95):
-    """
-    Check if PCA is feasible and beneficial
-    """
-    print(f"\n{'='*60}")
-    print(f"PCA FEASIBILITY ANALYSIS")
-    print(f"{'='*60}")
-    
-    # Standardize features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Fit PCA
-    pca = PCA()
-    pca.fit(X_scaled)
-    
-    # Calculate cumulative variance
-    cumsum_variance = np.cumsum(pca.explained_variance_ratio_)
-    n_components = np.argmax(cumsum_variance >= variance_threshold) + 1
-    
-    print(f"\nOriginal number of features: {X.shape[1]}")
-    print(f"Components needed for {variance_threshold*100}% variance: {n_components}")
-    print(f"Variance reduction: {(1 - n_components/X.shape[1])*100:.2f}%")
-    
-    # Check if PCA is beneficial (at least 20% reduction)
-    if n_components < 0.8 * X.shape[1]:
-        print(f"\n✓ PCA is FEASIBLE - Reduces dimensions by {(1 - n_components/X.shape[1])*100:.2f}%")
-        
-        # Apply PCA transformation
-        pca_final = PCA(n_components=n_components)
-        X_pca = pca_final.fit_transform(X_scaled)
-        
-        # Test with XGBoost
-        X_train, X_test, y_train, y_test = train_test_split(X_pca, y, test_size=0.2, random_state=42)
-        
-        dtrain = xgb.DMatrix(X_train, label=y_train)
-        dtest = xgb.DMatrix(X_test, label=y_test)
-        
-        params = {
-            'objective': 'binary:logistic',
-            'eval_metric': 'auc',
-            'max_depth': 4,
-            'eta': 0.1,
-            'seed': 42
-        }
-        
-        bst = xgb.train(params, dtrain, num_boost_round=100)
-        y_pred = bst.predict(dtest)
-        gini_pca = calculate_gini(y_test, y_pred)
-        
-        print(f"Gini score with PCA: {gini_pca:.4f}")
-        
-        return True, n_components, gini_pca, pca_final, scaler
-    else:
-        print(f"\n✗ PCA is NOT RECOMMENDED - Minimal dimension reduction")
-        return False, None, None, None, None
+            pm.execute_notebook(input_path, output_path, kernel_name="python3")
 
-def train_xgboost_model(X_train, y_train, X_test, y_test, params=None):
-    """
-    Train XGBoost model and return predictions
-    """
-    if params is None:
-        params = {
-            'objective': 'binary:logistic',
-            'eval_metric': 'auc',
-            'max_depth': 5,
-            'eta': 0.05,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 1,
-            'gamma': 0,
-            'seed': 42
-        }
-    
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dtest = xgb.DMatrix(X_test, label=y_test)
-    
-    evals = [(dtrain, 'train'), (dtest, 'test')]
-    
-    bst = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=500,
-        evals=evals,
-        early_stopping_rounds=50,
-        verbose_eval=False
+            log(f"[SUCCESS] {input_path}")
+            return True
+
+        except Exception as e:
+            log(f"[ERROR] {input_path} — {e}")
+
+            if attempt == MAX_RETRIES:
+                failure_msg = f"Notebook FAILED: {input_path}"
+                log("[FAILURE] " + failure_msg)
+
+                # 🔔 Send alerts
+                send_email(
+                    subject="Notebook Execution FAILED",
+                    body=f"{failure_msg}\n\nError: {e}\n\nTime: {datetime.now()}"
+                )
+                send_teams(f"❌ Notebook FAILED\n{input_path}\nError: {e}")
+
+                return False
+def main():
+    log("=" * 80)
+    log("Pipeline started")
+
+    notebooks = list(find_notebooks(NOTEBOOK_ROOT))
+    log(f"Found {len(notebooks)} notebooks")
+
+    results = []
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        results = list(executor.map(run_notebook, notebooks))
+
+    failed_count = results.count(False)
+    success_count = results.count(True)
+
+    summary = (
+        f"Daily Notebook Pipeline Summary\n\n"
+        f"Total: {len(notebooks)}\n"
+        f"Success: {success_count}\n"
+        f"Failed: {failed_count}\n"
+        f"Finished at: {datetime.now()}"
     )
-    
-    # Predictions
-    y_pred_train = bst.predict(dtrain)
-    y_pred_test = bst.predict(dtest)
-    
-    return bst, y_pred_train, y_pred_test
 
-def evaluate_model(y_true, y_pred, dataset_name="Dataset"):
-    """
-    Evaluate model performance
-    """
-    print(f"\n{'='*60}")
-    print(f"MODEL EVALUATION - {dataset_name}")
-    print(f"{'='*60}")
-    
-    # Calculate metrics
-    auc = roc_auc_score(y_true, y_pred)
-    gini = calculate_gini(y_true, y_pred)
-    
-    # Convert to binary predictions
-    y_pred_binary = (y_pred >= 0.5).astype(int)
-    
-    print(f"\nAUC Score: {auc:.4f}")
-    print(f"Gini Coefficient: {gini:.4f}")
-    print(f"\nClassification Report:")
-    print(classification_report(y_true, y_pred_binary))
-    print(f"\nConfusion Matrix:")
-    print(confusion_matrix(y_true, y_pred_binary))
-    
-    return {'auc': auc, 'gini': gini}
+    send_email("Daily Notebook Pipeline Summary", summary)
+    send_teams(f"📊 Pipeline Summary\n{summary}")
 
-def test_model_on_multiple_datasets(model, datasets_dict, feature_names, scaler=None, pca_transformer=None):
-    """
-    Test model on multiple datasets and calculate Gini scores
-    datasets_dict: {'dataset_name': (X, y)}
-    """
-    print(f"\n{'='*60}")
-    print(f"TESTING ON MULTIPLE DATASETS")
-    print(f"{'='*60}")
-    
-    results = {}
-    
-    for dataset_name, (X, y) in datasets_dict.items():
-        print(f"\n--- {dataset_name} ---")
-        
-        # Ensure same feature order
-        if isinstance(X, pd.DataFrame):
-            X = X[feature_names].values if all(f in X.columns for f in feature_names) else X.values
-        
-        # Apply transformations if needed
-        if scaler is not None:
-            X = scaler.transform(X)
-        if pca_transformer is not None:
-            X = pca_transformer.transform(X)
-        
-        # Predict
-        dmatrix = xgb.DMatrix(X)
-        y_pred = model.predict(dmatrix)
-        
-        # Evaluate
-        metrics = evaluate_model(y, y_pred, dataset_name)
-        results[dataset_name] = metrics
-    
-    # Summary
-    print(f"\n{'='*60}")
-    print(f"SUMMARY OF RESULTS")
-    print(f"{'='*60}")
-    summary_df = pd.DataFrame(results).T
-    print(summary_df)
-    
-    return results
+    log("Pipeline completed")
+    log("=" * 80)
+EMAIL_ENABLED = True
+TEAMS_ENABLED = True
+send_teams(f"📁 Notebook updated: {event.src_path}")
+send_email("Notebook Updated", f"File changed: {event.src_path}")
 
-def perform_statistical_significance_test(coefficients_dict, threshold_pvalue=0.05):
-    """
-    Perform statistical significance test on features across multiple datasets
-    coefficients_dict: {'dataset_name': importance_scores_dict}
-    """
-    print(f"\n{'='*60}")
-    print(f"STATISTICAL SIGNIFICANCE TEST")
-    print(f"{'='*60}")
-    
-    # Get all features
-    all_features = set()
-    for coef_dict in coefficients_dict.values():
-        all_features.update(coef_dict.keys())
-    
-    # Collect coefficients for each feature across datasets
-    feature_coefficients = {feature: [] for feature in all_features}
-    
-    for dataset_name, coef_dict in coefficients_dict.items():
-        for feature in all_features:
-            feature_coefficients[feature].append(coef_dict.get(feature, 0))
-    
-    # Perform t-test (one-sample t-test against 0)
-    significance_results = []
-    
-    for feature, coeffs in feature_coefficients.items():
-        coeffs = np.array(coeffs)
-        
-        if len(coeffs) > 1:
-            # T-test
-            t_stat, p_value = stats.ttest_1samp(coeffs, 0)
-            mean_coeff = np.mean(coeffs)
-            std_coeff = np.std(coeffs)
-            
-            significance_results.append({
-                'feature': feature,
-                'mean_importance': mean_coeff,
-                'std_importance': std_coeff,
-                't_statistic': t_stat,
-                'p_value': p_value,
-                'significant': p_value < threshold_pvalue
-            })
-    
-    sig_df = pd.DataFrame(significance_results).sort_values('mean_importance', ascending=False)
-    
-    print(f"\nStatistically Significant Features (p < {threshold_pvalue}):")
-    significant_features = sig_df[sig_df['significant']]
-    print(significant_features)
-    
-    print(f"\nTotal features tested: {len(sig_df)}")
-    print(f"Statistically significant features: {len(significant_features)}")
-    
-    return significant_features['feature'].tolist(), sig_df
 
-def build_default_model_pipeline(data, feature_list, target_variable, 
-                                  use_feature_importance=True,
-                                  use_univariate=True,
-                                  use_mutual_info=True,
-                                  check_pca_flag=True,
-                                  top_k_features=20):
-    """
-    Main pipeline to build 0/1 default model using XGBoost
-    
-    Parameters:
-    -----------
-    data: pd.DataFrame - input data
-    feature_list: list - list of feature column names
-    target_variable: str - name of target column
-    """
-    print(f"\n{'='*60}")
-    print(f"BUILDING 0/1 DEFAULT MODEL WITH XGBOOST")
-    print(f"{'='*60}")
-    
-    # Prepare data
-    X = data[feature_list].values
-    y = data[target_variable].values
-    
-    print(f"\nDataset shape: {X.shape}")
-    print(f"Target distribution:\n{pd.Series(y).value_counts()}")
-    print(f"Default rate: {y.mean()*100:.2f}%")
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    
-    results = {}
-    
-    # 1. Feature Importance Selection
-    selected_features_fi = None
-    if use_feature_importance:
-        selected_features_fi, importance_df = feature_importance_selection(
-            X_train, y_train, feature_list, top_k=top_k_features
-        )
-        results['feature_importance'] = importance_df
-    
-    # 2. Univariate Feature Selection
-    selected_features_uv = None
-    if use_univariate:
-        selected_features_uv, univariate_df = univariate_feature_selection(
-            X_train, y_train, feature_list, top_k=top_k_features
-        )
-        results['univariate_selection'] = univariate_df
-    
-    # 3. Mutual Information Selection
-    selected_features_mi = None
-    if use_mutual_info:
-        selected_features_mi, mi_df = mutual_information_selection(
-            X_train, y_train, feature_list, top_k=top_k_features
-        )
-        results['mutual_info'] = mi_df
-    
-    # Combine selected features
-    final_features = set()
-    if selected_features_fi:
-        final_features.update(selected_features_fi)
-    if selected_features_uv:
-        final_features.update(selected_features_uv)
-    if selected_features_mi:
-        final_features.update(selected_features_mi)
-    
-    final_features = list(final_features)
-    print(f"\n{'='*60}")
-    print(f"Combined {len(final_features)} unique features from all selection methods")
-    print(f"{'='*60}")
-    
-    # Get indices of selected features
-    feature_indices = [feature_list.index(f) for f in final_features]
-    X_train_selected = X_train[:, feature_indices]
-    X_test_selected = X_test[:, feature_indices]
-    
-    # 4. Check PCA feasibility
-    pca_feasible = False
-    pca_transformer = None
-    scaler = None
-    
-    if check_pca_flag:
-        pca_feasible, n_components, gini_pca, pca_transformer, scaler = check_pca_feasibility(
-            X_train_selected, y_train
-        )
-        results['pca_feasible'] = pca_feasible
-        if pca_feasible:
-            results['pca_gini'] = gini_pca
-    
-    # 5. Train final model with selected features
-    print(f"\n{'='*60}")
-    print(f"TRAINING FINAL XGBOOST MODEL")
-    print(f"{'='*60}")
-    
-    model, y_pred_train, y_pred_test = train_xgboost_model(
-        X_train_selected, y_train, X_test_selected, y_test
-    )
-    
-    # Evaluate
-    train_metrics = evaluate_model(y_train, y_pred_train, "Training Set")
-    test_metrics = evaluate_model(y_test, y_pred_test, "Test Set")
-    
-    results['train_metrics'] = train_metrics
-    results['test_metrics'] = test_metrics
-    results['model'] = model
-    results['selected_features'] = final_features
-    results['scaler'] = scaler
-    results['pca_transformer'] = pca_transformer
-    
-    return results
-
-# Example usage function
-def example_usage():
-    """
-    Example of how to use the pipeline
-    """
-    # Generate synthetic data
-    np.random.seed(42)
-    n_samples = 10000
-    n_features = 50
-    
-    # Create synthetic dataset
-    X_synthetic = np.random.randn(n_samples, n_features)
-    
-    # Create target with some signal
-    signal_features = [0, 5, 10, 15, 20]
-    y_prob = 1 / (1 + np.exp(-(X_synthetic[:, signal_features].sum(axis=1) * 0.3)))
-    y_synthetic = (y_prob > 0.5).astype(int)
-    
-    feature_names = [f'feature_{i}' for i in range(n_features)]
-    
-    df = pd.DataFrame(X_synthetic, columns=feature_names)
-    df['default'] = y_synthetic
-    
-    # Run pipeline
-    results = build_default_model_pipeline(
-        data=df,
-        feature_list=feature_names,
-        target_variable='default',
-        use_feature_importance=True,
-        use_univariate=True,
-        use_mutual_info=True,
-        check_pca_flag=True,
-        top_k_features=20
-    )
-    
-    # Test on multiple datasets (create variations)
-    datasets = {
-        'Original': (df[feature_names].values, df['default'].values),
-        'Noisy': (df[feature_names].values + np.random.randn(n_samples, n_features) * 0.1, 
-                  df['default'].values)
-    }
-    
-    # Get feature importance as coefficients
-    model = results['model']
-    importance_scores = model.get_score(importance_type='gain')
-    
-    coefficients_dict = {
-        'Dataset1': importance_scores,
-        'Dataset2': importance_scores  # In practice, train on different datasets
-    }
-    
-    # Test statistical significance
-    significant_features, sig_df = perform_statistical_significance_test(coefficients_dict)
-    
-    print(f"\n{'='*60}")
-    print(f"PIPELINE COMPLETED")
-    print(f"{'='*60}")
-    print(f"\nFinal Gini Score (Test): {results['test_metrics']['gini']:.4f}")
-    print(f"Number of selected features: {len(results['selected_features'])}")
-    print(f"Number of statistically significant features: {len(significant_features)}")
-    
-    return results
-
-if __name__ == "__main__":
-    example_usage()
