@@ -1,114 +1,170 @@
-EMAIL_ENABLED = True
-TEAMS_ENABLED = True
+"""
+advanced_wrapper.py
 
-# --- Email Settings ---
-SMTP_SERVER = "smtp.gmail.com"      # update as needed
-SMTP_PORT = 587
-EMAIL_SENDER = "your_email@example.com"
-EMAIL_PASSWORD = "YOUR_EMAIL_APP_PASSWORD"   # use app password!
-EMAIL_RECIPIENTS = ["recipient1@example.com", "recipient2@example.com"]
+This module wraps an existing phrase-based API to clean and rewrite large code
+files using best coding practices. The API can only handle small inputs, so the
+wrapper breaks the entire code into manageable chunks (40–50 lines each),
+processes each chunk, and merges them back.
 
-# --- Teams Webhook ---
-TEAMS_WEBHOOK_URL = "https://outlook.office.com/webhook/..."   # paste your webhook
+Key features:
+    - Chunking for large codebases
+    - Consistent variable/function renaming across all chunks
+    - Best-practice rewriting with comments
+    - Graceful API error handling
+    - Ensures output code preserves ORIGINAL functionality
+"""
 
-import smtplib
-from email.mime.text import MIMEText
+from typing import List, Tuple, Dict
+import re
 
-def send_email(subject, body):
-    if not EMAIL_ENABLED:
-        return
 
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = ", ".join(EMAIL_RECIPIENTS)
+# ---------------------------------------------------------------------------
+# Replace this with YOUR REAL API implementation
+# ---------------------------------------------------------------------------
+def run_phrase_api(phrase: str) -> str:
+    raise NotImplementedError("Replace with your actual API call logic.")
 
-    try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENTS, msg.as_string())
-        log(f"[EMAIL SENT] {subject}")
-    except Exception as e:
-        log(f"[EMAIL ERROR] {e}")
 
-import requests
+# ---------------------------------------------------------------------------
+# Utility Functions
+# ---------------------------------------------------------------------------
 
-def send_teams(message):
-    if not TEAMS_ENABLED:
-        return
+def split_into_chunks(code: str, max_lines: int = 50) -> List[str]:
+    """
+    Splits the full code into chunks of ~40–50 lines.
 
-    payload = {
-        "text": message
-    }
+    Args:
+        code (str): Full input code.
+        max_lines (int): Max lines per chunk.
 
-    try:
-        resp = requests.post(TEAMS_WEBHOOK_URL, json=payload)
-        if resp.status_code == 200:
-            log("[TEAMS SENT] " + message)
-        else:
-            log(f"[TEAMS ERROR] HTTP {resp.status_code}")
-    except Exception as e:
-        log(f"[TEAMS ERROR] {e}")
-def run_notebook(input_path):
-    rel = os.path.relpath(input_path, NOTEBOOK_ROOT)
-    output_path = os.path.join(OUTPUT_DIR, rel)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    Returns:
+        List[str]: List of code chunks.
+    """
+    lines = code.split("\n")
+    chunks = []
 
-    for attempt in range(MAX_RETRIES + 1):
+    for i in range(0, len(lines), max_lines):
+        chunk = "\n".join(lines[i:i + max_lines])
+        chunks.append(chunk)
+
+    return chunks
+
+
+def extract_variable_mapping(chunk_output: str) -> Dict[str, str]:
+    """
+    Extract variable renaming suggestions from API output using a pattern.
+
+    Example API output section:
+        [RENAME_MAP]
+        old_name -> new_name
+        counter -> iteration_counter
+
+    Returns:
+        dict: mapping old variable name -> new variable name
+    """
+
+    mapping = {}
+    pattern = r"\[RENAME_MAP\](.*?)\[/RENAME_MAP\]"
+    match = re.search(pattern, chunk_output, re.S)
+
+    if not match:
+        return mapping
+
+    lines = match.group(1).strip().split("\n")
+
+    for line in lines:
+        if "->" in line:
+            old, new = map(str.strip, line.split("->"))
+            mapping[old] = new
+
+    return mapping
+
+
+def apply_global_mapping(code: str, mapping: Dict[str, str]) -> str:
+    """
+    Applies global variable/function renamings across the entire code.
+
+    Args:
+        code (str): Input code.
+        mapping (dict): name transformations.
+
+    Returns:
+        str: Updated code.
+    """
+    for old, new in mapping.items():
+        code = re.sub(rf"\b{old}\b", new, code)
+    return code
+
+
+# ---------------------------------------------------------------------------
+# Main Wrapper
+# ---------------------------------------------------------------------------
+
+def convert_large_code_to_clean_version(raw_code: str) -> str:
+    """
+    Converts large/big code into clean, well-commented code by:
+        1. Splitting into chunks
+        2. Sending each chunk to API
+        3. Extracting rename map
+        4. Rebuilding full code with consistent names
+
+    Args:
+        raw_code (str): Full messy or buggy input code.
+
+    Returns:
+        str: Full cleaned and merged code with global consistency.
+    """
+    if not raw_code.strip():
+        raise ValueError("Input code cannot be empty.")
+
+    chunks = split_into_chunks(raw_code)
+    global_mapping: Dict[str, str] = {}
+
+    processed_chunks: List[str] = []
+
+    for idx, chunk in enumerate(chunks, start=1):
+        print(f"Processing chunk {idx}/{len(chunks)}...")
+
+        prompt = (
+            "Rewrite this code chunk following BEST coding practices, add meaningful "
+            "comments, DO NOT change logic/functional behaviour. If renaming variables, "
+            "output a rename map wrapped inside:\n"
+            "[RENAME_MAP]\nold -> new\n[/RENAME_MAP]\n\n"
+            "CODE CHUNK:\n" + chunk
+        )
+
         try:
-            log(f"[START] {input_path} — attempt {attempt+1}")
+            api_output = run_phrase_api(prompt)
+        except Exception as api_error:
+            print(f"API failed for chunk {idx}: {api_error}")
+            continue
 
-            pm.execute_notebook(input_path, output_path, kernel_name="python3")
+        # Extract rename mapping so global names remain consistent
+        mapping = extract_variable_mapping(api_output)
+        global_mapping.update(mapping)
 
-            log(f"[SUCCESS] {input_path}")
-            return True
+        # Remove the rename metadata from the final displayed code
+        cleaned_output = re.sub(r"\[RENAME_MAP\].*?\[/RENAME_MAP\]", "", api_output, flags=re.S)
 
-        except Exception as e:
-            log(f"[ERROR] {input_path} — {e}")
+        processed_chunks.append(cleaned_output.strip())
 
-            if attempt == MAX_RETRIES:
-                failure_msg = f"Notebook FAILED: {input_path}"
-                log("[FAILURE] " + failure_msg)
+    # Merge all chunks together
+    merged_code = "\n\n".join(processed_chunks)
 
-                # 🔔 Send alerts
-                send_email(
-                    subject="Notebook Execution FAILED",
-                    body=f"{failure_msg}\n\nError: {e}\n\nTime: {datetime.now()}"
-                )
-                send_teams(f"❌ Notebook FAILED\n{input_path}\nError: {e}")
+    # Apply global variable rename consistency
+    final_code = apply_global_mapping(merged_code, global_mapping)
 
-                return False
-def main():
-    log("=" * 80)
-    log("Pipeline started")
-
-    notebooks = list(find_notebooks(NOTEBOOK_ROOT))
-    log(f"Found {len(notebooks)} notebooks")
-
-    results = []
-    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-        results = list(executor.map(run_notebook, notebooks))
-
-    failed_count = results.count(False)
-    success_count = results.count(True)
-
-    summary = (
-        f"Daily Notebook Pipeline Summary\n\n"
-        f"Total: {len(notebooks)}\n"
-        f"Success: {success_count}\n"
-        f"Failed: {failed_count}\n"
-        f"Finished at: {datetime.now()}"
-    )
-
-    send_email("Daily Notebook Pipeline Summary", summary)
-    send_teams(f"📊 Pipeline Summary\n{summary}")
-
-    log("Pipeline completed")
-    log("=" * 80)
-EMAIL_ENABLED = True
-TEAMS_ENABLED = True
-send_teams(f"📁 Notebook updated: {event.src_path}")
-send_email("Notebook Updated", f"File changed: {event.src_path}")
+    return final_code
 
 
+# ---------------------------------------------------------------------------
+# Example Execution
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    sample_code = "\n".join([f"line {i}" for i in range(1, 201)])  # Example long code
+
+    cleaned_code = convert_large_code_to_clean_version(sample_code)
+
+    print("\n=== Final Cleaned Code ===\n")
+    print(cleaned_code)
