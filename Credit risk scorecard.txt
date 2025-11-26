@@ -1,1336 +1,909 @@
 """
-Automated Code Generation Wrapper
-=================================
-A comprehensive wrapper that handles large codebases by processing them in chunks
-through the generate_code(prompt, code) function which has a 50-line limit.
+Code Generation Wrapper
+=======================
+Wrapper around generate_code(prompt, code) function to handle large codebases
+by processing them in intelligent chunks.
+
+Your function: generate_code(prompt, code) -> returns generated/modified code
+Limitation: Can only process 50-80 lines at a time
+Solution: This wrapper chunks large code, processes each chunk, and reassembles
 """
 
 import re
-import time
-import hashlib
-from typing import List, Dict, Tuple, Optional, Callable
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
-from abc import ABC, abstractmethod
-import json
 
 
 # ============================================================================
-# MOCK FUNCTION - Replace with your actual generate_code implementation
+# YOUR FUNCTION - Replace this import with your actual function
 # ============================================================================
 
+# Option 1: Import your function
+# from your_module import generate_code
+
+# Option 2: Define it here (placeholder - replace with your actual implementation)
 def generate_code(prompt: str, code: str) -> str:
     """
-    Mock implementation of generate_code function.
-    Replace this with your actual AI code generation function.
+    YOUR ACTUAL FUNCTION - Replace this with your GPT-3.5 connected function
     
     Args:
-        prompt: Instructions for code generation/modification
-        code: Code snippet (max 50 lines)
+        prompt: Instructions for what to do
+        code: Code to process (max 50-80 lines)
     
     Returns:
         Generated or modified code
     """
-    # This is a placeholder - replace with actual implementation
-    lines = code.split('\n') if code else []
+    # This is a PLACEHOLDER - your actual function goes here
+    # Example of what your function might look like:
+    #
+    # import openai
+    # response = openai.ChatCompletion.create(
+    #     model="gpt-3.5-turbo",
+    #     messages=[
+    #         {"role": "system", "content": "You are a code generator."},
+    #         {"role": "user", "content": f"{prompt}\n\nCode:\n{code}"}
+    #     ]
+    # )
+    # return response.choices[0].message.content
     
-    # Simulate processing based on prompt keywords
-    if "comment" in prompt.lower():
-        commented_lines = []
-        for line in lines:
-            if line.strip() and not line.strip().startswith('#'):
-                commented_lines.append(f"# TODO: Add comment\n{line}")
-            else:
-                commented_lines.append(line)
-        return '\n'.join(commented_lines)
-    
-    elif "enhance" in prompt.lower() or "improve" in prompt.lower():
-        return f"# Enhanced version\n{code}"
-    
-    elif "create" in prompt.lower() or "generate" in prompt.lower():
-        return f"# Generated code based on: {prompt[:50]}...\n{code if code else '# New code here'}"
-    
-    else:
-        return code
-    
-    # In real implementation, this would call your AI model
-    # return actual_generate_code(prompt, code)
+    raise NotImplementedError("Replace this with your actual generate_code function")
 
 
 # ============================================================================
-# CONFIGURATION AND ENUMS
+# CONFIGURATION
 # ============================================================================
-
-class ProcessingMode(Enum):
-    """Different modes for processing code"""
-    CREATE = "create"           # Create new code from scratch
-    MODIFY = "modify"           # Modify existing code
-    ENHANCE = "enhance"         # Enhance/improve code
-    COMMENT = "comment"         # Add comments to code
-    REFACTOR = "refactor"       # Refactor code structure
-    DEBUG = "debug"             # Debug and fix issues
-    DOCUMENT = "document"       # Add documentation
-    TEST = "test"               # Generate tests
-
 
 @dataclass
 class ChunkConfig:
-    """Configuration for code chunking"""
-    max_lines_per_chunk: int = 45  # Keep below 50 for safety margin
-    overlap_lines: int = 5          # Overlap for context continuity
-    preserve_functions: bool = True  # Try to keep functions intact
-    preserve_classes: bool = True    # Try to keep classes intact
-    min_chunk_lines: int = 10       # Minimum lines per chunk
+    """Configuration for how code is chunked"""
+    max_lines: int = 50          # Max lines per chunk (keep under your limit)
+    overlap_lines: int = 3        # Lines of overlap between chunks for context
+    preserve_blocks: bool = True  # Try to keep functions/classes together
 
 
 @dataclass
-class ProcessingConfig:
-    """Configuration for processing"""
-    retry_attempts: int = 3
-    retry_delay: float = 1.0
-    validate_output: bool = True
-    preserve_structure: bool = True
-    verbose: bool = True
-
-
-@dataclass 
 class CodeChunk:
     """Represents a chunk of code"""
-    id: int
+    index: int
     content: str
     start_line: int
     end_line: int
-    chunk_type: str = "generic"  # function, class, module, generic
-    context: str = ""            # Additional context for this chunk
-    dependencies: List[int] = field(default_factory=list)
-    metadata: Dict = field(default_factory=dict)
+    chunk_type: str = "code"  # code, function, class
     
     @property
     def line_count(self) -> int:
-        return len(self.content.split('\n'))
-
-
-@dataclass
-class ProcessingResult:
-    """Result of processing a chunk or full code"""
-    success: bool
-    original_code: str
-    processed_code: str
-    chunks_processed: int
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    metadata: Dict = field(default_factory=dict)
+        return len(self.content.strip().split('\n'))
 
 
 # ============================================================================
-# CODE ANALYZER
-# ============================================================================
-
-class CodeAnalyzer:
-    """Analyzes code structure for intelligent chunking"""
-    
-    def __init__(self):
-        self.patterns = {
-            'function_def': re.compile(r'^(\s*)def\s+(\w+)\s*\('),
-            'class_def': re.compile(r'^(\s*)class\s+(\w+)'),
-            'import': re.compile(r'^(?:from\s+\S+\s+)?import\s+'),
-            'decorator': re.compile(r'^(\s*)@\w+'),
-            'docstring_start': re.compile(r'^\s*["\']'),
-            'comment': re.compile(r'^\s*#'),
-            'blank': re.compile(r'^\s*$'),
-        }
-    
-    def analyze(self, code: str) -> Dict:
-        """Analyze code and return structure information"""
-        lines = code.split('\n')
-        
-        analysis = {
-            'total_lines': len(lines),
-            'functions': [],
-            'classes': [],
-            'imports': {'start': -1, 'end': -1, 'lines': []},
-            'structure_map': [],  # (start, end, type, name, indent)
-        }
-        
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            
-            # Check for imports
-            if self.patterns['import'].match(line):
-                if analysis['imports']['start'] == -1:
-                    analysis['imports']['start'] = i
-                analysis['imports']['end'] = i
-                analysis['imports']['lines'].append(i)
-            
-            # Check for class definition
-            class_match = self.patterns['class_def'].match(line)
-            if class_match:
-                indent = len(class_match.group(1))
-                class_name = class_match.group(2)
-                class_end = self._find_block_end(lines, i, indent)
-                analysis['classes'].append({
-                    'name': class_name,
-                    'start': i,
-                    'end': class_end,
-                    'indent': indent
-                })
-                analysis['structure_map'].append((i, class_end, 'class', class_name, indent))
-            
-            # Check for function definition
-            func_match = self.patterns['function_def'].match(line)
-            if func_match:
-                indent = len(func_match.group(1))
-                func_name = func_match.group(2)
-                func_end = self._find_block_end(lines, i, indent)
-                analysis['functions'].append({
-                    'name': func_name,
-                    'start': i,
-                    'end': func_end,
-                    'indent': indent
-                })
-                # Only add to structure map if not inside a class
-                if not any(c['start'] < i < c['end'] for c in analysis['classes']):
-                    analysis['structure_map'].append((i, func_end, 'function', func_name, indent))
-            
-            i += 1
-        
-        return analysis
-    
-    def _find_block_end(self, lines: List[str], start: int, base_indent: int) -> int:
-        """Find the end of a code block based on indentation"""
-        i = start + 1
-        while i < len(lines):
-            line = lines[i]
-            
-            # Skip blank lines and comments
-            if self.patterns['blank'].match(line) or self.patterns['comment'].match(line):
-                i += 1
-                continue
-            
-            # Check indentation
-            current_indent = len(line) - len(line.lstrip())
-            if current_indent <= base_indent and line.strip():
-                return i - 1
-            
-            i += 1
-        
-        return len(lines) - 1
-    
-    def get_context_for_chunk(self, code: str, chunk_start: int, chunk_end: int) -> str:
-        """Get context information for a specific chunk"""
-        analysis = self.analyze(code)
-        lines = code.split('\n')
-        context_parts = []
-        
-        # Add import context
-        if analysis['imports']['lines']:
-            import_lines = [lines[i] for i in analysis['imports']['lines'][:5]]
-            context_parts.append("Imports: " + '; '.join(import_lines))
-        
-        # Add class/function context
-        for item in analysis['structure_map']:
-            start, end, item_type, name, indent = item
-            if start <= chunk_start <= end or start <= chunk_end <= end:
-                context_parts.append(f"Inside {item_type}: {name}")
-        
-        return ' | '.join(context_parts) if context_parts else "Module level code"
-
-
-# ============================================================================
-# CODE CHUNKER
+# CODE CHUNKER - Splits large code into processable pieces
 # ============================================================================
 
 class CodeChunker:
-    """Intelligently chunks code while preserving structure"""
+    """Splits code into chunks that fit within the line limit"""
     
     def __init__(self, config: ChunkConfig = None):
         self.config = config or ChunkConfig()
-        self.analyzer = CodeAnalyzer()
     
-    def chunk_code(self, code: str) -> List[CodeChunk]:
-        """Split code into processable chunks"""
+    def chunk(self, code: str) -> List[CodeChunk]:
+        """
+        Split code into chunks.
+        
+        Args:
+            code: Full source code
+            
+        Returns:
+            List of CodeChunk objects
+        """
         lines = code.split('\n')
         total_lines = len(lines)
         
-        # If code is small enough, return as single chunk
-        if total_lines <= self.config.max_lines_per_chunk:
+        # If small enough, return as single chunk
+        if total_lines <= self.config.max_lines:
             return [CodeChunk(
-                id=0,
+                index=0,
                 content=code,
                 start_line=0,
                 end_line=total_lines - 1,
                 chunk_type="complete"
             )]
         
-        # Analyze code structure
-        analysis = self.analyzer.analyze(code)
-        
-        # Create chunks based on structure
-        chunks = []
-        
-        if self.config.preserve_classes or self.config.preserve_functions:
-            chunks = self._structure_aware_chunking(lines, analysis)
+        # Split into chunks
+        if self.config.preserve_blocks:
+            return self._smart_chunk(lines)
         else:
-            chunks = self._simple_chunking(lines)
+            return self._simple_chunk(lines)
+    
+    def _simple_chunk(self, lines: List[str]) -> List[CodeChunk]:
+        """Simple line-based chunking"""
+        chunks = []
+        step = self.config.max_lines - self.config.overlap_lines
         
-        # Add context to each chunk
-        for chunk in chunks:
-            chunk.context = self.analyzer.get_context_for_chunk(
-                code, chunk.start_line, chunk.end_line
-            )
+        for i, start in enumerate(range(0, len(lines), step)):
+            end = min(start + self.config.max_lines, len(lines))
+            content = '\n'.join(lines[start:end])
+            
+            chunks.append(CodeChunk(
+                index=i,
+                content=content,
+                start_line=start,
+                end_line=end - 1
+            ))
+            
+            if end >= len(lines):
+                break
         
         return chunks
     
-    def _structure_aware_chunking(self, lines: List[str], analysis: Dict) -> List[CodeChunk]:
-        """Create chunks while trying to preserve code structure"""
+    def _smart_chunk(self, lines: List[str]) -> List[CodeChunk]:
+        """Chunk while trying to preserve function/class boundaries"""
         chunks = []
-        chunk_id = 0
-        current_pos = 0
+        current_start = 0
+        chunk_index = 0
         
-        # Sort structure map by start position
-        structure_map = sorted(analysis['structure_map'], key=lambda x: x[0])
-        
-        while current_pos < len(lines):
-            chunk_end = min(current_pos + self.config.max_lines_per_chunk - 1, len(lines) - 1)
-            chunk_type = "generic"
+        while current_start < len(lines):
+            # Calculate tentative end
+            tentative_end = min(current_start + self.config.max_lines, len(lines))
             
-            # Check if we're at a structure boundary
-            for start, end, stype, name, indent in structure_map:
-                if current_pos <= start < chunk_end:
-                    # A structure starts in this chunk
-                    if end - start + 1 <= self.config.max_lines_per_chunk:
-                        # Structure fits in one chunk
-                        chunk_end = end
-                        chunk_type = stype
-                    else:
-                        # Structure is too large, will be split
-                        if start > current_pos:
-                            # End chunk before structure
-                            chunk_end = start - 1
-                        else:
-                            # Start of large structure
-                            chunk_end = min(
-                                current_pos + self.config.max_lines_per_chunk - 1,
-                                end
-                            )
-                            chunk_type = f"{stype}_part"
-                    break
+            # Try to find a good break point
+            actual_end = self._find_break_point(lines, current_start, tentative_end)
             
-            # Create the chunk
-            chunk_content = '\n'.join(lines[current_pos:chunk_end + 1])
+            content = '\n'.join(lines[current_start:actual_end])
+            chunk_type = self._determine_chunk_type(content)
+            
             chunks.append(CodeChunk(
-                id=chunk_id,
-                content=chunk_content,
-                start_line=current_pos,
-                end_line=chunk_end,
+                index=chunk_index,
+                content=content,
+                start_line=current_start,
+                end_line=actual_end - 1,
                 chunk_type=chunk_type
             ))
             
-            # Move to next position with overlap
-            current_pos = chunk_end + 1 - self.config.overlap_lines
-            if current_pos <= chunks[-1].start_line:
-                current_pos = chunk_end + 1
+            # Move to next chunk with overlap
+            current_start = actual_end - self.config.overlap_lines
+            if current_start <= chunks[-1].start_line:
+                current_start = actual_end
             
-            chunk_id += 1
+            chunk_index += 1
         
         return chunks
     
-    def _simple_chunking(self, lines: List[str]) -> List[CodeChunk]:
-        """Simple line-based chunking"""
-        chunks = []
-        chunk_id = 0
-        
-        for i in range(0, len(lines), self.config.max_lines_per_chunk - self.config.overlap_lines):
-            end = min(i + self.config.max_lines_per_chunk - 1, len(lines) - 1)
-            chunk_content = '\n'.join(lines[i:end + 1])
+    def _find_break_point(self, lines: List[str], start: int, end: int) -> int:
+        """Find a good point to break the chunk (between functions/classes)"""
+        # Look backwards from end to find a blank line or function/class boundary
+        for i in range(end - 1, max(start + 10, end - 15), -1):
+            if i >= len(lines):
+                continue
+            line = lines[i]
             
-            chunks.append(CodeChunk(
-                id=chunk_id,
-                content=chunk_content,
-                start_line=i,
-                end_line=end,
-                chunk_type="generic"
-            ))
-            chunk_id += 1
+            # Good break points: blank lines, or lines starting new definitions
+            if not line.strip():  # Blank line
+                return i + 1
+            if line and not line[0].isspace():  # Top-level definition
+                if line.startswith('def ') or line.startswith('class ') or line.startswith('@'):
+                    return i
         
-        return chunks
+        return end
     
-    def reassemble_chunks(self, chunks: List[CodeChunk], overlap_handling: str = "smart") -> str:
-        """Reassemble processed chunks back into complete code"""
-        if len(chunks) == 1:
-            return chunks[0].content
-        
-        # Sort chunks by start line
-        sorted_chunks = sorted(chunks, key=lambda x: x.start_line)
-        
-        if overlap_handling == "simple":
-            return self._simple_reassemble(sorted_chunks)
+    def _determine_chunk_type(self, content: str) -> str:
+        """Determine what type of code is in this chunk"""
+        if 'class ' in content.split('\n')[0]:
+            return "class"
+        elif 'def ' in content.split('\n')[0]:
+            return "function"
         else:
-            return self._smart_reassemble(sorted_chunks)
+            return "code"
     
-    def _simple_reassemble(self, chunks: List[CodeChunk]) -> str:
-        """Simple reassembly - just concatenate"""
-        result_lines = []
-        last_end = -1
+    def reassemble(self, chunks: List[CodeChunk]) -> str:
+        """
+        Reassemble processed chunks back into complete code.
         
-        for chunk in chunks:
-            lines = chunk.content.split('\n')
+        Args:
+            chunks: List of processed CodeChunk objects
             
-            if chunk.start_line <= last_end:
-                # Overlap - skip overlapping lines
-                skip = last_end - chunk.start_line + 1
-                lines = lines[skip:]
-            
-            result_lines.extend(lines)
-            last_end = chunk.end_line
-        
-        return '\n'.join(result_lines)
-    
-    def _smart_reassemble(self, chunks: List[CodeChunk]) -> str:
-        """Smart reassembly - handle overlaps intelligently"""
+        Returns:
+            Complete reassembled code
+        """
         if not chunks:
             return ""
         
-        result_lines = chunks[0].content.split('\n')
-        last_end = chunks[0].end_line
+        if len(chunks) == 1:
+            return chunks[0].content
         
-        for i in range(1, len(chunks)):
-            chunk = chunks[i]
+        # Sort by start line
+        sorted_chunks = sorted(chunks, key=lambda c: c.start_line)
+        
+        result_lines = []
+        last_end_line = -1
+        
+        for chunk in sorted_chunks:
             chunk_lines = chunk.content.split('\n')
             
-            if chunk.start_line <= last_end:
-                # Calculate overlap
-                overlap = last_end - chunk.start_line + 1
-                
-                # Compare overlapping sections and use the processed version
-                # This assumes the later chunk has more complete processing
+            # Handle overlap - skip lines we already have
+            if chunk.start_line <= last_end_line:
+                overlap = last_end_line - chunk.start_line + 1
                 chunk_lines = chunk_lines[overlap:]
             
             result_lines.extend(chunk_lines)
-            last_end = chunk.end_line
+            last_end_line = chunk.end_line
         
         return '\n'.join(result_lines)
-
-
-# ============================================================================
-# PROMPT BUILDER
-# ============================================================================
-
-class PromptBuilder:
-    """Builds effective prompts for code generation"""
-    
-    def __init__(self):
-        self.templates = {
-            ProcessingMode.CREATE: """
-Create code for the following requirement:
-{instruction}
-
-Context: {context}
-Additional info: This is chunk {chunk_id} of {total_chunks}.
-{dependencies}
-""",
-            ProcessingMode.MODIFY: """
-Modify the following code according to these instructions:
-{instruction}
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-{dependencies}
-
-Apply modifications while maintaining:
-- Code structure and indentation
-- Variable names consistency
-- Import statements if present
-""",
-            ProcessingMode.ENHANCE: """
-Enhance and improve the following code:
-{instruction}
-
-Focus on:
-- Code efficiency
-- Best practices
-- Readability
-- Error handling
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-""",
-            ProcessingMode.COMMENT: """
-Add comprehensive comments to the following code:
-{instruction}
-
-Include:
-- Function/method docstrings
-- Inline comments for complex logic
-- Section headers where appropriate
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-""",
-            ProcessingMode.REFACTOR: """
-Refactor the following code:
-{instruction}
-
-Focus on:
-- Clean code principles
-- SOLID principles where applicable
-- Reducing complexity
-- Improving maintainability
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-""",
-            ProcessingMode.DEBUG: """
-Debug and fix issues in the following code:
-{instruction}
-
-Look for:
-- Syntax errors
-- Logic errors
-- Edge cases
-- Potential runtime errors
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-""",
-            ProcessingMode.DOCUMENT: """
-Add comprehensive documentation to the following code:
-{instruction}
-
-Include:
-- Module docstring
-- Class docstrings
-- Method/function docstrings with Args, Returns, Raises
-- Type hints
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-""",
-            ProcessingMode.TEST: """
-Generate unit tests for the following code:
-{instruction}
-
-Include:
-- Test cases for normal operation
-- Edge cases
-- Error cases
-- Use appropriate testing framework (pytest/unittest)
-
-Context: {context}
-Chunk {chunk_id} of {total_chunks}
-"""
-        }
-    
-    def build_prompt(
-        self,
-        mode: ProcessingMode,
-        instruction: str,
-        chunk: CodeChunk,
-        total_chunks: int,
-        dependencies: List[str] = None
-    ) -> str:
-        """Build a prompt for processing a chunk"""
-        template = self.templates.get(mode, self.templates[ProcessingMode.MODIFY])
-        
-        dependencies_str = ""
-        if dependencies:
-            dependencies_str = f"\nRelated code from other chunks:\n{chr(10).join(dependencies)}"
-        
-        return template.format(
-            instruction=instruction,
-            context=chunk.context,
-            chunk_id=chunk.id + 1,
-            total_chunks=total_chunks,
-            dependencies=dependencies_str
-        ).strip()
-
-
-# ============================================================================
-# CODE VALIDATOR
-# ============================================================================
-
-class CodeValidator:
-    """Validates processed code"""
-    
-    def __init__(self):
-        self.checks = [
-            self._check_syntax,
-            self._check_balanced_brackets,
-            self._check_indentation,
-        ]
-    
-    def validate(self, code: str) -> Tuple[bool, List[str]]:
-        """Validate code and return (is_valid, list_of_issues)"""
-        issues = []
-        
-        for check in self.checks:
-            check_issues = check(code)
-            issues.extend(check_issues)
-        
-        return len(issues) == 0, issues
-    
-    def _check_syntax(self, code: str) -> List[str]:
-        """Check for basic syntax issues"""
-        issues = []
-        try:
-            compile(code, '<string>', 'exec')
-        except SyntaxError as e:
-            issues.append(f"Syntax error at line {e.lineno}: {e.msg}")
-        return issues
-    
-    def _check_balanced_brackets(self, code: str) -> List[str]:
-        """Check for balanced brackets"""
-        issues = []
-        stack = []
-        pairs = {')': '(', ']': '[', '}': '{'}
-        
-        for i, char in enumerate(code):
-            if char in '([{':
-                stack.append((char, i))
-            elif char in ')]}':
-                if not stack or stack[-1][0] != pairs[char]:
-                    issues.append(f"Unbalanced bracket '{char}' at position {i}")
-                else:
-                    stack.pop()
-        
-        for bracket, pos in stack:
-            issues.append(f"Unclosed bracket '{bracket}' at position {pos}")
-        
-        return issues
-    
-    def _check_indentation(self, code: str) -> List[str]:
-        """Check for indentation consistency"""
-        issues = []
-        lines = code.split('\n')
-        
-        for i, line in enumerate(lines):
-            if line and not line.startswith(' ') and not line.startswith('\t'):
-                continue
-            
-            stripped = line.lstrip()
-            if stripped:
-                indent = len(line) - len(stripped)
-                if indent % 4 != 0 and '\t' not in line[:indent]:
-                    issues.append(f"Inconsistent indentation at line {i + 1}")
-        
-        return issues[:5]  # Return max 5 issues
 
 
 # ============================================================================
 # MAIN WRAPPER CLASS
 # ============================================================================
 
-class CodeGenerationWrapper:
+class CodeWrapper:
     """
-    Main wrapper class for automated code generation/modification.
-    Handles large codebases by processing them in chunks.
+    Main wrapper for generate_code() function.
+    Handles large codebases by processing in chunks.
     """
     
     def __init__(
         self,
-        chunk_config: ChunkConfig = None,
-        processing_config: ProcessingConfig = None,
-        generator_func: Callable = None
+        generator_func=None,
+        max_lines: int = 50,
+        overlap: int = 3,
+        verbose: bool = True
     ):
         """
         Initialize the wrapper.
         
         Args:
-            chunk_config: Configuration for chunking
-            processing_config: Configuration for processing
-            generator_func: Custom generate_code function (optional)
+            generator_func: Your generate_code function (uses default if None)
+            max_lines: Maximum lines per chunk (default 50)
+            overlap: Lines of overlap between chunks (default 3)
+            verbose: Print progress messages (default True)
         """
-        self.chunk_config = chunk_config or ChunkConfig()
-        self.processing_config = processing_config or ProcessingConfig()
-        self.generator_func = generator_func or generate_code
-        
-        self.chunker = CodeChunker(self.chunk_config)
-        self.prompt_builder = PromptBuilder()
-        self.validator = CodeValidator()
-        self.analyzer = CodeAnalyzer()
-        
-        self._processing_history = []
+        self.generate = generator_func or generate_code
+        self.config = ChunkConfig(max_lines=max_lines, overlap_lines=overlap)
+        self.chunker = CodeChunker(self.config)
+        self.verbose = verbose
     
-    def process(
-        self,
-        instruction: str,
-        code: str = "",
-        mode: ProcessingMode = ProcessingMode.MODIFY
-    ) -> ProcessingResult:
+    def _log(self, msg: str):
+        """Print message if verbose mode is on"""
+        if self.verbose:
+            print(f"[CodeWrapper] {msg}")
+    
+    # ========================================================================
+    # MAIN PROCESSING METHOD
+    # ========================================================================
+    
+    def process(self, prompt: str, code: str = "") -> str:
         """
-        Main processing method.
+        Process code with given prompt. Handles any size codebase.
         
         Args:
-            instruction: What to do with the code
-            code: Existing code (empty for creation)
-            mode: Processing mode
-        
+            prompt: Instructions for what to do with the code
+            code: Source code to process (can be empty for creation)
+            
         Returns:
-            ProcessingResult with processed code and metadata
+            Processed/generated code
         """
-        self._log(f"Starting processing in {mode.value} mode")
-        self._log(f"Instruction: {instruction[:100]}...")
+        # Handle code creation (no input code)
+        if not code.strip():
+            return self._create_code(prompt)
         
-        # Handle creation mode
-        if mode == ProcessingMode.CREATE and not code:
-            return self._create_new_code(instruction)
-        
-        # Analyze and chunk the code
-        chunks = self.chunker.chunk_code(code)
+        # Chunk the code
+        chunks = self.chunker.chunk(code)
         self._log(f"Split code into {len(chunks)} chunks")
         
         # Process each chunk
         processed_chunks = []
-        errors = []
-        warnings = []
         
-        for chunk in chunks:
-            self._log(f"Processing chunk {chunk.id + 1}/{len(chunks)}")
+        for i, chunk in enumerate(chunks):
+            self._log(f"Processing chunk {i + 1}/{len(chunks)} ({chunk.line_count} lines)")
             
-            result = self._process_chunk(
+            # Build context-aware prompt
+            chunk_prompt = self._build_chunk_prompt(
+                prompt=prompt,
                 chunk=chunk,
-                instruction=instruction,
-                mode=mode,
+                chunk_num=i + 1,
                 total_chunks=len(chunks),
-                processed_chunks=processed_chunks
+                prev_chunk=processed_chunks[-1] if processed_chunks else None
             )
             
-            if result['success']:
-                chunk.content = result['processed_code']
+            # Call your generate_code function
+            try:
+                processed_code = self.generate(chunk_prompt, chunk.content)
+                chunk.content = processed_code
                 processed_chunks.append(chunk)
-            else:
-                errors.extend(result['errors'])
-                # Keep original on failure
-                processed_chunks.append(chunk)
+            except Exception as e:
+                self._log(f"Error processing chunk {i + 1}: {e}")
+                processed_chunks.append(chunk)  # Keep original on error
         
         # Reassemble chunks
-        final_code = self.chunker.reassemble_chunks(processed_chunks)
-        
-        # Validate if configured
-        if self.processing_config.validate_output:
-            is_valid, validation_issues = self.validator.validate(final_code)
-            if not is_valid:
-                warnings.extend(validation_issues)
-                self._log(f"Validation warnings: {validation_issues}")
-        
-        result = ProcessingResult(
-            success=len(errors) == 0,
-            original_code=code,
-            processed_code=final_code,
-            chunks_processed=len(chunks),
-            errors=errors,
-            warnings=warnings,
-            metadata={
-                'mode': mode.value,
-                'instruction': instruction,
-                'chunk_count': len(chunks)
-            }
-        )
-        
-        self._processing_history.append(result)
+        result = self.chunker.reassemble(processed_chunks)
+        self._log(f"Reassembled into {len(result.split(chr(10)))} lines")
         
         return result
     
-    def _process_chunk(
+    def _build_chunk_prompt(
         self,
+        prompt: str,
         chunk: CodeChunk,
-        instruction: str,
-        mode: ProcessingMode,
+        chunk_num: int,
         total_chunks: int,
-        processed_chunks: List[CodeChunk]
-    ) -> Dict:
-        """Process a single chunk with retry logic"""
+        prev_chunk: Optional[CodeChunk] = None
+    ) -> str:
+        """Build a prompt with context for processing a chunk"""
         
-        # Get dependencies from already processed chunks
-        dependencies = []
-        for pc in processed_chunks[-2:]:  # Last 2 chunks for context
-            if pc.content:
-                # Extract function/class signatures for context
-                lines = pc.content.split('\n')[:10]
-                dependencies.append(f"# From chunk {pc.id}:\n" + '\n'.join(lines))
+        context_parts = [prompt]
         
-        # Build prompt
-        prompt = self.prompt_builder.build_prompt(
-            mode=mode,
-            instruction=instruction,
-            chunk=chunk,
-            total_chunks=total_chunks,
-            dependencies=dependencies
-        )
+        # Add chunk position info
+        if total_chunks > 1:
+            context_parts.append(
+                f"\n[This is part {chunk_num} of {total_chunks} of a larger codebase]"
+            )
         
-        # Process with retries
-        for attempt in range(self.processing_config.retry_attempts):
-            try:
-                processed_code = self.generator_func(prompt, chunk.content)
-                
-                # Basic validation
-                if processed_code and len(processed_code.strip()) > 0:
-                    return {
-                        'success': True,
-                        'processed_code': processed_code,
-                        'errors': []
-                    }
-                
-            except Exception as e:
-                self._log(f"Attempt {attempt + 1} failed: {str(e)}")
-                if attempt < self.processing_config.retry_attempts - 1:
-                    time.sleep(self.processing_config.retry_delay)
+        # Add context from previous chunk
+        if prev_chunk:
+            # Get last few lines of previous chunk for context
+            prev_lines = prev_chunk.content.split('\n')[-5:]
+            context_parts.append(
+                f"\n[Previous code ends with:]\n" + '\n'.join(prev_lines)
+            )
         
-        return {
-            'success': False,
-            'processed_code': chunk.content,
-            'errors': [f"Failed to process chunk {chunk.id} after {self.processing_config.retry_attempts} attempts"]
-        }
+        # Add instruction to maintain consistency
+        if total_chunks > 1:
+            context_parts.append(
+                "\n[Maintain consistency with the rest of the codebase. "
+                "Keep the same style, naming conventions, and structure.]"
+            )
+        
+        return '\n'.join(context_parts)
     
-    def _create_new_code(self, instruction: str) -> ProcessingResult:
-        """Create new code from scratch"""
-        self._log("Creating new code from instruction")
+    def _create_code(self, prompt: str) -> str:
+        """Create new code from scratch (potentially multi-chunk)"""
+        self._log("Creating new code from prompt")
         
-        # Parse instruction for size hints
-        estimated_chunks = self._estimate_chunks_needed(instruction)
-        
-        all_code = []
-        errors = []
-        
-        for i in range(estimated_chunks):
-            chunk_instruction = f"""
-Part {i + 1} of {estimated_chunks}:
-{instruction}
+        # First, generate the structure/outline
+        structure_prompt = f"""
+{prompt}
 
-{"Generate the initial structure, imports, and main components." if i == 0 else ""}
-{"Continue from the previous part. Focus on implementation details." if 0 < i < estimated_chunks - 1 else ""}
-{"Complete the implementation. Add any remaining functions and cleanup." if i == estimated_chunks - 1 else ""}
+First, create the basic structure with:
+- Imports
+- Class/function definitions (signatures)
+- Main logic outline
+
+Keep it under 50 lines. We'll expand each part next.
 """
-            
-            context = '\n'.join(all_code[-20:]) if all_code else ""
-            
-            try:
-                new_code = self.generator_func(chunk_instruction, context)
-                if new_code:
-                    all_code.append(new_code)
-            except Exception as e:
-                errors.append(f"Error creating chunk {i + 1}: {str(e)}")
         
-        final_code = '\n\n'.join(all_code)
+        structure = self.generate(structure_prompt, "")
         
-        return ProcessingResult(
-            success=len(errors) == 0,
-            original_code="",
-            processed_code=final_code,
-            chunks_processed=estimated_chunks,
-            errors=errors,
-            metadata={'mode': 'create', 'instruction': instruction}
-        )
-    
-    def _estimate_chunks_needed(self, instruction: str) -> int:
-        """Estimate how many chunks will be needed based on instruction"""
-        # Simple heuristic based on instruction content
-        keywords = {
-            'simple': 1, 'basic': 1, 'small': 1,
-            'medium': 3, 'moderate': 3,
-            'large': 5, 'complex': 5, 'full': 5,
-            'comprehensive': 7, 'complete': 7,
-            'enterprise': 10, 'production': 10
-        }
+        # If small enough, we're done
+        if len(structure.split('\n')) <= self.config.max_lines:
+            # Optionally expand/complete it
+            complete_prompt = f"""
+{prompt}
+
+Complete and expand this code structure:
+"""
+            return self.generate(complete_prompt, structure)
         
-        instruction_lower = instruction.lower()
-        for keyword, chunks in keywords.items():
-            if keyword in instruction_lower:
-                return chunks
-        
-        # Default based on instruction length
-        return max(1, len(instruction) // 200)
-    
-    def _log(self, message: str):
-        """Log message if verbose mode is enabled"""
-        if self.processing_config.verbose:
-            print(f"[CodeWrapper] {message}")
+        # Otherwise, process the generated structure in chunks
+        return self.process(f"Complete and expand this code:\n{prompt}", structure)
     
     # ========================================================================
     # CONVENIENCE METHODS
     # ========================================================================
     
-    def create(self, instruction: str) -> ProcessingResult:
-        """Create new code from instruction"""
-        return self.process(instruction, "", ProcessingMode.CREATE)
-    
-    def modify(self, instruction: str, code: str) -> ProcessingResult:
-        """Modify existing code"""
-        return self.process(instruction, code, ProcessingMode.MODIFY)
-    
-    def enhance(self, code: str, instruction: str = "Improve this code") -> ProcessingResult:
-        """Enhance existing code"""
-        return self.process(instruction, code, ProcessingMode.ENHANCE)
-    
-    def comment(self, code: str) -> ProcessingResult:
-        """Add comments to code"""
-        return self.process("Add comprehensive comments", code, ProcessingMode.COMMENT)
-    
-    def refactor(self, code: str, instruction: str = "Refactor for clarity") -> ProcessingResult:
-        """Refactor code"""
-        return self.process(instruction, code, ProcessingMode.REFACTOR)
-    
-    def debug(self, code: str, issue: str = "Find and fix bugs") -> ProcessingResult:
-        """Debug code"""
-        return self.process(issue, code, ProcessingMode.DEBUG)
-    
-    def document(self, code: str) -> ProcessingResult:
-        """Add documentation to code"""
-        return self.process("Add comprehensive documentation", code, ProcessingMode.DOCUMENT)
-    
-    def generate_tests(self, code: str) -> ProcessingResult:
-        """Generate tests for code"""
-        return self.process("Generate comprehensive unit tests", code, ProcessingMode.TEST)
-    
-    def batch_process(
-        self,
-        files: Dict[str, str],
-        instruction: str,
-        mode: ProcessingMode = ProcessingMode.MODIFY
-    ) -> Dict[str, ProcessingResult]:
-        """Process multiple files/code pieces"""
-        results = {}
+    def create(self, prompt: str) -> str:
+        """
+        Create new code from a prompt/description.
         
-        for name, code in files.items():
-            self._log(f"Processing file: {name}")
-            results[name] = self.process(instruction, code, mode)
+        Args:
+            prompt: Description of what code to create
+            
+        Returns:
+            Generated code
+        """
+        return self.process(prompt, "")
+    
+    def modify(self, prompt: str, code: str) -> str:
+        """
+        Modify existing code based on instructions.
         
-        return results
+        Args:
+            prompt: What modifications to make
+            code: Existing code to modify
+            
+        Returns:
+            Modified code
+        """
+        full_prompt = f"Modify this code: {prompt}"
+        return self.process(full_prompt, code)
     
-    def get_history(self) -> List[ProcessingResult]:
-        """Get processing history"""
-        return self._processing_history.copy()
-    
-    def clear_history(self):
-        """Clear processing history"""
-        self._processing_history = []
-
-
-# ============================================================================
-# SPECIALIZED WRAPPER CLASSES
-# ============================================================================
-
-class ProjectGenerator(CodeGenerationWrapper):
-    """Specialized wrapper for generating entire projects"""
-    
-    def generate_project(
-        self,
-        project_type: str,
-        requirements: str,
-        structure: Dict = None
-    ) -> Dict[str, ProcessingResult]:
-        """Generate a complete project structure"""
+    def add_comments(self, code: str, style: str = "detailed") -> str:
+        """
+        Add comments to code.
         
-        # Default structures for common project types
-        default_structures = {
-            'python_package': [
-                ('__init__.py', 'Package initialization'),
-                ('main.py', 'Main entry point'),
-                ('utils.py', 'Utility functions'),
-                ('config.py', 'Configuration management'),
-                ('tests/test_main.py', 'Unit tests'),
-                ('README.md', 'Documentation'),
-            ],
-            'flask_api': [
-                ('app/__init__.py', 'Flask app initialization'),
-                ('app/routes.py', 'API routes'),
-                ('app/models.py', 'Database models'),
-                ('app/utils.py', 'Utility functions'),
-                ('config.py', 'Configuration'),
-                ('run.py', 'Application entry point'),
-                ('tests/test_routes.py', 'API tests'),
-            ],
-            'cli_tool': [
-                ('cli.py', 'CLI entry point with argparse'),
-                ('commands.py', 'Command implementations'),
-                ('utils.py', 'Utility functions'),
-                ('config.py', 'Configuration'),
-            ],
+        Args:
+            code: Code to comment
+            style: "brief", "detailed", or "docstrings"
+            
+        Returns:
+            Commented code
+        """
+        prompts = {
+            "brief": "Add brief inline comments explaining the key parts of this code.",
+            "detailed": "Add detailed comments explaining what each section does, including docstrings for functions/classes.",
+            "docstrings": "Add comprehensive docstrings to all functions and classes with Args, Returns, and Examples."
         }
+        return self.process(prompts.get(style, prompts["detailed"]), code)
+    
+    def enhance(self, code: str, aspects: List[str] = None) -> str:
+        """
+        Enhance/improve code.
         
-        structure = structure or default_structures.get(project_type, default_structures['python_package'])
+        Args:
+            code: Code to enhance
+            aspects: List of aspects to improve (e.g., ["error handling", "performance"])
+            
+        Returns:
+            Enhanced code
+        """
+        aspects = aspects or ["error handling", "readability", "best practices"]
+        aspects_str = ", ".join(aspects)
         
+        prompt = f"""
+Enhance and improve this code focusing on: {aspects_str}
+
+Keep the same functionality but make it better:
+- Add proper error handling where needed
+- Improve code structure and readability
+- Follow best practices
+- Add type hints if missing
+"""
+        return self.process(prompt, code)
+    
+    def refactor(self, code: str, instruction: str = "") -> str:
+        """
+        Refactor code for better structure.
+        
+        Args:
+            code: Code to refactor
+            instruction: Specific refactoring instructions (optional)
+            
+        Returns:
+            Refactored code
+        """
+        prompt = f"""
+Refactor this code for better structure and maintainability.
+{instruction}
+
+Focus on:
+- Clean code principles
+- Single responsibility
+- DRY (Don't Repeat Yourself)
+- Clear naming
+"""
+        return self.process(prompt, code)
+    
+    def add_types(self, code: str) -> str:
+        """
+        Add type hints to code.
+        
+        Args:
+            code: Code without (or incomplete) type hints
+            
+        Returns:
+            Code with type hints
+        """
+        prompt = """
+Add comprehensive type hints to this Python code:
+- Add type hints to all function parameters
+- Add return type hints to all functions
+- Add type hints to class attributes
+- Use typing module for complex types (List, Dict, Optional, etc.)
+"""
+        return self.process(prompt, code)
+    
+    def debug(self, code: str, issue: str = "") -> str:
+        """
+        Debug and fix issues in code.
+        
+        Args:
+            code: Code with bugs
+            issue: Description of the issue (optional)
+            
+        Returns:
+            Fixed code
+        """
+        prompt = f"""
+Debug and fix issues in this code.
+{f"Known issue: {issue}" if issue else "Find and fix any bugs."}
+
+Look for:
+- Logic errors
+- Off-by-one errors
+- Null/None handling issues
+- Edge cases
+- Potential runtime errors
+"""
+        return self.process(prompt, code)
+    
+    def convert(self, code: str, from_lang: str, to_lang: str) -> str:
+        """
+        Convert code from one language to another.
+        
+        Args:
+            code: Source code
+            from_lang: Source language (e.g., "JavaScript")
+            to_lang: Target language (e.g., "Python")
+            
+        Returns:
+            Converted code
+        """
+        prompt = f"""
+Convert this {from_lang} code to {to_lang}.
+
+- Maintain the same logic and functionality
+- Use idiomatic {to_lang} patterns
+- Use appropriate {to_lang} libraries/equivalents
+"""
+        return self.process(prompt, code)
+    
+    def generate_tests(self, code: str, framework: str = "pytest") -> str:
+        """
+        Generate tests for code.
+        
+        Args:
+            code: Code to generate tests for
+            framework: Test framework to use (pytest, unittest)
+            
+        Returns:
+            Test code
+        """
+        prompt = f"""
+Generate comprehensive unit tests for this code using {framework}.
+
+Include:
+- Test cases for normal operation
+- Edge cases
+- Error cases / exception handling
+- Setup and teardown if needed
+"""
+        return self.process(prompt, code)
+    
+    def document(self, code: str) -> str:
+        """
+        Add comprehensive documentation to code.
+        
+        Args:
+            code: Code to document
+            
+        Returns:
+            Documented code
+        """
+        prompt = """
+Add comprehensive documentation to this code:
+
+1. Module-level docstring explaining the purpose
+2. Class docstrings with attributes
+3. Function/method docstrings with:
+   - Description
+   - Args (with types)
+   - Returns (with type)
+   - Raises (if applicable)
+   - Example usage
+4. Inline comments for complex logic
+"""
+        return self.process(prompt, code)
+    
+    # ========================================================================
+    # BATCH PROCESSING
+    # ========================================================================
+    
+    def process_files(self, files: Dict[str, str], prompt: str) -> Dict[str, str]:
+        """
+        Process multiple files/code pieces.
+        
+        Args:
+            files: Dict of {filename: code}
+            prompt: Instructions for processing
+            
+        Returns:
+            Dict of {filename: processed_code}
+        """
         results = {}
-        context_code = []
         
-        for filename, description in structure:
-            instruction = f"""
-Project Type: {project_type}
-Requirements: {requirements}
+        for filename, code in files.items():
+            self._log(f"Processing file: {filename}")
+            results[filename] = self.process(prompt, code)
+        
+        return results
+    
+    def create_project(self, description: str, files: List[str]) -> Dict[str, str]:
+        """
+        Create a multi-file project.
+        
+        Args:
+            description: Project description/requirements
+            files: List of filenames to create
+            
+        Returns:
+            Dict of {filename: code}
+        """
+        results = {}
+        context = []
+        
+        for filename in files:
+            self._log(f"Creating: {filename}")
+            
+            file_prompt = f"""
+Project: {description}
 
-Generate the {filename} file:
-{description}
+Create the {filename} file.
+{f"Other files in project: {', '.join(context)}" if context else ""}
 
-Previous files context (for imports and consistency):
-{chr(10).join(context_code[-3:]) if context_code else 'This is the first file'}
+Make sure it integrates properly with other files in the project.
 """
             
-            result = self.create(instruction)
-            results[filename] = result
-            
-            if result.success:
-                context_code.append(f"# {filename}\n{result.processed_code[:500]}")
+            code = self.create(file_prompt)
+            results[filename] = code
+            context.append(filename)
         
         return results
 
 
-class CodeMigrator(CodeGenerationWrapper):
-    """Specialized wrapper for code migration tasks"""
-    
-    def migrate(
-        self,
-        code: str,
-        from_version: str,
-        to_version: str,
-        language: str = "Python"
-    ) -> ProcessingResult:
-        """Migrate code from one version to another"""
-        
-        instruction = f"""
-Migrate this {language} code from {from_version} to {to_version}.
+# ============================================================================
+# SIMPLE FUNCTIONAL INTERFACE
+# ============================================================================
 
-Update all deprecated syntax, APIs, and patterns.
-Maintain functionality while using modern best practices.
-Add compatibility comments where needed.
-"""
-        
-        return self.process(instruction, code, ProcessingMode.MODIFY)
-    
-    def convert_language(
-        self,
-        code: str,
-        from_lang: str,
-        to_lang: str
-    ) -> ProcessingResult:
-        """Convert code from one language to another"""
-        
-        instruction = f"""
-Convert this code from {from_lang} to {to_lang}.
+# Global wrapper instance for simple usage
+_wrapper = None
 
-Maintain the same logic and functionality.
-Use idiomatic patterns of {to_lang}.
-Add comments explaining any significant differences.
-"""
+def get_wrapper(**kwargs) -> CodeWrapper:
+    """Get or create a wrapper instance"""
+    global _wrapper
+    if _wrapper is None or kwargs:
+        _wrapper = CodeWrapper(**kwargs)
+    return _wrapper
+
+
+def process_code(prompt: str, code: str = "", **kwargs) -> str:
+    """
+    Simple function to process code.
+    
+    Args:
+        prompt: What to do
+        code: Code to process (empty for creation)
+        **kwargs: Wrapper configuration options
         
-        return self.process(instruction, code, ProcessingMode.MODIFY)
+    Returns:
+        Processed code
+    """
+    return get_wrapper(**kwargs).process(prompt, code)
+
+
+def create_code(prompt: str, **kwargs) -> str:
+    """Create new code from description"""
+    return get_wrapper(**kwargs).create(prompt)
+
+
+def modify_code(prompt: str, code: str, **kwargs) -> str:
+    """Modify existing code"""
+    return get_wrapper(**kwargs).modify(prompt, code)
+
+
+def add_comments(code: str, style: str = "detailed", **kwargs) -> str:
+    """Add comments to code"""
+    return get_wrapper(**kwargs).add_comments(code, style)
+
+
+def enhance_code(code: str, aspects: List[str] = None, **kwargs) -> str:
+    """Enhance code quality"""
+    return get_wrapper(**kwargs).enhance(code, aspects)
 
 
 # ============================================================================
 # USAGE EXAMPLES
 # ============================================================================
 
-def demo_basic_usage():
-    """Demonstrate basic usage of the wrapper"""
-    print("=" * 60)
-    print("DEMO: Basic Usage")
-    print("=" * 60)
-    
-    wrapper = CodeGenerationWrapper()
-    
-    # Example code to process
-    sample_code = '''
-def calculate_total(items):
-    total = 0
-    for item in items:
-        total += item['price'] * item['quantity']
-    return total
-
-def apply_discount(total, discount_percent):
-    if discount_percent > 100:
-        discount_percent = 100
-    if discount_percent < 0:
-        discount_percent = 0
-    discount = total * (discount_percent / 100)
-    return total - discount
-
-def process_order(items, discount=0):
-    total = calculate_total(items)
-    if discount:
-        total = apply_discount(total, discount)
-    tax = total * 0.08
-    return {
-        'subtotal': total,
-        'tax': tax,
-        'total': total + tax
-    }
-'''
-    
-    # Add comments
-    print("\n1. Adding comments to code...")
-    result = wrapper.comment(sample_code)
-    print(f"Success: {result.success}")
-    print(f"Chunks processed: {result.chunks_processed}")
-    print("\nProcessed code preview:")
-    print(result.processed_code[:500])
-    
-    # Enhance code
-    print("\n2. Enhancing code...")
-    result = wrapper.enhance(sample_code, "Add error handling and type hints")
-    print(f"Success: {result.success}")
-    
-    return result
-
-
-def demo_large_file_processing():
-    """Demonstrate processing of large files"""
-    print("\n" + "=" * 60)
-    print("DEMO: Large File Processing")
-    print("=" * 60)
-    
-    # Generate a large code file for testing
-    large_code = '''
-"""
-Sample Large Module
-This module demonstrates processing of large files.
-"""
-
-import os
-import sys
-import json
-from typing import List, Dict, Optional
-from dataclasses import dataclass
-
-'''
-    
-    # Generate many functions to simulate a large file
-    for i in range(20):
-        large_code += f'''
-def function_{i}(param1: int, param2: str) -> Dict:
-    """Function {i} documentation"""
-    result = {{"id": {i}}}
-    for j in range(param1):
-        result[f"item_{{j}}"] = param2 * j
-    return result
-
-'''
-    
-    # Generate a class
-    large_code += '''
-class DataProcessor:
-    """A class for processing data"""
-    
-    def __init__(self, config: Dict):
-        self.config = config
-        self.data = []
-        self.processed = False
-    
-    def load_data(self, source: str) -> bool:
-        """Load data from source"""
-        try:
-            # Simulated data loading
-            self.data = [{"id": i} for i in range(100)]
-            return True
-        except Exception as e:
-            print(f"Error: {e}")
-            return False
-    
-    def process(self) -> List[Dict]:
-        """Process loaded data"""
-        results = []
-        for item in self.data:
-            processed_item = self._transform(item)
-            results.append(processed_item)
-        self.processed = True
-        return results
-    
-    def _transform(self, item: Dict) -> Dict:
-        """Transform a single item"""
-        return {
-            **item,
-            "transformed": True,
-            "timestamp": "2024-01-01"
-        }
-    
-    def export(self, path: str) -> bool:
-        """Export processed data"""
-        if not self.processed:
-            return False
-        # Export logic here
-        return True
-
-'''
-    
-    print(f"Generated code with {len(large_code.split(chr(10)))} lines")
-    
-    # Configure for demonstration
-    config = ChunkConfig(
-        max_lines_per_chunk=40,
-        overlap_lines=5,
-        preserve_functions=True,
-        preserve_classes=True
-    )
-    
-    wrapper = CodeGenerationWrapper(chunk_config=config)
-    
-    # Process the large file
-    result = wrapper.document(large_code)
-    
-    print(f"Success: {result.success}")
-    print(f"Chunks processed: {result.chunks_processed}")
-    print(f"Errors: {result.errors}")
-    print(f"Warnings: {result.warnings}")
-    
-    return result
-
-
-def demo_project_generation():
-    """Demonstrate project generation"""
-    print("\n" + "=" * 60)
-    print("DEMO: Project Generation")
-    print("=" * 60)
-    
-    generator = ProjectGenerator()
-    
-    results = generator.generate_project(
-        project_type='cli_tool',
-        requirements='''
-        A CLI tool for managing TODO items.
-        Features:
-        - Add, list, complete, and delete tasks
-        - Store tasks in JSON file
-        - Priority levels
-        - Due dates
-        '''
-    )
-    
-    print(f"\nGenerated {len(results)} files:")
-    for filename, result in results.items():
-        print(f"  - {filename}: {'✓' if result.success else '✗'}")
-    
-    return results
-
-
-def demo_code_migration():
-    """Demonstrate code migration"""
-    print("\n" + "=" * 60)
-    print("DEMO: Code Migration")
-    print("=" * 60)
-    
-    old_code = '''
-# Python 2 style code
-print "Hello, World!"
-
-class OldClass:
-    def __init__(self):
-        self.data = {}
-    
-    def get_items(self):
-        return self.data.iteritems()
-    
-    def process(self):
-        for key, value in self.data.iteritems():
-            print key, value
-        
-        raw_input("Press Enter to continue")
-        
-        # Old string formatting
-        name = "test"
-        print "Processing %s" % name
-'''
-    
-    migrator = CodeMigrator()
-    result = migrator.migrate(old_code, "Python 2.7", "Python 3.10")
-    
-    print(f"Migration success: {result.success}")
-    print("\nMigrated code:")
-    print(result.processed_code)
-    
-    return result
-
-
-def demo_batch_processing():
-    """Demonstrate batch processing"""
-    print("\n" + "=" * 60)
-    print("DEMO: Batch Processing")
-    print("=" * 60)
-    
-    files = {
-        'utils.py': '''
-def helper_one():
-    pass
-
-def helper_two():
-    pass
-''',
-        'main.py': '''
-from utils import helper_one
-
-def main():
-    result = helper_one()
-    return result
-
 if __name__ == "__main__":
-    main()
-''',
-        'config.py': '''
-DEBUG = True
-DATABASE_URL = "sqlite:///db.sqlite"
-SECRET_KEY = "mysecret"
-'''
-    }
     
-    wrapper = CodeGenerationWrapper()
-    results = wrapper.batch_process(
-        files,
-        "Add type hints and docstrings",
-        ProcessingMode.DOCUMENT
-    )
+    # ========================================================================
+    # SETUP: Replace generate_code with your actual function
+    # ========================================================================
     
-    print(f"\nProcessed {len(results)} files:")
-    for filename, result in results.items():
-        print(f"  - {filename}: {result.chunks_processed} chunks, Success: {result.success}")
+    # For testing, we'll create a mock function
+    def mock_generate_code(prompt: str, code: str) -> str:
+        """Mock function for demonstration - replace with your actual function"""
+        print(f"  [Mock] Received {len(code.split(chr(10)))} lines")
+        
+        # Simple mock behavior
+        if "comment" in prompt.lower():
+            lines = code.split('\n')
+            result = []
+            for line in lines:
+                if line.strip() and not line.strip().startswith('#'):
+                    result.append(f"# Added comment")
+                result.append(line)
+            return '\n'.join(result)
+        
+        return code  # Return unchanged for other operations
     
-    return results
-
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
-
-if __name__ == "__main__":
-    print("""
-╔══════════════════════════════════════════════════════════════╗
-║         Automated Code Generation Wrapper Demo               ║
-║                                                              ║
-║  This wrapper handles large codebases by processing them     ║
-║  in chunks through the generate_code() function.             ║
-╚══════════════════════════════════════════════════════════════╝
-""")
+    # ========================================================================
+    # EXAMPLE USAGE
+    # ========================================================================
     
-    # Run demos
-    demo_basic_usage()
-    demo_large_file_processing()
-    demo_project_generation()
-    demo_code_migration()
-    demo_batch_processing()
-    
-    print("\n" + "=" * 60)
-    print("All demos completed!")
+    print("=" * 60)
+    print("Code Wrapper - Usage Examples")
     print("=" * 60)
     
-    # Interactive mode
-    print("""
-    
-To use the wrapper in your code:
-
-    from code_wrapper import CodeGenerationWrapper
-    
-    wrapper = CodeGenerationWrapper()
-    
-    # Add comments to code
-    result = wrapper.comment(your_code)
-    
-    # Enhance code
-    result = wrapper.enhance(your_code, "Add error handling")
-    
-    # Create new code
-    result = wrapper.create("Create a REST API client class")
-    
-    # Process with custom mode
-    result = wrapper.process(
-        instruction="Convert to async/await",
-        code=your_code,
-        mode=ProcessingMode.REFACTOR
+    # Create wrapper with mock function
+    wrapper = CodeWrapper(
+        generator_func=mock_generate_code,
+        max_lines=50,
+        overlap=3,
+        verbose=True
     )
+    
+    # Example 1: Small code (single chunk)
+    print("\n--- Example 1: Small Code ---")
+    small_code = """
+def hello():
+    print("Hello, World!")
+
+def add(a, b):
+    return a + b
+"""
+    result = wrapper.add_comments(small_code)
+    print(f"Result:\n{result[:200]}...")
+    
+    # Example 2: Large code (multiple chunks)
+    print("\n--- Example 2: Large Code ---")
+    large_code = "\n".join([
+        f"def function_{i}(x):",
+        f"    '''Function {i}'''",
+        f"    result = x * {i}",
+        f"    return result",
+        ""
+    ] for i in range(30))  # Creates ~150 lines
+    
+    result = wrapper.process("Add type hints and improve docstrings", large_code)
+    print(f"Processed {len(large_code.split(chr(10)))} lines -> {len(result.split(chr(10)))} lines")
+    
+    # Example 3: Using convenience methods
+    print("\n--- Example 3: Convenience Methods ---")
+    print("Available methods:")
+    print("  - wrapper.create(prompt)")
+    print("  - wrapper.modify(prompt, code)")
+    print("  - wrapper.add_comments(code)")
+    print("  - wrapper.enhance(code)")
+    print("  - wrapper.refactor(code)")
+    print("  - wrapper.add_types(code)")
+    print("  - wrapper.debug(code)")
+    print("  - wrapper.document(code)")
+    print("  - wrapper.generate_tests(code)")
+    print("  - wrapper.convert(code, from_lang, to_lang)")
+    
+    # Example 4: Simple functional interface
+    print("\n--- Example 4: Simple Functional Interface ---")
+    print("You can also use simple functions:")
+    print("  - process_code(prompt, code)")
+    print("  - create_code(prompt)")
+    print("  - modify_code(prompt, code)")
+    print("  - add_comments(code)")
+    print("  - enhance_code(code)")
+    
+    print("\n" + "=" * 60)
+    print("Setup Instructions:")
+    print("=" * 60)
+    print("""
+1. Replace the mock generate_code function with your actual function:
+
+   from your_module import generate_code
+   
+   wrapper = CodeWrapper(generator_func=generate_code)
+
+2. Or set it globally:
+
+   from your_module import generate_code
+   
+   # At module level, replace the generate_code function
+   # Then use the simple interface:
+   
+   result = process_code("Add comments", my_code)
+
+3. Configure chunk size based on your function's limits:
+
+   wrapper = CodeWrapper(
+       generator_func=generate_code,
+       max_lines=50,  # Adjust based on your limit
+       overlap=3
+   )
 """)
+
+# Import your actual generate_code function
+from your_module import generate_code
+
+# Create wrapper
+wrapper = CodeWrapper(generator_func=generate_code, max_lines=50)
+
+# Use it!
+result = wrapper.process("Add error handling", large_code)
+
+# Create new code
+code = wrapper.create("Create a REST API client with retry logic")
+
+# Modify existing code
+code = wrapper.modify("Add logging", existing_code)
+
+# Add comments
+code = wrapper.add_comments(existing_code)
+
+# Enhance code
+code = wrapper.enhance(existing_code, ["error handling", "type hints"])
+
+# Add documentation
+code = wrapper.document(existing_code)
+
+# Debug code
+code = wrapper.debug(buggy_code, "IndexError on empty list")
+
+# Generate tests
+tests = wrapper.generate_tests(existing_code, framework="pytest")
+
+# Process multiple files
+results = wrapper.process_files(
+    {"main.py": code1, "utils.py": code2},
+    "Add type hints"
+)
+
+# Even simpler - just use functions
+from code_wrapper import process_code, add_comments, enhance_code
+
+result = process_code("Refactor for clarity", my_code)
+result = add_comments(my_code, style="detailed")
+result = enhance_code(my_code, ["performance", "readability"])
+
+┌─────────────────────────────────────────────────────────────┐
+│                     LARGE CODEBASE                          │
+│                    (500+ lines)                             │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    CODE CHUNKER                             │
+│  - Splits into 50-line chunks                               │
+│  - Preserves function/class boundaries                      │
+│  - Adds overlap for context                                 │
+└─────────────────────────────────────────────────────────────┘
+                           │
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │ Chunk 1  │    │ Chunk 2  │    │ Chunk 3  │
+    │ 50 lines │    │ 50 lines │    │ 50 lines │
+    └──────────┘    └──────────┘    └──────────┘
+          │                │                │
+          ▼                ▼                ▼
+    ┌──────────────────────────────────────────┐
+    │         YOUR generate_code()             │
+    │         (GPT-3.5 connected)              │
+    └──────────────────────────────────────────┘
+          │                │                │
+          ▼                ▼                ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │Processed │    │Processed │    │Processed │
+    │ Chunk 1  │    │ Chunk 2  │    │ Chunk 3  │
+    └──────────┘    └──────────┘    └──────────┘
+          │                │                │
+          └────────────────┼────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    REASSEMBLER                              │
+│  - Combines processed chunks                                │
+│  - Handles overlaps                                         │
+│  - Returns complete code                                    │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  PROCESSED CODEBASE                         │
+│                    (Complete)                               │
+└─────────────────────────────────────────────────────────────┘
