@@ -1,689 +1,491 @@
 
-import requests
-import json
-import re
-
-res = None
-
-def generate_code(context, code):
-    global res
-    myobj = {
-        "staff_id": 'xxxx',
-        "password": 'xxx'
-    }
-    
-    url = 'https://your-auth-url.com/token'
-    
-    if not res:
-        print("Getting token for access")
-        res = json.loads(requests.post(url, json=myobj).text)
-    
-    data = {
-        'messages': [{
-            'content': f'{context}:{code}',
-            'role': 'developer'
-        }],
-        'stream': False,
-        'context': {
-            'overrides': {
-                'approach': None,
-                'use_gpt4v': True,
-                'gpt4v_input': 'textAndImages',
-                'conversational_chain': True,
-                'rag_chain': False,
-                'session_id': 'asd323-3769-45ed-84ab-323rw',
-                'uid': '333.3.211.7',
-                'product': 'dev',
-                'model': {
-                    'key': "{'azure_endpoint': 'https://abc-multi-gfopenai-us-dev-01.openai.azure.com/', 'model': 'gpt-4-0125-Preview'}",
-                    'text': 'gpt-4-0125-Preview'
-                }
-            }
-        },
-        'session_state': None
-    }
-    
-    header = {"Authorization": "Bearer " + res['access_token']}
-    endpoint = 'https://api-test-dev.tpk.cloud.us.comp/dev'
-    result = requests.post(endpoint, json=data, headers=header)
-    out = result.json()
-    response = out['choices'][0]['message']['content']
-    return response
-
-
-def extract_code_block(response_text):
-    code_pattern = r'```(?:python)?\s*(.*?)```'
-    matches = re.findall(code_pattern, response_text, re.DOTALL)
-    if matches:
-        return '\n\n'.join(matches)
-    return response_text
-
-
-def enhance_code(input_code, optimization_focus='runtime'):
-    focus_prompts = {
-        'runtime': 'Optimize this code for faster runtime performance. Use efficient algorithms, reduce time complexity, and eliminate redundant operations.',
-        'memory': 'Optimize this code for memory efficiency. Reduce memory footprint, use generators where appropriate, and eliminate memory leaks.',
-        'readability': 'Refactor this code for better readability while maintaining efficiency. Improve structure and follow PEP8.',
-        'all': 'Optimize this code for runtime, memory efficiency, and readability. Apply best practices and efficient algorithms.'
-    }
-    
-    context = f"""RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS.
-{focus_prompts.get(optimization_focus, focus_prompts['all'])}
-Return only the optimized code without any markdown, comments about changes, or explanations."""
-    
-    enhanced = generate_code(context, input_code)
-    return extract_code_block(enhanced)
-
-
-def analyze_and_enhance(input_code):
-    analysis_context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE.
-Analyze this code and provide an optimized version that:
-1. Reduces time complexity where possible
-2. Uses built-in functions and list comprehensions
-3. Eliminates redundant computations
-4. Uses appropriate data structures
-Return only the optimized code."""
-    
-    return extract_code_block(generate_code(analysis_context, input_code))
-
-
-def enhance_dataframe_operations(df_code):
-    context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE.
-Optimize this pandas DataFrame code:
-1. Use vectorized operations instead of loops
-2. Use appropriate dtypes to reduce memory
-3. Chain operations efficiently
-4. Use inplace operations where beneficial
-Return only the optimized code."""
-    
-    return extract_code_block(generate_code(context, df_code))
-
-
-def enhance_from_file(input_file_path, output_file_path, optimization_focus='all'):
-    with open(input_file_path, 'r') as f:
-        original_code = f.read()
-    
-    enhanced_code = enhance_code(original_code, optimization_focus)
-    
-    with open(output_file_path, 'w') as f:
-        f.write(enhanced_code)
-    
-    print(f"Enhanced code saved to: {output_file_path}")
-    return enhanced_code
-
-
-if __name__ == "__main__":
-    sample_code = '''
-def find_duplicates(lst):
-    duplicates = []
-    for i in range(len(lst)):
-        for j in range(i + 1, len(lst)):
-            if lst[i] == lst[j] and lst[i] not in duplicates:
-                duplicates.append(lst[i])
-    return duplicates
-
-def calculate_sum(numbers):
-    total = 0
-    for num in numbers:
-        total = total + num
-    return total
-'''
-    
-    print("Original Code:")
-    print(sample_code)
-    print("\nEnhanced Code:")
-    print(enhance_code(sample_code, 'runtime'))
 
 import requests
 import json
 import re
 import os
+import time
 
-res = None
-
-def generate_code(context, code):
-    global res
-    myobj = {
-        "staff_id": 'xxxx',
-        "password": 'xxx'
-    }
-    
-    url = 'https://your-auth-url.com/token'
-    
-    if not res:
-        print("Getting token for access")
-        res = json.loads(requests.post(url, json=myobj).text)
-    
-    data = {
-        'messages': [{
-            'content': f'{context}:{code}',
-            'role': 'developer'
-        }],
-        'stream': False,
-        'context': {
-            'overrides': {
-                'approach': None,
-                'use_gpt4v': True,
-                'gpt4v_input': 'textAndImages',
-                'conversational_chain': True,
-                'rag_chain': False,
-                'session_id': 'asd323-3769-45ed-84ab-323rw',
-                'uid': '333.3.211.7',
-                'product': 'dev',
-                'model': {
-                    'key': "{'azure_endpoint': 'https://abc-multi-gfopenai-us-dev-01.openai.azure.com/', 'model': 'gpt-4-0125-Preview'}",
-                    'text': 'gpt-4-0125-Preview'
-                }
-            }
-        },
-        'session_state': None
-    }
-    
-    header = {"Authorization": "Bearer " + res['access_token']}
-    endpoint = 'https://api-test-dev.tpk.cloud.us.comp/dev'
-    result = requests.post(endpoint, json=data, headers=header)
-    out = result.json()
-    response = out['choices'][0]['message']['content']
-    return response
-
-
-def extract_code_block(response_text):
-    code_pattern = r'```(?:python)?\s*(.*?)```'
-    matches = re.findall(code_pattern, response_text, re.DOTALL)
-    if matches:
-        return '\n\n'.join(matches)
-    return response_text
-
-
-class AutomatedCodeWriter:
+class LargeCodeCleaner:
     def __init__(self):
-        self.generated_modules = {}
-        self.action_history = []
+        self.token = None
+        self.auth_url = 'https://your-auth-url.com/token'
+        self.api_endpoint = 'https://api-test-dev.tpk.cloud.us.comp/dev'
+        self.credentials = {
+            "staff_id": 'xxxx',
+            "password": 'xxx'
+        }
+        self.chunk_size = 80
+        self.max_retries = 3
     
-    def parse_prompt_to_actions(self, prompt):
-        context = """RESPOND WITH ONLY A PYTHON LIST. NO EXPLANATIONS.
-Break down this project requirement into specific coding actions/modules.
-Return a Python list of dictionaries with keys: 'action_name', 'description', 'dependencies', 'priority'
-Example format:
-[{"action_name": "module_name", "description": "what it does", "dependencies": [], "priority": 1}]"""
-        
-        response = generate_code(context, prompt)
-        clean_response = extract_code_block(response)
-        
-        try:
-            actions = eval(clean_response)
-            if isinstance(actions, list):
-                return sorted(actions, key=lambda x: x.get('priority', 99))
-        except:
-            pass
-        
-        return [{"action_name": "main_module", "description": prompt, "dependencies": [], "priority": 1}]
+    def get_token(self):
+        if not self.token:
+            print("Getting access token...")
+            response = requests.post(self.auth_url, json=self.credentials)
+            self.token = json.loads(response.text)
+        return self.token
     
-    def generate_module_code(self, action):
-        context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
-Generate complete, production-ready Python code for this module.
-Include all necessary imports at the top.
-Include proper error handling.
-Make functions reusable and well-structured."""
+    def call_api(self, prompt, code):
+        token = self.get_token()
         
-        module_prompt = f"Module: {action['action_name']}\nDescription: {action['description']}\nDependencies: {action.get('dependencies', [])}"
+        data = {
+            'messages': [{
+                'content': f'{prompt}:\n\n{code}',
+                'role': 'developer'
+            }],
+            'stream': False,
+            'context': {
+                'overrides': {
+                    'approach': None,
+                    'use_gpt4v': True,
+                    'gpt4v_input': 'textAndImages',
+                    'conversational_chain': True,
+                    'rag_chain': False,
+                    'session_id': 'cleaner-session-001',
+                    'uid': '333.3.211.7',
+                    'product': 'dev',
+                    'model': {
+                        'key': "{'azure_endpoint': 'https://abc-multi-gfopenai-us-dev-01.openai.azure.com/', 'model': 'gpt-4-0125-Preview'}",
+                        'text': 'gpt-4-0125-Preview'
+                    }
+                }
+            },
+            'session_state': None
+        }
         
-        code = generate_code(context, module_prompt)
-        return extract_code_block(code)
+        header = {"Authorization": "Bearer " + token['access_token']}
+        
+        for attempt in range(self.max_retries):
+            try:
+                result = requests.post(self.api_endpoint, json=data, headers=header, timeout=120)
+                out = result.json()
+                response = out['choices'][0]['message']['content']
+                return self.extract_code(response)
+            except Exception as e:
+                print(f"  Attempt {attempt + 1} failed: {str(e)}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2)
+                else:
+                    print("  Returning original chunk due to API failure")
+                    return code
+        
+        return code
     
-    def generate_imports_section(self, all_code):
-        context = """RESPOND WITH ONLY PYTHON IMPORT STATEMENTS. NO EXPLANATIONS.
-Analyze this code and return only the required import statements, deduplicated and sorted."""
-        
-        imports = generate_code(context, all_code)
-        return extract_code_block(imports)
-    
-    def generate_main_integration(self, modules_dict):
-        context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS.
-Create a main.py that integrates all these modules with proper imports and a main() function."""
-        
-        module_summary = "\n".join([f"Module {name}: contains functions for {name}" for name in modules_dict.keys()])
-        
-        main_code = generate_code(context, module_summary)
-        return extract_code_block(main_code)
-    
-    def write_project_from_prompt(self, prompt, output_directory='generated_project'):
-        os.makedirs(output_directory, exist_ok=True)
-        
-        print("Analyzing prompt and creating action plan...")
-        actions = self.parse_prompt_to_actions(prompt)
-        
-        print(f"Identified {len(actions)} modules to generate")
-        
-        for action in actions:
-            print(f"Generating: {action['action_name']}...")
-            code = self.generate_module_code(action)
-            self.generated_modules[action['action_name']] = code
-            
-            file_path = os.path.join(output_directory, f"{action['action_name']}.py")
-            with open(file_path, 'w') as f:
-                f.write(code)
-            print(f"  Saved: {file_path}")
-        
-        print("Generating main integration file...")
-        main_code = self.generate_main_integration(self.generated_modules)
-        main_path = os.path.join(output_directory, 'main.py')
-        with open(main_path, 'w') as f:
-            f.write(main_code)
-        
-        print("Generating requirements.txt...")
-        self.generate_requirements(output_directory)
-        
-        print(f"\nProject generated in: {output_directory}/")
-        return self.generated_modules
-    
-    def generate_requirements(self, output_directory):
-        all_code = '\n'.join(self.generated_modules.values())
-        
-        context = """RESPOND WITH ONLY PACKAGE NAMES, ONE PER LINE. NO EXPLANATIONS.
-List external Python packages (not standard library) required by this code."""
-        
-        requirements = generate_code(context, all_code)
-        clean_requirements = extract_code_block(requirements)
-        
-        req_path = os.path.join(output_directory, 'requirements.txt')
-        with open(req_path, 'w') as f:
-            f.write(clean_requirements)
-    
-    def generate_single_file(self, prompt, output_file='generated_code.py'):
-        context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
-Generate complete, production-ready Python code.
-Include all imports, classes, functions, and a main execution block.
-Code must be immediately executable."""
-        
-        code = generate_code(context, prompt)
-        clean_code = extract_code_block(code)
-        
-        with open(output_file, 'w') as f:
-            f.write(clean_code)
-        
-        print(f"Code saved to: {output_file}")
-        return clean_code
-    
-    def expand_code_iteratively(self, base_prompt, iterations=3, output_file='expanded_code.py'):
-        context_initial = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE.
-Generate the core structure and main functions for this requirement."""
-        
-        current_code = extract_code_block(generate_code(context_initial, base_prompt))
-        
-        expansion_prompts = [
-            "Add comprehensive error handling and input validation to this code.",
-            "Add helper functions and utility methods to make this code more robust.",
-            "Add logging, configuration handling, and finalize the code structure."
+    def extract_code(self, response):
+        patterns = [
+            r'```python\s*(.*?)```',
+            r'```\s*(.*?)```',
         ]
         
-        for i, expansion in enumerate(expansion_prompts[:iterations]):
-            print(f"Expansion iteration {i+1}...")
-            context = f"""RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS.
-{expansion}
-Integrate with and expand the existing code below."""
-            
-            expanded = generate_code(context, current_code)
-            current_code = extract_code_block(expanded)
+        for pattern in patterns:
+            matches = re.findall(pattern, response, re.DOTALL)
+            if matches:
+                return matches[0].strip()
         
-        with open(output_file, 'w') as f:
-            f.write(current_code)
+        return response.strip()
+    
+    def get_line_indent(self, line):
+        return len(line) - len(line.lstrip())
+    
+    def is_block_start(self, line):
+        stripped = line.strip()
+        if not stripped:
+            return False
         
-        print(f"Expanded code saved to: {output_file}")
-        return current_code
-
-
-def generate_code_from_prompt(prompt, output_path='output.py'):
-    writer = AutomatedCodeWriter()
-    return writer.generate_single_file(prompt, output_path)
-
-
-def generate_project_from_prompt(prompt, output_dir='generated_project'):
-    writer = AutomatedCodeWriter()
-    return writer.write_project_from_prompt(prompt, output_dir)
-
-
-if __name__ == "__main__":
-    sample_prompt = """
-    Create a banking transaction processing system with:
-    1. Customer account management (create, update, delete accounts)
-    2. Transaction processing (deposits, withdrawals, transfers)
-    3. Transaction history and reporting
-    4. Input validation and error handling
-    5. CSV export functionality
-    """
-    
-    writer = AutomatedCodeWriter()
-    writer.write_project_from_prompt(sample_prompt, 'banking_system')
-
-
-import requests
-import json
-import re
-import ast
-
-res = None
-
-def generate_code(context, code):
-    global res
-    myobj = {
-        "staff_id": 'xxxx',
-        "password": 'xxx'
-    }
-    
-    url = 'https://your-auth-url.com/token'
-    
-    if not res:
-        print("Getting token for access")
-        res = json.loads(requests.post(url, json=myobj).text)
-    
-    data = {
-        'messages': [{
-            'content': f'{context}:{code}',
-            'role': 'developer'
-        }],
-        'stream': False,
-        'context': {
-            'overrides': {
-                'approach': None,
-                'use_gpt4v': True,
-                'gpt4v_input': 'textAndImages',
-                'conversational_chain': True,
-                'rag_chain': False,
-                'session_id': 'asd323-3769-45ed-84ab-323rw',
-                'uid': '333.3.211.7',
-                'product': 'dev',
-                'model': {
-                    'key': "{'azure_endpoint': 'https://abc-multi-gfopenai-us-dev-01.openai.azure.com/', 'model': 'gpt-4-0125-Preview'}",
-                    'text': 'gpt-4-0125-Preview'
-                }
-            }
-        },
-        'session_state': None
-    }
-    
-    header = {"Authorization": "Bearer " + res['access_token']}
-    endpoint = 'https://api-test-dev.tpk.cloud.us.comp/dev'
-    result = requests.post(endpoint, json=data, headers=header)
-    out = result.json()
-    response = out['choices'][0]['message']['content']
-    return response
-
-
-def extract_code_block(response_text):
-    code_pattern = r'```(?:python)?\s*(.*?)```'
-    matches = re.findall(code_pattern, response_text, re.DOTALL)
-    if matches:
-        return '\n\n'.join(matches)
-    return response_text
-
-
-class CodeChunker:
-    def __init__(self, max_chunk_size=3000):
-        self.max_chunk_size = max_chunk_size
-    
-    def extract_code_blocks(self, code):
-        blocks = []
-        try:
-            tree = ast.parse(code)
-            lines = code.split('\n')
-            
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    start_line = node.lineno - 1
-                    end_line = node.end_lineno if hasattr(node, 'end_lineno') else self.find_block_end(lines, start_line)
-                    
-                    block_code = '\n'.join(lines[start_line:end_line])
-                    block_type = 'class' if isinstance(node, ast.ClassDef) else 'function'
-                    
-                    blocks.append({
-                        'name': node.name,
-                        'type': block_type,
-                        'code': block_code,
-                        'start_line': start_line,
-                        'end_line': end_line
-                    })
-        except SyntaxError:
-            blocks = self.chunk_by_lines(code)
+        block_keywords = [
+            'def ', 'class ', 'async def ',
+            'if ', 'elif ', 'else:',
+            'for ', 'while ',
+            'try:', 'except', 'finally:',
+            'with ',
+            '@'
+        ]
         
-        return blocks
+        for keyword in block_keywords:
+            if stripped.startswith(keyword):
+                return True
+        
+        return False
     
-    def find_block_end(self, lines, start_line):
-        if start_line >= len(lines):
-            return start_line
+    def is_top_level_block(self, line):
+        stripped = line.strip()
+        if not stripped:
+            return False
         
-        initial_indent = len(lines[start_line]) - len(lines[start_line].lstrip())
+        indent = self.get_line_indent(line)
         
-        for i in range(start_line + 1, len(lines)):
+        if indent == 0:
+            if stripped.startswith('def ') or stripped.startswith('class ') or stripped.startswith('async def ') or stripped.startswith('@'):
+                return True
+        
+        return False
+    
+    def find_block_end(self, lines, start_idx):
+        if start_idx >= len(lines):
+            return start_idx
+        
+        start_line = lines[start_idx]
+        start_indent = self.get_line_indent(start_line)
+        
+        if start_line.strip().startswith('@'):
+            decorator_end = start_idx
+            for i in range(start_idx + 1, len(lines)):
+                line = lines[i]
+                if line.strip() and not line.strip().startswith('@'):
+                    if line.strip().startswith('def ') or line.strip().startswith('class ') or line.strip().startswith('async def '):
+                        return self.find_block_end(lines, i)
+                    break
+                decorator_end = i
+            return decorator_end + 1
+        
+        for i in range(start_idx + 1, len(lines)):
             line = lines[i]
-            if line.strip() and not line.strip().startswith('#'):
-                current_indent = len(line) - len(line.lstrip())
-                if current_indent <= initial_indent:
+            
+            if not line.strip():
+                continue
+            
+            if line.strip().startswith('#'):
+                continue
+            
+            current_indent = self.get_line_indent(line)
+            
+            if current_indent <= start_indent:
+                if self.is_top_level_block(line) or (current_indent == start_indent and self.is_block_start(line)):
                     return i
         
         return len(lines)
     
-    def chunk_by_lines(self, code, lines_per_chunk=50):
+    def smart_chunk(self, code):
         lines = code.split('\n')
+        total_lines = len(lines)
         chunks = []
         
-        for i in range(0, len(lines), lines_per_chunk):
-            chunk_lines = lines[i:i + lines_per_chunk]
+        import_lines = []
+        code_start_idx = 0
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                import_lines.append(line)
+                code_start_idx = i + 1
+            elif stripped and not stripped.startswith('#'):
+                break
+            elif stripped.startswith('#') and i < 10:
+                import_lines.append(line)
+                code_start_idx = i + 1
+        
+        if import_lines:
             chunks.append({
-                'name': f'chunk_{i // lines_per_chunk}',
-                'type': 'chunk',
-                'code': '\n'.join(chunk_lines),
-                'start_line': i,
-                'end_line': min(i + lines_per_chunk, len(lines))
+                'type': 'imports',
+                'code': '\n'.join(import_lines),
+                'start': 0,
+                'end': code_start_idx
+            })
+        
+        i = code_start_idx
+        
+        while i < total_lines:
+            line = lines[i]
+            
+            if not line.strip():
+                i += 1
+                continue
+            
+            if self.is_top_level_block(line):
+                block_end = self.find_block_end(lines, i)
+                block_lines = lines[i:block_end]
+                block_code = '\n'.join(block_lines)
+                
+                if len(block_lines) > self.chunk_size:
+                    sub_chunks = self.chunk_large_block(block_lines, i)
+                    chunks.extend(sub_chunks)
+                else:
+                    block_type = 'class' if line.strip().startswith('class ') else 'function'
+                    chunks.append({
+                        'type': block_type,
+                        'code': block_code,
+                        'start': i,
+                        'end': block_end
+                    })
+                
+                i = block_end
+            else:
+                standalone_start = i
+                standalone_lines = []
+                
+                while i < total_lines and not self.is_top_level_block(lines[i]):
+                    standalone_lines.append(lines[i])
+                    i += 1
+                    
+                    if len(standalone_lines) >= self.chunk_size:
+                        break
+                
+                if standalone_lines:
+                    chunks.append({
+                        'type': 'standalone',
+                        'code': '\n'.join(standalone_lines),
+                        'start': standalone_start,
+                        'end': i
+                    })
+        
+        return chunks
+    
+    def chunk_large_block(self, block_lines, global_start):
+        chunks = []
+        
+        header_lines = []
+        body_start = 0
+        
+        for i, line in enumerate(block_lines):
+            header_lines.append(line)
+            if line.rstrip().endswith(':') and not line.strip().startswith('@'):
+                body_start = i + 1
+                break
+        
+        if body_start == 0:
+            body_start = 1
+        
+        body_lines = block_lines[body_start:]
+        header_code = '\n'.join(header_lines)
+        
+        if not body_lines:
+            return [{
+                'type': 'block',
+                'code': '\n'.join(block_lines),
+                'start': global_start,
+                'end': global_start + len(block_lines)
+            }]
+        
+        base_indent = self.get_line_indent(body_lines[0]) if body_lines[0].strip() else 4
+        
+        current_chunk_lines = []
+        method_start = 0
+        i = 0
+        
+        while i < len(body_lines):
+            line = body_lines[i]
+            
+            is_method_start = False
+            if line.strip():
+                line_indent = self.get_line_indent(line)
+                if line_indent == base_indent and (line.strip().startswith('def ') or line.strip().startswith('async def ') or line.strip().startswith('@')):
+                    is_method_start = True
+            
+            if is_method_start and current_chunk_lines:
+                chunks.append({
+                    'type': 'class_part',
+                    'code': header_code + '\n' + '\n'.join(current_chunk_lines),
+                    'start': global_start,
+                    'end': global_start + body_start + i,
+                    'header': header_code
+                })
+                current_chunk_lines = []
+            
+            current_chunk_lines.append(line)
+            
+            if len(current_chunk_lines) >= self.chunk_size:
+                next_safe = i + 1
+                for j in range(i + 1, min(i + 20, len(body_lines))):
+                    check_line = body_lines[j]
+                    if check_line.strip():
+                        check_indent = self.get_line_indent(check_line)
+                        if check_indent == base_indent and self.is_block_start(check_line):
+                            next_safe = j
+                            break
+                
+                for k in range(i + 1, next_safe):
+                    if k < len(body_lines):
+                        current_chunk_lines.append(body_lines[k])
+                
+                chunks.append({
+                    'type': 'class_part',
+                    'code': header_code + '\n' + '\n'.join(current_chunk_lines),
+                    'start': global_start,
+                    'end': global_start + body_start + next_safe,
+                    'header': header_code
+                })
+                current_chunk_lines = []
+                i = next_safe
+                continue
+            
+            i += 1
+        
+        if current_chunk_lines:
+            chunks.append({
+                'type': 'class_part',
+                'code': header_code + '\n' + '\n'.join(current_chunk_lines),
+                'start': global_start,
+                'end': global_start + len(block_lines),
+                'header': header_code
             })
         
         return chunks
     
-    def chunk_code(self, code):
-        blocks = self.extract_code_blocks(code)
-        
-        chunks = []
-        current_chunk = []
-        current_size = 0
-        
-        for block in blocks:
-            block_size = len(block['code'])
-            
-            if block_size > self.max_chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                    current_chunk = []
-                    current_size = 0
-                
-                sub_chunks = self.chunk_by_lines(block['code'])
-                for sub in sub_chunks:
-                    chunks.append([sub])
-            elif current_size + block_size > self.max_chunk_size:
-                chunks.append(current_chunk)
-                current_chunk = [block]
-                current_size = block_size
-            else:
-                current_chunk.append(block)
-                current_size += block_size
-        
-        if current_chunk:
-            chunks.append(current_chunk)
-        
-        return chunks
+    def clean_chunk(self, chunk_code, chunk_type):
+        prompt = """RESPOND WITH ONLY CLEAN EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
 
+Clean and improve this Python code:
+1. Add clear docstrings to functions and classes
+2. Add brief inline comments for complex logic only
+3. Rename unclear variables to meaningful names (e.g., x -> counter, df -> dataframe)
+4. Fix formatting and follow PEP8
+5. Keep all functionality exactly the same
+6. Preserve the exact structure (class/function definitions)
 
-class CodeCommenterCleaner:
-    def __init__(self, max_chunk_size=3000):
-        self.chunker = CodeChunker(max_chunk_size)
-        self.processed_chunks = []
+Return ONLY the cleaned Python code, nothing else"""
+
+        cleaned = self.call_api(prompt, chunk_code)
+        return cleaned
     
-    def add_comments_to_chunk(self, code_chunk):
-        context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS OUTSIDE CODE.
-Add clear, concise docstrings and inline comments to this code.
-Use Google-style docstrings for functions and classes.
-Add inline comments only where logic is complex.
-Do not change any functionality."""
-        
-        result = generate_code(context, code_chunk)
-        return extract_code_block(result)
-    
-    def rename_variables_in_chunk(self, code_chunk):
-        context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS.
-Rename variables and parameters to meaningful, descriptive names following PEP8.
-Use snake_case for variables and functions.
-Use PascalCase for classes.
-Maintain all functionality exactly as is."""
-        
-        result = generate_code(context, code_chunk)
-        return extract_code_block(result)
-    
-    def clean_code_chunk(self, code_chunk):
-        context = """RESPOND WITH ONLY EXECUTABLE PYTHON CODE. NO EXPLANATIONS.
-Clean and format this code following PEP8:
-1. Fix indentation and spacing
-2. Organize imports
-3. Remove redundant code
-4. Improve structure
-Maintain all functionality."""
-        
-        result = generate_code(context, code_chunk)
-        return extract_code_block(result)
-    
-    def process_chunk(self, code_chunk, operations):
-        processed = code_chunk
-        
-        for operation in operations:
-            if operation == 'comment':
-                processed = self.add_comments_to_chunk(processed)
-            elif operation == 'rename':
-                processed = self.rename_variables_in_chunk(processed)
-            elif operation == 'clean':
-                processed = self.clean_code_chunk(processed)
-        
-        return processed
-    
-    def process_large_code(self, code, operations=['comment', 'rename', 'clean']):
-        chunks = self.chunker.chunk_code(code)
-        processed_parts = []
-        
-        print(f"Processing {len(chunks)} chunks...")
-        
-        for i, chunk_group in enumerate(chunks):
-            print(f"Processing chunk {i + 1}/{len(chunks)}...")
-            
-            chunk_code = '\n\n'.join([block['code'] for block in chunk_group])
-            processed = self.process_chunk(chunk_code, operations)
-            processed_parts.append(processed)
-        
-        return self.merge_processed_chunks(processed_parts)
-    
-    def merge_processed_chunks(self, chunks):
-        all_imports = set()
-        code_blocks = []
-        
-        import_pattern = r'^(?:from\s+\S+\s+)?import\s+.+$'
+    def merge_class_parts(self, chunks):
+        merged = []
+        class_parts = {}
         
         for chunk in chunks:
-            lines = chunk.split('\n')
-            chunk_imports = []
-            chunk_code = []
+            if chunk['type'] == 'class_part':
+                header = chunk.get('header', '')
+                if header not in class_parts:
+                    class_parts[header] = []
+                class_parts[header].append(chunk)
+            else:
+                merged.append(chunk)
+        
+        for header, parts in class_parts.items():
+            parts.sort(key=lambda x: x['start'])
             
-            for line in lines:
-                if re.match(import_pattern, line.strip()):
-                    all_imports.add(line.strip())
+            all_code = []
+            header_added = False
+            
+            for part in parts:
+                code = part['code']
+                
+                if header and code.startswith(header):
+                    if not header_added:
+                        all_code.append(code)
+                        header_added = True
+                    else:
+                        remaining = code[len(header):].strip('\n')
+                        if remaining:
+                            all_code.append(remaining)
                 else:
-                    chunk_code.append(line)
+                    all_code.append(code)
             
-            code_blocks.append('\n'.join(chunk_code))
+            merged.append({
+                'type': 'class',
+                'code': '\n'.join(all_code),
+                'start': parts[0]['start'],
+                'end': parts[-1]['end']
+            })
         
-        sorted_imports = sorted(all_imports)
+        merged.sort(key=lambda x: x['start'])
+        return merged
+    
+    def deduplicate_imports(self, code):
+        lines = code.split('\n')
+        import_lines = []
+        other_lines = []
+        seen_imports = set()
         
-        final_code = '\n'.join(sorted_imports)
-        if sorted_imports:
-            final_code += '\n\n'
-        final_code += '\n\n'.join(code_blocks)
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                if stripped not in seen_imports:
+                    seen_imports.add(stripped)
+                    import_lines.append(line)
+            else:
+                other_lines.append(line)
+        
+        import_lines.sort(key=lambda x: (
+            0 if x.strip().startswith('import ') else 1,
+            x.strip().lower()
+        ))
+        
+        result_lines = import_lines
+        if import_lines and other_lines:
+            first_non_empty = next((i for i, l in enumerate(other_lines) if l.strip()), 0)
+            if first_non_empty == 0:
+                result_lines.append('')
+                result_lines.append('')
+        
+        result_lines.extend(other_lines)
+        
+        return '\n'.join(result_lines)
+    
+    def process_file(self, input_file, output_file):
+        print(f"Reading file: {input_file}")
+        
+        with open(input_file, 'r', encoding='utf-8') as f:
+            original_code = f.read()
+        
+        total_lines = len(original_code.split('\n'))
+        print(f"Total lines: {total_lines}")
+        
+        print("Analyzing code structure...")
+        chunks = self.smart_chunk(original_code)
+        print(f"Created {len(chunks)} chunks")
+        
+        processed_chunks = []
+        
+        for idx, chunk in enumerate(chunks):
+            chunk_lines = len(chunk['code'].split('\n'))
+            print(f"Processing chunk {idx + 1}/{len(chunks)} ({chunk['type']}, {chunk_lines} lines)...")
+            
+            if chunk['type'] == 'imports':
+                cleaned = self.clean_chunk(chunk['code'], chunk['type'])
+            else:
+                cleaned = self.clean_chunk(chunk['code'], chunk['type'])
+            
+            processed_chunks.append({
+                'type': chunk['type'],
+                'code': cleaned,
+                'start': chunk['start'],
+                'end': chunk['end'],
+                'header': chunk.get('header', '')
+            })
+            
+            time.sleep(0.5)
+        
+        print("Merging processed chunks...")
+        merged_chunks = self.merge_class_parts(processed_chunks)
+        
+        final_code_parts = []
+        for chunk in merged_chunks:
+            final_code_parts.append(chunk['code'])
+        
+        final_code = '\n\n'.join(final_code_parts)
+        
+        print("Deduplicating imports...")
+        final_code = self.deduplicate_imports(final_code)
+        
+        final_code = re.sub(r'\n{4,}', '\n\n\n', final_code)
+        
+        print(f"Writing cleaned code to: {output_file}")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(final_code)
+        
+        final_lines = len(final_code.split('\n'))
+        print(f"Done! Original: {total_lines} lines, Cleaned: {final_lines} lines")
         
         return final_code
-    
-    def process_file(self, input_file, output_file, operations=['comment', 'rename', 'clean']):
-        with open(input_file, 'r') as f:
-            code = f.read()
-        
-        processed_code = self.process_large_code(code, operations)
-        
-        with open(output_file, 'w') as f:
-            f.write(processed_code)
-        
-        print(f"Processed code saved to: {output_file}")
-        return processed_code
 
 
-def comment_code(code):
-    processor = CodeCommenterCleaner()
-    return processor.process_large_code(code, ['comment'])
-
-
-def clean_and_rename(code):
-    processor = CodeCommenterCleaner()
-    return processor.process_large_code(code, ['clean', 'rename'])
-
-
-def full_code_cleanup(code):
-    processor = CodeCommenterCleaner()
-    return processor.process_large_code(code, ['clean', 'rename', 'comment'])
-
-
-def process_code_file(input_path, output_path, operations=['comment', 'rename', 'clean']):
-    processor = CodeCommenterCleaner()
-    return processor.process_file(input_path, output_path, operations)
+def clean_code_file(input_path, output_path):
+    cleaner = LargeCodeCleaner()
+    return cleaner.process_file(input_path, output_path)
 
 
 if __name__ == "__main__":
-    sample_code = '''
-import pandas as pd
-import numpy as np
-
-def f(x,y,z):
-    a=[]
-    for i in range(len(x)):
-        if x[i]>y:
-            a.append(x[i]*z)
-    return a
-
-class D:
-    def __init__(s,n,v):
-        s.n=n
-        s.v=v
-    def g(s):
-        return s.n+str(s.v)
-    def p(s,df):
-        df2=df[df['c1']>10]
-        df3=df2.groupby('c2').sum()
-        return df3
-
-def calc(l):
-    t=0
-    for i in l:
-        t=t+i
-    return t/len(l)
-'''
+    import sys
     
-    print("Original Code:")
-    print(sample_code)
-    print("\n" + "="*50 + "\n")
-    print("Processed Code:")
-    print(full_code_cleanup(sample_code))
-
-
-from code_enhancer import enhance_code, enhance_from_file
-enhanced = enhance_code(your_code, 'runtime')
-enhance_from_file('input.py', 'optimized.py', 'all')
-
-from automated_code_writer import AutomatedCodeWriter
-writer = AutomatedCodeWriter()
-writer.write_project_from_prompt("Create a REST API for user management", "my_api_project")
-writer.generate_single_file("Create a CSV parser with validation", "csv_parser.py")
-
-from code_commenter_cleaner import process_code_file, full_code_cleanup
-process_code_file('messy_code.py', 'clean_code.py', ['clean', 'rename', 'comment'])
-cleaned = full_code_cleanup(large_code_string)
+    if len(sys.argv) >= 3:
+        input_file = sys.argv[1]
+        output_file = sys.argv[2]
+    else:
+        input_file = "messy_code.py"
+        output_file = "clean_code.py"
+    
+    if not os.path.exists(input_file):
+        print(f"Error: Input file '{input_file}' not found")
+        sys.exit(1)
+    
+    clean_code_file(input_file, output_file)
