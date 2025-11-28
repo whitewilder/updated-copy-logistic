@@ -1,5 +1,3 @@
-
-
 import requests
 import json
 import re
@@ -87,6 +85,79 @@ class LargeCodeCleaner:
     def get_line_indent(self, line):
         return len(line) - len(line.lstrip())
     
+    def count_brackets(self, text):
+        """Count open and close brackets in text"""
+        counts = {
+            'paren': 0,
+            'bracket': 0,
+            'brace': 0
+        }
+        
+        in_string = False
+        string_char = None
+        i = 0
+        
+        while i < len(text):
+            char = text[i]
+            
+            if char in '"\'':
+                if i > 0 and text[i-1] == '\\':
+                    i += 1
+                    continue
+                
+                if i + 2 < len(text) and text[i:i+3] in ('"""', "'''"):
+                    triple = text[i:i+3]
+                    if in_string and string_char == triple:
+                        in_string = False
+                        string_char = None
+                    elif not in_string:
+                        in_string = True
+                        string_char = triple
+                    i += 3
+                    continue
+                else:
+                    if in_string and string_char == char:
+                        in_string = False
+                        string_char = None
+                    elif not in_string:
+                        in_string = True
+                        string_char = char
+            
+            if not in_string:
+                if char == '(':
+                    counts['paren'] += 1
+                elif char == ')':
+                    counts['paren'] -= 1
+                elif char == '[':
+                    counts['bracket'] += 1
+                elif char == ']':
+                    counts['bracket'] -= 1
+                elif char == '{':
+                    counts['brace'] += 1
+                elif char == '}':
+                    counts['brace'] -= 1
+            
+            i += 1
+        
+        return counts
+    
+    def is_brackets_balanced(self, text):
+        """Check if all brackets are balanced"""
+        counts = self.count_brackets(text)
+        return counts['paren'] == 0 and counts['bracket'] == 0 and counts['brace'] == 0
+    
+    def find_bracket_block_end(self, lines, start_idx):
+        """Find the end of a multi-line bracket block"""
+        combined = ""
+        
+        for i in range(start_idx, len(lines)):
+            combined += lines[i] + "\n"
+            
+            if self.is_brackets_balanced(combined):
+                return i + 1
+        
+        return len(lines)
+    
     def is_block_start(self, line):
         stripped = line.strip()
         if not stripped:
@@ -120,7 +191,69 @@ class LargeCodeCleaner:
         
         return False
     
-    def find_block_end(self, lines, start_idx):
+    def has_unclosed_brackets(self, line):
+        """Check if a line has unclosed brackets"""
+        counts = self.count_brackets(line)
+        return counts['paren'] > 0 or counts['bracket'] > 0 or counts['brace'] > 0
+    
+    def is_line_safe_to_split(self, lines, idx):
+        """
+        Check if it's safe to split at this line index.
+        Returns False if:
+        - Line is inside an unclosed bracket block
+        - Line is inside a multi-line string
+        - Line is continuation of previous line
+        """
+        if idx <= 0 or idx >= len(lines):
+            return False
+        
+        combined_before = "\n".join(lines[:idx])
+        
+        if not self.is_brackets_balanced(combined_before):
+            return False
+        
+        prev_line = lines[idx - 1].rstrip()
+        if prev_line.endswith('\\'):
+            return False
+        
+        if prev_line.endswith(',') and self.has_unclosed_brackets(prev_line):
+            return False
+        
+        current_line = lines[idx]
+        if current_line.strip().startswith(')') or current_line.strip().startswith(']') or current_line.strip().startswith('}'):
+            return False
+        
+        if current_line.strip().startswith(','):
+            return False
+        
+        triple_count = combined_before.count('"""') + combined_before.count("'''")
+        if triple_count % 2 != 0:
+            return False
+        
+        return True
+    
+    def find_safe_split_point(self, lines, target_idx, search_range=20):
+        """Find a safe point to split near the target index"""
+        for offset in range(search_range):
+            check_idx = target_idx + offset
+            if check_idx < len(lines) and self.is_line_safe_to_split(lines, check_idx):
+                if self.is_top_level_block(lines[check_idx]) or self.is_block_start(lines[check_idx]):
+                    return check_idx
+        
+        for offset in range(search_range):
+            check_idx = target_idx + offset
+            if check_idx < len(lines) and self.is_line_safe_to_split(lines, check_idx):
+                return check_idx
+        
+        for offset in range(1, search_range):
+            check_idx = target_idx - offset
+            if check_idx > 0 and self.is_line_safe_to_split(lines, check_idx):
+                return check_idx
+        
+        return target_idx
+    
+    def find_block_end_with_brackets(self, lines, start_idx):
+        """Find block end considering bracket completeness"""
         if start_idx >= len(lines):
             return start_idx
         
@@ -133,29 +266,62 @@ class LargeCodeCleaner:
                 line = lines[i]
                 if line.strip() and not line.strip().startswith('@'):
                     if line.strip().startswith('def ') or line.strip().startswith('class ') or line.strip().startswith('async def '):
-                        return self.find_block_end(lines, i)
+                        return self.find_block_end_with_brackets(lines, i)
                     break
                 decorator_end = i
             return decorator_end + 1
         
-        for i in range(start_idx + 1, len(lines)):
+        combined = ""
+        block_end = start_idx
+        found_body = False
+        
+        for i in range(start_idx, len(lines)):
             line = lines[i]
+            combined += line + "\n"
             
-            if not line.strip():
+            if not self.is_brackets_balanced(combined):
+                block_end = i + 1
                 continue
             
-            if line.strip().startswith('#'):
-                continue
+            if i > start_idx and line.strip() and not line.strip().startswith('#'):
+                current_indent = self.get_line_indent(line)
+                
+                if current_indent > start_indent:
+                    found_body = True
+                
+                if found_body and current_indent <= start_indent:
+                    if self.is_top_level_block(line) or (current_indent == start_indent and self.is_block_start(line)):
+                        return i
             
-            current_indent = self.get_line_indent(line)
-            
-            if current_indent <= start_indent:
-                if self.is_top_level_block(line) or (current_indent == start_indent and self.is_block_start(line)):
-                    return i
+            block_end = i + 1
         
         return len(lines)
     
-    def smart_chunk(self, code):
+    def extract_complete_structure(self, lines, start_idx):
+        """
+        Extract a complete code structure starting at start_idx.
+        Ensures all brackets, strings, and blocks are complete.
+        """
+        if start_idx >= len(lines):
+            return start_idx, []
+        
+        start_line = lines[start_idx]
+        
+        if self.is_top_level_block(start_line):
+            end_idx = self.find_block_end_with_brackets(lines, start_idx)
+            return end_idx, lines[start_idx:end_idx]
+        
+        if self.has_unclosed_brackets(start_line):
+            end_idx = self.find_bracket_block_end(lines, start_idx)
+            return end_idx, lines[start_idx:end_idx]
+        
+        return start_idx + 1, [start_line]
+    
+    def smart_chunk_with_bracket_protection(self, code):
+        """
+        Main chunking function that protects bracket blocks from being split.
+        Keeps complete structures regardless of size.
+        """
         lines = code.split('\n')
         total_lines = len(lines)
         chunks = []
@@ -179,64 +345,133 @@ class LargeCodeCleaner:
                 'type': 'imports',
                 'code': '\n'.join(import_lines),
                 'start': 0,
-                'end': code_start_idx
+                'end': code_start_idx,
+                'protected': False
             })
         
         i = code_start_idx
+        current_chunk_lines = []
+        current_chunk_start = i
         
         while i < total_lines:
             line = lines[i]
             
             if not line.strip():
+                current_chunk_lines.append(line)
                 i += 1
                 continue
             
             if self.is_top_level_block(line):
-                block_end = self.find_block_end(lines, i)
-                block_lines = lines[i:block_end]
+                if current_chunk_lines:
+                    chunk_code = '\n'.join(current_chunk_lines)
+                    if chunk_code.strip():
+                        chunks.append({
+                            'type': 'standalone',
+                            'code': chunk_code,
+                            'start': current_chunk_start,
+                            'end': i,
+                            'protected': False
+                        })
+                    current_chunk_lines = []
+                
+                block_end, block_lines = self.extract_complete_structure(lines, i)
                 block_code = '\n'.join(block_lines)
                 
-                if len(block_lines) > self.chunk_size:
-                    sub_chunks = self.chunk_large_block(block_lines, i)
+                is_large = len(block_lines) > self.chunk_size
+                has_complex_brackets = not self.is_brackets_balanced(block_code[:500]) if len(block_code) > 500 else False
+                
+                block_type = 'class' if line.strip().startswith('class ') else 'function'
+                
+                if is_large and block_type == 'class' and not has_complex_brackets:
+                    sub_chunks = self.chunk_large_class_safely(block_lines, i)
                     chunks.extend(sub_chunks)
                 else:
-                    block_type = 'class' if line.strip().startswith('class ') else 'function'
                     chunks.append({
                         'type': block_type,
                         'code': block_code,
                         'start': i,
-                        'end': block_end
+                        'end': block_end,
+                        'protected': is_large
                     })
                 
                 i = block_end
+                current_chunk_start = i
+            
+            elif self.has_unclosed_brackets(line):
+                if current_chunk_lines:
+                    chunk_code = '\n'.join(current_chunk_lines)
+                    if chunk_code.strip():
+                        chunks.append({
+                            'type': 'standalone',
+                            'code': chunk_code,
+                            'start': current_chunk_start,
+                            'end': i,
+                            'protected': False
+                        })
+                    current_chunk_lines = []
+                    current_chunk_start = i
+                
+                bracket_end = self.find_bracket_block_end(lines, i)
+                bracket_lines = lines[i:bracket_end]
+                bracket_code = '\n'.join(bracket_lines)
+                
+                chunks.append({
+                    'type': 'data_structure',
+                    'code': bracket_code,
+                    'start': i,
+                    'end': bracket_end,
+                    'protected': True
+                })
+                
+                i = bracket_end
+                current_chunk_start = i
+            
             else:
-                standalone_start = i
-                standalone_lines = []
+                current_chunk_lines.append(line)
                 
-                while i < total_lines and not self.is_top_level_block(lines[i]):
-                    standalone_lines.append(lines[i])
-                    i += 1
+                if len(current_chunk_lines) >= self.chunk_size:
+                    safe_point = self.find_safe_split_point(current_chunk_lines, self.chunk_size - 10)
                     
-                    if len(standalone_lines) >= self.chunk_size:
-                        break
+                    if safe_point > 0 and safe_point < len(current_chunk_lines):
+                        chunk_to_save = current_chunk_lines[:safe_point]
+                        remaining = current_chunk_lines[safe_point:]
+                        
+                        chunk_code = '\n'.join(chunk_to_save)
+                        if chunk_code.strip():
+                            chunks.append({
+                                'type': 'standalone',
+                                'code': chunk_code,
+                                'start': current_chunk_start,
+                                'end': current_chunk_start + safe_point,
+                                'protected': False
+                            })
+                        
+                        current_chunk_lines = remaining
+                        current_chunk_start = current_chunk_start + safe_point
                 
-                if standalone_lines:
-                    chunks.append({
-                        'type': 'standalone',
-                        'code': '\n'.join(standalone_lines),
-                        'start': standalone_start,
-                        'end': i
-                    })
+                i += 1
+        
+        if current_chunk_lines:
+            chunk_code = '\n'.join(current_chunk_lines)
+            if chunk_code.strip():
+                chunks.append({
+                    'type': 'standalone',
+                    'code': chunk_code,
+                    'start': current_chunk_start,
+                    'end': total_lines,
+                    'protected': False
+                })
         
         return chunks
     
-    def chunk_large_block(self, block_lines, global_start):
+    def chunk_large_class_safely(self, class_lines, global_start):
+        """Chunk a large class while protecting bracket blocks"""
         chunks = []
         
         header_lines = []
         body_start = 0
         
-        for i, line in enumerate(block_lines):
+        for i, line in enumerate(class_lines):
             header_lines.append(line)
             if line.rstrip().endswith(':') and not line.strip().startswith('@'):
                 body_start = i + 1
@@ -245,21 +480,23 @@ class LargeCodeCleaner:
         if body_start == 0:
             body_start = 1
         
-        body_lines = block_lines[body_start:]
         header_code = '\n'.join(header_lines)
+        body_lines = class_lines[body_start:]
         
         if not body_lines:
             return [{
-                'type': 'block',
-                'code': '\n'.join(block_lines),
+                'type': 'class',
+                'code': '\n'.join(class_lines),
                 'start': global_start,
-                'end': global_start + len(block_lines)
+                'end': global_start + len(class_lines),
+                'protected': True,
+                'header': header_code
             }]
         
         base_indent = self.get_line_indent(body_lines[0]) if body_lines[0].strip() else 4
         
-        current_chunk_lines = []
-        method_start = 0
+        current_method_lines = []
+        current_method_start = 0
         i = 0
         
         while i < len(body_lines):
@@ -268,73 +505,101 @@ class LargeCodeCleaner:
             is_method_start = False
             if line.strip():
                 line_indent = self.get_line_indent(line)
-                if line_indent == base_indent and (line.strip().startswith('def ') or line.strip().startswith('async def ') or line.strip().startswith('@')):
-                    is_method_start = True
+                if line_indent == base_indent:
+                    if line.strip().startswith('def ') or line.strip().startswith('async def ') or line.strip().startswith('@'):
+                        is_method_start = True
             
-            if is_method_start and current_chunk_lines:
-                chunks.append({
-                    'type': 'class_part',
-                    'code': header_code + '\n' + '\n'.join(current_chunk_lines),
-                    'start': global_start,
-                    'end': global_start + body_start + i,
-                    'header': header_code
-                })
-                current_chunk_lines = []
-            
-            current_chunk_lines.append(line)
-            
-            if len(current_chunk_lines) >= self.chunk_size:
-                next_safe = i + 1
-                for j in range(i + 1, min(i + 20, len(body_lines))):
-                    check_line = body_lines[j]
-                    if check_line.strip():
-                        check_indent = self.get_line_indent(check_line)
-                        if check_indent == base_indent and self.is_block_start(check_line):
-                            next_safe = j
-                            break
+            if is_method_start and current_method_lines:
+                method_code = '\n'.join(current_method_lines)
                 
-                for k in range(i + 1, next_safe):
-                    if k < len(body_lines):
-                        current_chunk_lines.append(body_lines[k])
-                
-                chunks.append({
-                    'type': 'class_part',
-                    'code': header_code + '\n' + '\n'.join(current_chunk_lines),
-                    'start': global_start,
-                    'end': global_start + body_start + next_safe,
-                    'header': header_code
-                })
-                current_chunk_lines = []
-                i = next_safe
+                if self.is_brackets_balanced(method_code):
+                    chunks.append({
+                        'type': 'class_part',
+                        'code': header_code + '\n' + method_code,
+                        'start': global_start + body_start + current_method_start,
+                        'end': global_start + body_start + i,
+                        'protected': False,
+                        'header': header_code
+                    })
+                    current_method_lines = []
+                    current_method_start = i
+            
+            current_method_lines.append(line)
+            
+            if self.has_unclosed_brackets(line):
+                bracket_end_local = self.find_bracket_block_end(body_lines, i)
+                for j in range(i + 1, bracket_end_local):
+                    current_method_lines.append(body_lines[j])
+                i = bracket_end_local
                 continue
             
             i += 1
         
-        if current_chunk_lines:
+        if current_method_lines:
+            method_code = '\n'.join(current_method_lines)
             chunks.append({
                 'type': 'class_part',
-                'code': header_code + '\n' + '\n'.join(current_chunk_lines),
-                'start': global_start,
-                'end': global_start + len(block_lines),
+                'code': header_code + '\n' + method_code,
+                'start': global_start + body_start + current_method_start,
+                'end': global_start + len(class_lines),
+                'protected': False,
                 'header': header_code
             })
         
         return chunks
     
-    def clean_chunk(self, chunk_code, chunk_type):
-        prompt = """RESPOND WITH ONLY CLEAN EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
+    def validate_chunk(self, chunk_code):
+        """Validate that a chunk is complete and won't cause syntax errors"""
+        if not self.is_brackets_balanced(chunk_code):
+            return False, "Unbalanced brackets"
+        
+        triple_double = chunk_code.count('"""')
+        triple_single = chunk_code.count("'''")
+        if triple_double % 2 != 0 or triple_single % 2 != 0:
+            return False, "Unclosed triple-quoted string"
+        
+        lines = chunk_code.split('\n')
+        for line in lines:
+            if line.rstrip().endswith('\\'):
+                idx = lines.index(line)
+                if idx == len(lines) - 1:
+                    return False, "Trailing line continuation"
+        
+        return True, "Valid"
+    
+    def clean_chunk(self, chunk_code, chunk_type, is_protected=False):
+        if is_protected:
+            prompt = """RESPOND WITH ONLY CLEAN EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
+
+Clean this Python code while PRESERVING THE EXACT STRUCTURE:
+1. Add docstrings to functions and classes
+2. Add brief inline comments for complex logic
+3. Rename unclear variables to meaningful names
+4. Fix formatting and follow PEP8
+5. DO NOT modify any data structures, dictionaries, lists or their contents
+6. DO NOT break any multi-line expressions
+7. Keep all brackets, parentheses exactly as they are
+
+Return ONLY the cleaned Python code"""
+        else:
+            prompt = """RESPOND WITH ONLY CLEAN EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
 
 Clean and improve this Python code:
 1. Add clear docstrings to functions and classes
 2. Add brief inline comments for complex logic only
-3. Rename unclear variables to meaningful names (e.g., x -> counter, df -> dataframe)
+3. Rename unclear variables to meaningful names
 4. Fix formatting and follow PEP8
 5. Keep all functionality exactly the same
-6. Preserve the exact structure (class/function definitions)
 
-Return ONLY the cleaned Python code, nothing else"""
+Return ONLY the cleaned Python code"""
 
         cleaned = self.call_api(prompt, chunk_code)
+        
+        is_valid, error = self.validate_chunk(cleaned)
+        if not is_valid:
+            print(f"  Warning: Cleaned chunk validation failed ({error}), using original")
+            return chunk_code
+        
         return cleaned
     
     def merge_class_parts(self, chunks):
@@ -374,7 +639,8 @@ Return ONLY the cleaned Python code, nothing else"""
                 'type': 'class',
                 'code': '\n'.join(all_code),
                 'start': parts[0]['start'],
-                'end': parts[-1]['end']
+                'end': parts[-1]['end'],
+                'protected': True
             })
         
         merged.sort(key=lambda x: x['start'])
@@ -420,27 +686,41 @@ Return ONLY the cleaned Python code, nothing else"""
         total_lines = len(original_code.split('\n'))
         print(f"Total lines: {total_lines}")
         
-        print("Analyzing code structure...")
-        chunks = self.smart_chunk(original_code)
+        print("Analyzing code structure with bracket protection...")
+        chunks = self.smart_chunk_with_bracket_protection(original_code)
         print(f"Created {len(chunks)} chunks")
+        
+        for idx, chunk in enumerate(chunks):
+            chunk_lines = len(chunk['code'].split('\n'))
+            protected_status = " [PROTECTED]" if chunk.get('protected') else ""
+            print(f"  Chunk {idx + 1}: {chunk['type']}, {chunk_lines} lines{protected_status}")
+        
+        print("\nValidating all chunks...")
+        for idx, chunk in enumerate(chunks):
+            is_valid, error = self.validate_chunk(chunk['code'])
+            if not is_valid:
+                print(f"  WARNING: Chunk {idx + 1} has issue: {error}")
         
         processed_chunks = []
         
         for idx, chunk in enumerate(chunks):
             chunk_lines = len(chunk['code'].split('\n'))
-            print(f"Processing chunk {idx + 1}/{len(chunks)} ({chunk['type']}, {chunk_lines} lines)...")
+            protected_status = " [PROTECTED]" if chunk.get('protected') else ""
+            print(f"Processing chunk {idx + 1}/{len(chunks)} ({chunk['type']}, {chunk_lines} lines){protected_status}...")
             
-            if chunk['type'] == 'imports':
-                cleaned = self.clean_chunk(chunk['code'], chunk['type'])
-            else:
-                cleaned = self.clean_chunk(chunk['code'], chunk['type'])
+            cleaned = self.clean_chunk(
+                chunk['code'], 
+                chunk['type'], 
+                chunk.get('protected', False)
+            )
             
             processed_chunks.append({
                 'type': chunk['type'],
                 'code': cleaned,
                 'start': chunk['start'],
                 'end': chunk['end'],
-                'header': chunk.get('header', '')
+                'header': chunk.get('header', ''),
+                'protected': chunk.get('protected', False)
             })
             
             time.sleep(0.5)
@@ -458,6 +738,11 @@ Return ONLY the cleaned Python code, nothing else"""
         final_code = self.deduplicate_imports(final_code)
         
         final_code = re.sub(r'\n{4,}', '\n\n\n', final_code)
+        
+        print("Final validation...")
+        is_valid, error = self.validate_chunk(final_code)
+        if not is_valid:
+            print(f"WARNING: Final code has validation issue: {error}")
         
         print(f"Writing cleaned code to: {output_file}")
         with open(output_file, 'w', encoding='utf-8') as f:
