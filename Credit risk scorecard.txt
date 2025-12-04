@@ -1,776 +1,372 @@
-import requests
-import json
-import re
+
+
+"""
+Pipeline Mapper - Scans folder structure and maps dependencies
+Author: Automated Pipeline Documentation System
+"""
+
 import os
-import time
+import re
+import ast
+import json
+import yaml
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import List, Dict, Set, Optional
+from datetime import datetime
 
-class LargeCodeCleaner:
-    def __init__(self):
-        self.token = None
-        self.auth_url = 'https://your-auth-url.com/token'
-        self.api_endpoint = 'https://api-test-dev.tpk.cloud.us.comp/dev'
-        self.credentials = {
-            "staff_id": 'xxxx',
-            "password": 'xxx'
-        }
-        self.chunk_size = 80
-        self.max_retries = 3
-    
-    def get_token(self):
-        if not self.token:
-            print("Getting access token...")
-            response = requests.post(self.auth_url, json=self.credentials)
-            self.token = json.loads(response.text)
-        return self.token
-    
-    def call_api(self, prompt, code):
-        token = self.get_token()
-        
-        data = {
-            'messages': [{
-                'content': f'{prompt}:\n\n{code}',
-                'role': 'developer'
-            }],
-            'stream': False,
-            'context': {
-                'overrides': {
-                    'approach': None,
-                    'use_gpt4v': True,
-                    'gpt4v_input': 'textAndImages',
-                    'conversational_chain': True,
-                    'rag_chain': False,
-                    'session_id': 'cleaner-session-001',
-                    'uid': '333.3.211.7',
-                    'product': 'dev',
-                    'model': {
-                        'key': "{'azure_endpoint': 'https://abc-multi-gfopenai-us-dev-01.openai.azure.com/', 'model': 'gpt-4-0125-Preview'}",
-                        'text': 'gpt-4-0125-Preview'
-                    }
-                }
-            },
-            'session_state': None
-        }
-        
-        header = {"Authorization": "Bearer " + token['access_token']}
-        
-        for attempt in range(self.max_retries):
-            try:
-                result = requests.post(self.api_endpoint, json=data, headers=header, timeout=120)
-                out = result.json()
-                response = out['choices'][0]['message']['content']
-                return self.extract_code(response)
-            except Exception as e:
-                print(f"  Attempt {attempt + 1} failed: {str(e)}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(2)
-                else:
-                    print("  Returning original chunk due to API failure")
-                    return code
-        
-        return code
-    
-    def extract_code(self, response):
-        patterns = [
-            r'```python\s*(.*?)```',
-            r'```\s*(.*?)```',
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, response, re.DOTALL)
-            if matches:
-                return matches[0].strip()
-        
-        return response.strip()
-    
-    def get_line_indent(self, line):
-        return len(line) - len(line.lstrip())
-    
-    def count_brackets(self, text):
-        """Count open and close brackets in text"""
-        counts = {
-            'paren': 0,
-            'bracket': 0,
-            'brace': 0
-        }
-        
-        in_string = False
-        string_char = None
-        i = 0
-        
-        while i < len(text):
-            char = text[i]
-            
-            if char in '"\'':
-                if i > 0 and text[i-1] == '\\':
-                    i += 1
-                    continue
-                
-                if i + 2 < len(text) and text[i:i+3] in ('"""', "'''"):
-                    triple = text[i:i+3]
-                    if in_string and string_char == triple:
-                        in_string = False
-                        string_char = None
-                    elif not in_string:
-                        in_string = True
-                        string_char = triple
-                    i += 3
-                    continue
-                else:
-                    if in_string and string_char == char:
-                        in_string = False
-                        string_char = None
-                    elif not in_string:
-                        in_string = True
-                        string_char = char
-            
-            if not in_string:
-                if char == '(':
-                    counts['paren'] += 1
-                elif char == ')':
-                    counts['paren'] -= 1
-                elif char == '[':
-                    counts['bracket'] += 1
-                elif char == ']':
-                    counts['bracket'] -= 1
-                elif char == '{':
-                    counts['brace'] += 1
-                elif char == '}':
-                    counts['brace'] -= 1
-            
-            i += 1
-        
-        return counts
-    
-    def is_brackets_balanced(self, text):
-        """Check if all brackets are balanced"""
-        counts = self.count_brackets(text)
-        return counts['paren'] == 0 and counts['bracket'] == 0 and counts['brace'] == 0
-    
-    def find_bracket_block_end(self, lines, start_idx):
-        """Find the end of a multi-line bracket block"""
-        combined = ""
-        
-        for i in range(start_idx, len(lines)):
-            combined += lines[i] + "\n"
-            
-            if self.is_brackets_balanced(combined):
-                return i + 1
-        
-        return len(lines)
-    
-    def is_block_start(self, line):
-        stripped = line.strip()
-        if not stripped:
-            return False
-        
-        block_keywords = [
-            'def ', 'class ', 'async def ',
-            'if ', 'elif ', 'else:',
-            'for ', 'while ',
-            'try:', 'except', 'finally:',
-            'with ',
-            '@'
-        ]
-        
-        for keyword in block_keywords:
-            if stripped.startswith(keyword):
-                return True
-        
-        return False
-    
-    def is_top_level_block(self, line):
-        stripped = line.strip()
-        if not stripped:
-            return False
-        
-        indent = self.get_line_indent(line)
-        
-        if indent == 0:
-            if stripped.startswith('def ') or stripped.startswith('class ') or stripped.startswith('async def ') or stripped.startswith('@'):
-                return True
-        
-        return False
-    
-    def has_unclosed_brackets(self, line):
-        """Check if a line has unclosed brackets"""
-        counts = self.count_brackets(line)
-        return counts['paren'] > 0 or counts['bracket'] > 0 or counts['brace'] > 0
-    
-    def is_line_safe_to_split(self, lines, idx):
-        """
-        Check if it's safe to split at this line index.
-        Returns False if:
-        - Line is inside an unclosed bracket block
-        - Line is inside a multi-line string
-        - Line is continuation of previous line
-        """
-        if idx <= 0 or idx >= len(lines):
-            return False
-        
-        combined_before = "\n".join(lines[:idx])
-        
-        if not self.is_brackets_balanced(combined_before):
-            return False
-        
-        prev_line = lines[idx - 1].rstrip()
-        if prev_line.endswith('\\'):
-            return False
-        
-        if prev_line.endswith(',') and self.has_unclosed_brackets(prev_line):
-            return False
-        
-        current_line = lines[idx]
-        if current_line.strip().startswith(')') or current_line.strip().startswith(']') or current_line.strip().startswith('}'):
-            return False
-        
-        if current_line.strip().startswith(','):
-            return False
-        
-        triple_count = combined_before.count('"""') + combined_before.count("'''")
-        if triple_count % 2 != 0:
-            return False
-        
-        return True
-    
-    def find_safe_split_point(self, lines, target_idx, search_range=20):
-        """Find a safe point to split near the target index"""
-        for offset in range(search_range):
-            check_idx = target_idx + offset
-            if check_idx < len(lines) and self.is_line_safe_to_split(lines, check_idx):
-                if self.is_top_level_block(lines[check_idx]) or self.is_block_start(lines[check_idx]):
-                    return check_idx
-        
-        for offset in range(search_range):
-            check_idx = target_idx + offset
-            if check_idx < len(lines) and self.is_line_safe_to_split(lines, check_idx):
-                return check_idx
-        
-        for offset in range(1, search_range):
-            check_idx = target_idx - offset
-            if check_idx > 0 and self.is_line_safe_to_split(lines, check_idx):
-                return check_idx
-        
-        return target_idx
-    
-    def find_block_end_with_brackets(self, lines, start_idx):
-        """Find block end considering bracket completeness"""
-        if start_idx >= len(lines):
-            return start_idx
-        
-        start_line = lines[start_idx]
-        start_indent = self.get_line_indent(start_line)
-        
-        if start_line.strip().startswith('@'):
-            decorator_end = start_idx
-            for i in range(start_idx + 1, len(lines)):
-                line = lines[i]
-                if line.strip() and not line.strip().startswith('@'):
-                    if line.strip().startswith('def ') or line.strip().startswith('class ') or line.strip().startswith('async def '):
-                        return self.find_block_end_with_brackets(lines, i)
-                    break
-                decorator_end = i
-            return decorator_end + 1
-        
-        combined = ""
-        block_end = start_idx
-        found_body = False
-        
-        for i in range(start_idx, len(lines)):
-            line = lines[i]
-            combined += line + "\n"
-            
-            if not self.is_brackets_balanced(combined):
-                block_end = i + 1
-                continue
-            
-            if i > start_idx and line.strip() and not line.strip().startswith('#'):
-                current_indent = self.get_line_indent(line)
-                
-                if current_indent > start_indent:
-                    found_body = True
-                
-                if found_body and current_indent <= start_indent:
-                    if self.is_top_level_block(line) or (current_indent == start_indent and self.is_block_start(line)):
-                        return i
-            
-            block_end = i + 1
-        
-        return len(lines)
-    
-    def extract_complete_structure(self, lines, start_idx):
-        """
-        Extract a complete code structure starting at start_idx.
-        Ensures all brackets, strings, and blocks are complete.
-        """
-        if start_idx >= len(lines):
-            return start_idx, []
-        
-        start_line = lines[start_idx]
-        
-        if self.is_top_level_block(start_line):
-            end_idx = self.find_block_end_with_brackets(lines, start_idx)
-            return end_idx, lines[start_idx:end_idx]
-        
-        if self.has_unclosed_brackets(start_line):
-            end_idx = self.find_bracket_block_end(lines, start_idx)
-            return end_idx, lines[start_idx:end_idx]
-        
-        return start_idx + 1, [start_line]
-    
-    def smart_chunk_with_bracket_protection(self, code):
-        """
-        Main chunking function that protects bracket blocks from being split.
-        Keeps complete structures regardless of size.
-        """
-        lines = code.split('\n')
-        total_lines = len(lines)
-        chunks = []
-        
-        import_lines = []
-        code_start_idx = 0
-        
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith('import ') or stripped.startswith('from '):
-                import_lines.append(line)
-                code_start_idx = i + 1
-            elif stripped and not stripped.startswith('#'):
-                break
-            elif stripped.startswith('#') and i < 10:
-                import_lines.append(line)
-                code_start_idx = i + 1
-        
-        if import_lines:
-            chunks.append({
-                'type': 'imports',
-                'code': '\n'.join(import_lines),
-                'start': 0,
-                'end': code_start_idx,
-                'protected': False
-            })
-        
-        i = code_start_idx
-        current_chunk_lines = []
-        current_chunk_start = i
-        
-        while i < total_lines:
-            line = lines[i]
-            
-            if not line.strip():
-                current_chunk_lines.append(line)
-                i += 1
-                continue
-            
-            if self.is_top_level_block(line):
-                if current_chunk_lines:
-                    chunk_code = '\n'.join(current_chunk_lines)
-                    if chunk_code.strip():
-                        chunks.append({
-                            'type': 'standalone',
-                            'code': chunk_code,
-                            'start': current_chunk_start,
-                            'end': i,
-                            'protected': False
-                        })
-                    current_chunk_lines = []
-                
-                block_end, block_lines = self.extract_complete_structure(lines, i)
-                block_code = '\n'.join(block_lines)
-                
-                is_large = len(block_lines) > self.chunk_size
-                has_complex_brackets = not self.is_brackets_balanced(block_code[:500]) if len(block_code) > 500 else False
-                
-                block_type = 'class' if line.strip().startswith('class ') else 'function'
-                
-                if is_large and block_type == 'class' and not has_complex_brackets:
-                    sub_chunks = self.chunk_large_class_safely(block_lines, i)
-                    chunks.extend(sub_chunks)
-                else:
-                    chunks.append({
-                        'type': block_type,
-                        'code': block_code,
-                        'start': i,
-                        'end': block_end,
-                        'protected': is_large
-                    })
-                
-                i = block_end
-                current_chunk_start = i
-            
-            elif self.has_unclosed_brackets(line):
-                if current_chunk_lines:
-                    chunk_code = '\n'.join(current_chunk_lines)
-                    if chunk_code.strip():
-                        chunks.append({
-                            'type': 'standalone',
-                            'code': chunk_code,
-                            'start': current_chunk_start,
-                            'end': i,
-                            'protected': False
-                        })
-                    current_chunk_lines = []
-                    current_chunk_start = i
-                
-                bracket_end = self.find_bracket_block_end(lines, i)
-                bracket_lines = lines[i:bracket_end]
-                bracket_code = '\n'.join(bracket_lines)
-                
-                chunks.append({
-                    'type': 'data_structure',
-                    'code': bracket_code,
-                    'start': i,
-                    'end': bracket_end,
-                    'protected': True
-                })
-                
-                i = bracket_end
-                current_chunk_start = i
-            
-            else:
-                current_chunk_lines.append(line)
-                
-                if len(current_chunk_lines) >= self.chunk_size:
-                    safe_point = self.find_safe_split_point(current_chunk_lines, self.chunk_size - 10)
-                    
-                    if safe_point > 0 and safe_point < len(current_chunk_lines):
-                        chunk_to_save = current_chunk_lines[:safe_point]
-                        remaining = current_chunk_lines[safe_point:]
-                        
-                        chunk_code = '\n'.join(chunk_to_save)
-                        if chunk_code.strip():
-                            chunks.append({
-                                'type': 'standalone',
-                                'code': chunk_code,
-                                'start': current_chunk_start,
-                                'end': current_chunk_start + safe_point,
-                                'protected': False
-                            })
-                        
-                        current_chunk_lines = remaining
-                        current_chunk_start = current_chunk_start + safe_point
-                
-                i += 1
-        
-        if current_chunk_lines:
-            chunk_code = '\n'.join(current_chunk_lines)
-            if chunk_code.strip():
-                chunks.append({
-                    'type': 'standalone',
-                    'code': chunk_code,
-                    'start': current_chunk_start,
-                    'end': total_lines,
-                    'protected': False
-                })
-        
-        return chunks
-    
-    def chunk_large_class_safely(self, class_lines, global_start):
-        """Chunk a large class while protecting bracket blocks"""
-        chunks = []
-        
-        header_lines = []
-        body_start = 0
-        
-        for i, line in enumerate(class_lines):
-            header_lines.append(line)
-            if line.rstrip().endswith(':') and not line.strip().startswith('@'):
-                body_start = i + 1
-                break
-        
-        if body_start == 0:
-            body_start = 1
-        
-        header_code = '\n'.join(header_lines)
-        body_lines = class_lines[body_start:]
-        
-        if not body_lines:
-            return [{
-                'type': 'class',
-                'code': '\n'.join(class_lines),
-                'start': global_start,
-                'end': global_start + len(class_lines),
-                'protected': True,
-                'header': header_code
-            }]
-        
-        base_indent = self.get_line_indent(body_lines[0]) if body_lines[0].strip() else 4
-        
-        current_method_lines = []
-        current_method_start = 0
-        i = 0
-        
-        while i < len(body_lines):
-            line = body_lines[i]
-            
-            is_method_start = False
-            if line.strip():
-                line_indent = self.get_line_indent(line)
-                if line_indent == base_indent:
-                    if line.strip().startswith('def ') or line.strip().startswith('async def ') or line.strip().startswith('@'):
-                        is_method_start = True
-            
-            if is_method_start and current_method_lines:
-                method_code = '\n'.join(current_method_lines)
-                
-                if self.is_brackets_balanced(method_code):
-                    chunks.append({
-                        'type': 'class_part',
-                        'code': header_code + '\n' + method_code,
-                        'start': global_start + body_start + current_method_start,
-                        'end': global_start + body_start + i,
-                        'protected': False,
-                        'header': header_code
-                    })
-                    current_method_lines = []
-                    current_method_start = i
-            
-            current_method_lines.append(line)
-            
-            if self.has_unclosed_brackets(line):
-                bracket_end_local = self.find_bracket_block_end(body_lines, i)
-                for j in range(i + 1, bracket_end_local):
-                    current_method_lines.append(body_lines[j])
-                i = bracket_end_local
-                continue
-            
-            i += 1
-        
-        if current_method_lines:
-            method_code = '\n'.join(current_method_lines)
-            chunks.append({
-                'type': 'class_part',
-                'code': header_code + '\n' + method_code,
-                'start': global_start + body_start + current_method_start,
-                'end': global_start + len(class_lines),
-                'protected': False,
-                'header': header_code
-            })
-        
-        return chunks
-    
-    def validate_chunk(self, chunk_code):
-        """Validate that a chunk is complete and won't cause syntax errors"""
-        if not self.is_brackets_balanced(chunk_code):
-            return False, "Unbalanced brackets"
-        
-        triple_double = chunk_code.count('"""')
-        triple_single = chunk_code.count("'''")
-        if triple_double % 2 != 0 or triple_single % 2 != 0:
-            return False, "Unclosed triple-quoted string"
-        
-        lines = chunk_code.split('\n')
-        for line in lines:
-            if line.rstrip().endswith('\\'):
-                idx = lines.index(line)
-                if idx == len(lines) - 1:
-                    return False, "Trailing line continuation"
-        
-        return True, "Valid"
-    
-    def clean_chunk(self, chunk_code, chunk_type, is_protected=False):
-        if is_protected:
-            prompt = """RESPOND WITH ONLY CLEAN EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
+@dataclass
+class FileInfo:
+    """Information about a single file"""
+    name: str
+    path: str
+    file_type: str
+    size_kb: float
+    imports: List[str] = field(default_factory=list)
+    functions: List[str] = field(default_factory=list)
+    input_files: List[str] = field(default_factory=list)
+    output_files: List[str] = field(default_factory=list)
+    hive_tables_read: List[str] = field(default_factory=list)
+    hive_tables_write: List[str] = field(default_factory=list)
+    description: str = ""
 
-Clean this Python code while PRESERVING THE EXACT STRUCTURE:
-1. Add docstrings to functions and classes
-2. Add brief inline comments for complex logic
-3. Rename unclear variables to meaningful names
-4. Fix formatting and follow PEP8
-5. DO NOT modify any data structures, dictionaries, lists or their contents
-6. DO NOT break any multi-line expressions
-7. Keep all brackets, parentheses exactly as they are
+@dataclass
+class FolderInfo:
+    """Information about a subfolder/module"""
+    name: str
+    path: str
+    order: int
+    py_files: List[FileInfo] = field(default_factory=list)
+    config_files: List[FileInfo] = field(default_factory=list)
+    input_files: List[FileInfo] = field(default_factory=list)
+    output_files: List[FileInfo] = field(default_factory=list)
+    dependencies: List[str] = field(default_factory=list)
+    dependents: List[str] = field(default_factory=list)
+    description: str = ""
+    status: str = "active"  # active, deprecated, development
 
-Return ONLY the cleaned Python code"""
-        else:
-            prompt = """RESPOND WITH ONLY CLEAN EXECUTABLE PYTHON CODE. NO EXPLANATIONS OR MARKDOWN.
-
-Clean and improve this Python code:
-1. Add clear docstrings to functions and classes
-2. Add brief inline comments for complex logic only
-3. Rename unclear variables to meaningful names
-4. Fix formatting and follow PEP8
-5. Keep all functionality exactly the same
-
-Return ONLY the cleaned Python code"""
-
-        cleaned = self.call_api(prompt, chunk_code)
-        
-        is_valid, error = self.validate_chunk(cleaned)
-        if not is_valid:
-            print(f"  Warning: Cleaned chunk validation failed ({error}), using original")
-            return chunk_code
-        
-        return cleaned
+class PipelineMapper:
+    """
+    Main class to scan and map the automated pipeline structure
+    """
     
-    def merge_class_parts(self, chunks):
-        merged = []
-        class_parts = {}
-        
-        for chunk in chunks:
-            if chunk['type'] == 'class_part':
-                header = chunk.get('header', '')
-                if header not in class_parts:
-                    class_parts[header] = []
-                class_parts[header].append(chunk)
-            else:
-                merged.append(chunk)
-        
-        for header, parts in class_parts.items():
-            parts.sort(key=lambda x: x['start'])
-            
-            all_code = []
-            header_added = False
-            
-            for part in parts:
-                code = part['code']
-                
-                if header and code.startswith(header):
-                    if not header_added:
-                        all_code.append(code)
-                        header_added = True
-                    else:
-                        remaining = code[len(header):].strip('\n')
-                        if remaining:
-                            all_code.append(remaining)
-                else:
-                    all_code.append(code)
-            
-            merged.append({
-                'type': 'class',
-                'code': '\n'.join(all_code),
-                'start': parts[0]['start'],
-                'end': parts[-1]['end'],
-                'protected': True
-            })
-        
-        merged.sort(key=lambda x: x['start'])
-        return merged
+    # Common folder patterns and their order
+    FOLDER_ORDER = {
+        'data_preparation': 1,
+        'data_prep': 1,
+        'preprocessing': 2,
+        'feature_engineering': 3,
+        'sfa_qual': 4,
+        'sfa_fin': 5,
+        'sfa_combined': 6,
+        'mfa': 7,
+        'mfa_analysis': 7,
+        'calibration': 8,
+        'validation': 9,
+        'postprocessing': 10,
+        'output_generation': 11,
+        'reporting': 12,
+        'utilities': 99,
+        'common': 99,
+        'config': 99,
+    }
     
-    def deduplicate_imports(self, code):
-        lines = code.split('\n')
-        import_lines = []
-        other_lines = []
-        seen_imports = set()
-        
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith('import ') or stripped.startswith('from '):
-                if stripped not in seen_imports:
-                    seen_imports.add(stripped)
-                    import_lines.append(line)
-            else:
-                other_lines.append(line)
-        
-        import_lines.sort(key=lambda x: (
-            0 if x.strip().startswith('import ') else 1,
-            x.strip().lower()
-        ))
-        
-        result_lines = import_lines
-        if import_lines and other_lines:
-            first_non_empty = next((i for i, l in enumerate(other_lines) if l.strip()), 0)
-            if first_non_empty == 0:
-                result_lines.append('')
-                result_lines.append('')
-        
-        result_lines.extend(other_lines)
-        
-        return '\n'.join(result_lines)
+    # File type categories
+    FILE_CATEGORIES = {
+        'code': ['.py', '.pyx', '.pyw'],
+        'config': ['.yaml', '.yml', '.json', '.ini', '.cfg', '.conf'],
+        'data': ['.csv', '.xlsx', '.xls', '.parquet', '.pickle', '.pkl'],
+        'sql': ['.sql', '.hql'],
+        'documentation': ['.md', '.txt', '.rst'],
+    }
     
-    def process_file(self, input_file, output_file):
-        print(f"Reading file: {input_file}")
+    def __init__(self, root_path: str, config_path: str = None):
+        """
+        Initialize the Pipeline Mapper
         
-        with open(input_file, 'r', encoding='utf-8') as f:
-            original_code = f.read()
+        Args:
+            root_path: Path to the automated_pipeline folder
+            config_path: Optional path to configuration file
+        """
+        self.root_path = Path(root_path)
+        self.folders: Dict[str, FolderInfo] = {}
+        self.dependency_graph: Dict[str, Set[str]] = {}
+        self.config = self._load_config(config_path) if config_path else {}
         
-        total_lines = len(original_code.split('\n'))
-        print(f"Total lines: {total_lines}")
+    def _load_config(self, config_path: str) -> dict:
+        """Load configuration from YAML file"""
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            print(f"Warning: Could not load config: {e}")
+            return {}
+    
+    def scan_pipeline(self) -> Dict[str, FolderInfo]:
+        """
+        Scan the entire pipeline structure
         
-        print("Analyzing code structure with bracket protection...")
-        chunks = self.smart_chunk_with_bracket_protection(original_code)
-        print(f"Created {len(chunks)} chunks")
+        Returns:
+            Dictionary of folder names to FolderInfo objects
+        """
+        print(f"Scanning pipeline at: {self.root_path}")
         
-        for idx, chunk in enumerate(chunks):
-            chunk_lines = len(chunk['code'].split('\n'))
-            protected_status = " [PROTECTED]" if chunk.get('protected') else ""
-            print(f"  Chunk {idx + 1}: {chunk['type']}, {chunk_lines} lines{protected_status}")
+        if not self.root_path.exists():
+            raise FileNotFoundError(f"Pipeline path not found: {self.root_path}")
         
-        print("\nValidating all chunks...")
-        for idx, chunk in enumerate(chunks):
-            is_valid, error = self.validate_chunk(chunk['code'])
-            if not is_valid:
-                print(f"  WARNING: Chunk {idx + 1} has issue: {error}")
+        # Get all subfolders
+        subfolders = [d for d in self.root_path.iterdir() 
+                      if d.is_dir() and not d.name.startswith(('.', '_'))]
         
-        processed_chunks = []
-        
-        for idx, chunk in enumerate(chunks):
-            chunk_lines = len(chunk['code'].split('\n'))
-            protected_status = " [PROTECTED]" if chunk.get('protected') else ""
-            print(f"Processing chunk {idx + 1}/{len(chunks)} ({chunk['type']}, {chunk_lines} lines){protected_status}...")
+        for folder_path in sorted(subfolders):
+            folder_name = folder_path.name.lower()
+            order = self._get_folder_order(folder_name)
             
-            cleaned = self.clean_chunk(
-                chunk['code'], 
-                chunk['type'], 
-                chunk.get('protected', False)
+            folder_info = FolderInfo(
+                name=folder_path.name,
+                path=str(folder_path),
+                order=order
             )
             
-            processed_chunks.append({
-                'type': chunk['type'],
-                'code': cleaned,
-                'start': chunk['start'],
-                'end': chunk['end'],
-                'header': chunk.get('header', ''),
-                'protected': chunk.get('protected', False)
-            })
+            # Scan files in folder
+            self._scan_folder_contents(folder_path, folder_info)
             
-            time.sleep(0.5)
+            self.folders[folder_path.name] = folder_info
         
-        print("Merging processed chunks...")
-        merged_chunks = self.merge_class_parts(processed_chunks)
+        # Analyze dependencies between folders
+        self._analyze_dependencies()
         
-        final_code_parts = []
-        for chunk in merged_chunks:
-            final_code_parts.append(chunk['code'])
+        print(f"Scanned {len(self.folders)} folders")
+        return self.folders
+    
+    def _get_folder_order(self, folder_name: str) -> int:
+        """Determine execution order based on folder name"""
+        folder_lower = folder_name.lower().replace('-', '_').replace(' ', '_')
         
-        final_code = '\n\n'.join(final_code_parts)
+        for pattern, order in self.FOLDER_ORDER.items():
+            if pattern in folder_lower:
+                return order
         
-        print("Deduplicating imports...")
-        final_code = self.deduplicate_imports(final_code)
+        return 50  # Default middle order
+    
+    def _scan_folder_contents(self, folder_path: Path, folder_info: FolderInfo):
+        """Scan all files in a folder and categorize them"""
         
-        final_code = re.sub(r'\n{4,}', '\n\n\n', final_code)
+        for file_path in folder_path.rglob('*'):
+            if file_path.is_file():
+                file_ext = file_path.suffix.lower()
+                file_info = self._create_file_info(file_path)
+                
+                # Categorize file
+                if file_ext in self.FILE_CATEGORIES['code']:
+                    self._analyze_python_file(file_path, file_info)
+                    folder_info.py_files.append(file_info)
+                    
+                elif file_ext in self.FILE_CATEGORIES['config']:
+                    folder_info.config_files.append(file_info)
+                    
+                elif file_ext in self.FILE_CATEGORIES['data']:
+                    # Check if it's in input or output subfolder
+                    if 'input' in str(file_path).lower():
+                        folder_info.input_files.append(file_info)
+                    elif 'output' in str(file_path).lower():
+                        folder_info.output_files.append(file_info)
+    
+    def _create_file_info(self, file_path: Path) -> FileInfo:
+        """Create FileInfo object for a file"""
+        return FileInfo(
+            name=file_path.name,
+            path=str(file_path),
+            file_type=file_path.suffix.lower(),
+            size_kb=file_path.stat().st_size / 1024
+        )
+    
+    def _analyze_python_file(self, file_path: Path, file_info: FileInfo):
+        """Analyze a Python file for imports, functions, and I/O operations"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            # Parse AST for imports and functions
+            try:
+                tree = ast.parse(content)
+                
+                # Extract imports
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            file_info.imports.append(alias.name)
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.module:
+                            file_info.imports.append(node.module)
+                    elif isinstance(node, ast.FunctionDef):
+                        file_info.functions.append(node.name)
+                        
+            except SyntaxError:
+                pass  # Skip files with syntax errors
+            
+            # Pattern matching for file I/O
+            self._extract_file_operations(content, file_info)
+            
+            # Pattern matching for Hive operations
+            self._extract_hive_operations(content, file_info)
+            
+        except Exception as e:
+            print(f"Warning: Could not analyze {file_path}: {e}")
+    
+    def _extract_file_operations(self, content: str, file_info: FileInfo):
+        """Extract file read/write operations from code"""
         
-        print("Final validation...")
-        is_valid, error = self.validate_chunk(final_code)
-        if not is_valid:
-            print(f"WARNING: Final code has validation issue: {error}")
+        # Patterns for reading files
+        read_patterns = [
+            r'pd\.read_csv\(["\']([^"\']+)["\']',
+            r'pd\.read_excel\(["\']([^"\']+)["\']',
+            r'pd\.read_parquet\(["\']([^"\']+)["\']',
+            r'open\(["\']([^"\']+)["\'].*["\']r["\']',
+            r'spark\.read\.[^(]+\(["\']([^"\']+)["\']',
+            r'input_path\s*=\s*["\']([^"\']+)["\']',
+            r'INPUT_FILE\s*=\s*["\']([^"\']+)["\']',
+        ]
         
-        print(f"Writing cleaned code to: {output_file}")
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(final_code)
+        # Patterns for writing files
+        write_patterns = [
+            r'\.to_csv\(["\']([^"\']+)["\']',
+            r'\.to_excel\(["\']([^"\']+)["\']',
+            r'\.to_parquet\(["\']([^"\']+)["\']',
+            r'open\(["\']([^"\']+)["\'].*["\']w["\']',
+            r'\.write\.[^(]+\(["\']([^"\']+)["\']',
+            r'output_path\s*=\s*["\']([^"\']+)["\']',
+            r'OUTPUT_FILE\s*=\s*["\']([^"\']+)["\']',
+        ]
         
-        final_lines = len(final_code.split('\n'))
-        print(f"Done! Original: {total_lines} lines, Cleaned: {final_lines} lines")
+        for pattern in read_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            file_info.input_files.extend(matches)
         
-        return final_code
-
-
-def clean_code_file(input_path, output_path):
-    cleaner = LargeCodeCleaner()
-    return cleaner.process_file(input_path, output_path)
+        for pattern in write_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            file_info.output_files.extend(matches)
+    
+    def _extract_hive_operations(self, content: str, file_info: FileInfo):
+        """Extract Hive table read/write operations"""
+        
+        # Patterns for Hive reads
+        hive_read_patterns = [
+            r'spark\.sql\(["\']SELECT.*FROM\s+(\w+\.\w+)',
+            r'spark\.table\(["\'](\w+\.\w+)["\']',
+            r'spark\.read\.table\(["\'](\w+\.\w+)["\']',
+            r'FROM\s+(\w+\.\w+)',
+            r'hive_table\s*=\s*["\'](\w+\.\w+)["\']',
+        ]
+        
+        # Patterns for Hive writes
+        hive_write_patterns = [
+            r'\.write\.[^(]*saveAsTable\(["\'](\w+\.\w+)["\']',
+            r'INSERT\s+INTO\s+(\w+\.\w+)',
+            r'INSERT\s+OVERWRITE\s+TABLE\s+(\w+\.\w+)',
+            r'CREATE\s+TABLE\s+(\w+\.\w+)',
+        ]
+        
+        for pattern in hive_read_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            file_info.hive_tables_read.extend(matches)
+        
+        for pattern in hive_write_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            file_info.hive_tables_write.extend(matches)
+    
+    def _analyze_dependencies(self):
+        """Analyze dependencies between folders based on I/O"""
+        
+        # Build output map: output_file -> folder_name
+        output_map: Dict[str, str] = {}
+        
+        for folder_name, folder_info in self.folders.items():
+            # Add file outputs
+            for out_file in folder_info.output_files:
+                output_map[Path(out_file.path).name] = folder_name
+            
+            # Add Python file outputs
+            for py_file in folder_info.py_files:
+                for out_path in py_file.output_files:
+                    output_map[Path(out_path).name] = folder_name
+                for table in py_file.hive_tables_write:
+                    output_map[table] = folder_name
+        
+        # Find dependencies
+        for folder_name, folder_info in self.folders.items():
+            # Check inputs against output map
+            for in_file in folder_info.input_files:
+                in_name = Path(in_file.path).name
+                if in_name in output_map and output_map[in_name] != folder_name:
+                    folder_info.dependencies.append(output_map[in_name])
+            
+            # Check Python file inputs
+            for py_file in folder_info.py_files:
+                for in_path in py_file.input_files:
+                    in_name = Path(in_path).name
+                    if in_name in output_map and output_map[in_name] != folder_name:
+                        if output_map[in_name] not in folder_info.dependencies:
+                            folder_info.dependencies.append(output_map[in_name])
+                
+                for table in py_file.hive_tables_read:
+                    if table in output_map and output_map[table] != folder_name:
+                        if output_map[table] not in folder_info.dependencies:
+                            folder_info.dependencies.append(output_map[table])
+        
+        # Build dependents (reverse dependencies)
+        for folder_name, folder_info in self.folders.items():
+            for dep in folder_info.dependencies:
+                if dep in self.folders:
+                    self.folders[dep].dependents.append(folder_name)
+    
+    def get_execution_order(self) -> List[str]:
+        """Get folders in execution order based on dependencies"""
+        sorted_folders = sorted(
+            self.folders.items(),
+            key=lambda x: (x[1].order, len(x[1].dependencies), x[0])
+        )
+        return [name for name, _ in sorted_folders]
+    
+    def to_dict(self) -> dict:
+        """Convert pipeline structure to dictionary"""
+        return {
+            'scan_date': datetime.now().isoformat(),
+            'root_path': str(self.root_path),
+            'total_folders': len(self.folders),
+            'execution_order': self.get_execution_order(),
+            'folders': {
+                name: {
+                    'name': info.name,
+                    'path': info.path,
+                    'order': info.order,
+                    'status': info.status,
+                    'description': info.description,
+                    'py_files': [f.name for f in info.py_files],
+                    'config_files': [f.name for f in info.config_files],
+                    'input_files': [f.name for f in info.input_files],
+                    'output_files': [f.name for f in info.output_files],
+                    'dependencies': info.dependencies,
+                    'dependents': info.dependents,
+                    'statistics': {
+                        'total_py_files': len(info.py_files),
+                        'total_functions': sum(len(f.functions) for f in info.py_files),
+                        'total_size_kb': sum(f.size_kb for f in info.py_files),
+                    }
+                }
+                for name, info in self.folders.items()
+            }
+        }
+    
+    def save_json(self, output_path: str):
+        """Save pipeline structure to JSON file"""
+        with open(output_path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        print(f"Saved pipeline structure to: {output_path}")
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) >= 3:
-        input_file = sys.argv[1]
-        output_file = sys.argv[2]
-    else:
-        input_file = "messy_code.py"
-        output_file = "clean_code.py"
-    
-    if not os.path.exists(input_file):
-        print(f"Error: Input file '{input_file}' not found")
-        sys.exit(1)
-    
-    clean_code_file(input_file, output_file)
+    # Example usage
+    mapper = PipelineMapper("./automated_pipeline")
+    mapper.scan_pipeline()
+    mapper.save_json("./output/pipeline_structure.json")
