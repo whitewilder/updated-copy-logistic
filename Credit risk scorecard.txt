@@ -1004,3 +1004,1104 @@ if __name__ == "__main__":
         analysis_results['improvement_analysis'],
         analysis_results['results']
     )
+
+
+
+shsjskimport numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score,
+    precision_score, recall_score, confusion_matrix,
+    roc_curve, precision_recall_curve, brier_score_loss
+)
+from xgboost import XGBClassifier
+from itertools import product
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# =============================================================================
+# 1. DATA PREPARATION
+# =============================================================================
+
+def create_imbalanced_data(n_samples=33000, n_defaults=300, n_features=20, random_state=42):
+    """
+    Create synthetic imbalanced credit default dataset.
+    """
+    np.random.seed(random_state)
+    
+    n_non_defaults = n_samples - n_defaults
+    
+    # Non-defaults
+    X_non_default = np.random.randn(n_non_defaults, n_features)
+    X_non_default[:, 0] += 1
+    X_non_default[:, 1] -= 0.5
+    
+    # Defaults - different distribution
+    X_default = np.random.randn(n_defaults, n_features)
+    X_default[:, 0] -= 1
+    X_default[:, 1] += 1
+    X_default[:, 2] += 0.5
+    
+    X = np.vstack([X_non_default, X_default])
+    y = np.array([0] * n_non_defaults + [1] * n_defaults)
+    
+    # Shuffle
+    shuffle_idx = np.random.permutation(len(y))
+    X, y = X[shuffle_idx], y[shuffle_idx]
+    
+    return X, y
+
+
+def split_data(X, y, test_size=0.2, random_state=42):
+    """
+    Stratified train-test split.
+    """
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state, stratify=y
+    )
+    
+    print("="*60)
+    print("DATA SUMMARY")
+    print("="*60)
+    print(f"Total: {len(y):,} | Defaults: {sum(y):,} ({100*sum(y)/len(y):.2f}%)")
+    print(f"Train: {len(y_train):,} | Defaults: {sum(y_train):,} ({100*sum(y_train)/len(y_train):.2f}%)")
+    print(f"Test:  {len(y_test):,} | Defaults: {sum(y_test):,} ({100*sum(y_test)/len(y_test):.2f}%)")
+    print("="*60)
+    
+    return X_train, X_test, y_train, y_test
+
+
+# =============================================================================
+# 2. HYPERPARAMETER CONFIGURATIONS
+# =============================================================================
+
+def get_hyperparameter_configs(y_train):
+    """
+    Define multiple hyperparameter configurations to test.
+    Returns dict of config_name: params
+    """
+    scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
+    
+    configs = {
+        # DEFAULT CONFIGURATION
+        'DEFAULT': {
+            'n_estimators': 100,
+            'max_depth': 6,
+            'learning_rate': 0.3,
+            'min_child_weight': 1,
+            'subsample': 1.0,
+            'colsample_bytree': 1.0,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # CONSERVATIVE - Less overfitting
+        'CONSERVATIVE': {
+            'n_estimators': 50,
+            'max_depth': 3,
+            'learning_rate': 0.1,
+            'min_child_weight': 5,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'gamma': 0.1,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.5,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # AGGRESSIVE - More complex
+        'AGGRESSIVE': {
+            'n_estimators': 300,
+            'max_depth': 10,
+            'learning_rate': 0.1,
+            'min_child_weight': 1,
+            'subsample': 1.0,
+            'colsample_bytree': 1.0,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # HIGH REGULARIZATION
+        'HIGH_REG': {
+            'n_estimators': 100,
+            'max_depth': 4,
+            'learning_rate': 0.1,
+            'min_child_weight': 10,
+            'subsample': 0.7,
+            'colsample_bytree': 0.7,
+            'gamma': 0.5,
+            'reg_alpha': 1,
+            'reg_lambda': 2,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # LOW LEARNING RATE + MORE TREES
+        'LOW_LR': {
+            'n_estimators': 500,
+            'max_depth': 4,
+            'learning_rate': 0.01,
+            'min_child_weight': 3,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # SHALLOW TREES
+        'SHALLOW': {
+            'n_estimators': 200,
+            'max_depth': 2,
+            'learning_rate': 0.1,
+            'min_child_weight': 1,
+            'subsample': 0.9,
+            'colsample_bytree': 0.9,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # DEEP TREES
+        'DEEP': {
+            'n_estimators': 100,
+            'max_depth': 15,
+            'learning_rate': 0.1,
+            'min_child_weight': 1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # BALANCED TUNED
+        'BALANCED': {
+            'n_estimators': 150,
+            'max_depth': 5,
+            'learning_rate': 0.05,
+            'min_child_weight': 3,
+            'subsample': 0.85,
+            'colsample_bytree': 0.85,
+            'gamma': 0.1,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.2,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # MINIMAL TREES
+        'MINIMAL': {
+            'n_estimators': 20,
+            'max_depth': 3,
+            'learning_rate': 0.3,
+            'min_child_weight': 5,
+            'subsample': 1.0,
+            'colsample_bytree': 1.0,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'scale_pos_weight': scale_pos_weight
+        },
+        
+        # MAXIMUM REGULARIZATION
+        'MAX_REG': {
+            'n_estimators': 100,
+            'max_depth': 3,
+            'learning_rate': 0.05,
+            'min_child_weight': 20,
+            'subsample': 0.6,
+            'colsample_bytree': 0.6,
+            'gamma': 1.0,
+            'reg_alpha': 5,
+            'reg_lambda': 5,
+            'scale_pos_weight': scale_pos_weight
+        }
+    }
+    
+    return configs
+
+
+def get_grid_search_params(y_train):
+    """
+    Define parameter grid for exhaustive search.
+    """
+    scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
+    
+    param_grid = {
+        'n_estimators': [50, 100, 200],
+        'max_depth': [3, 5, 7],
+        'learning_rate': [0.01, 0.1, 0.3],
+        'min_child_weight': [1, 5, 10],
+        'subsample': [0.7, 0.85, 1.0],
+        'colsample_bytree': [0.7, 0.85, 1.0],
+        'gamma': [0, 0.1, 0.5],
+        'reg_alpha': [0, 0.1, 1],
+        'reg_lambda': [1, 1.5, 2]
+    }
+    
+    return param_grid, scale_pos_weight
+
+
+# =============================================================================
+# 3. METRICS CALCULATION
+# =============================================================================
+
+def calculate_metrics(y_true, y_pred, y_proba):
+    """
+    Calculate all relevant metrics for binary classification.
+    """
+    metrics = {}
+    
+    # Probability-based metrics
+    metrics['roc_auc'] = roc_auc_score(y_true, y_proba)
+    metrics['pr_auc'] = average_precision_score(y_true, y_proba)
+    metrics['brier_score'] = brier_score_loss(y_true, y_proba)
+    
+    # Threshold-based metrics
+    metrics['f1'] = f1_score(y_true, y_pred, zero_division=0)
+    metrics['precision'] = precision_score(y_true, y_pred, zero_division=0)
+    metrics['recall'] = recall_score(y_true, y_pred, zero_division=0)
+    metrics['specificity'] = recall_score(y_true, y_pred, pos_label=0)
+    
+    # Confusion matrix values
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    metrics['tp'] = tp
+    metrics['fp'] = fp
+    metrics['tn'] = tn
+    metrics['fn'] = fn
+    
+    # Capture rate at different thresholds
+    metrics['capture_top_10pct'] = calculate_capture_rate(y_true, y_proba, 0.10)
+    metrics['capture_top_20pct'] = calculate_capture_rate(y_true, y_proba, 0.20)
+    
+    return metrics
+
+
+def calculate_capture_rate(y_true, y_proba, top_pct):
+    """
+    Calculate what percentage of defaults are captured in top X% of predictions.
+    """
+    n_top = int(len(y_true) * top_pct)
+    top_indices = np.argsort(y_proba)[-n_top:]
+    defaults_captured = y_true[top_indices].sum()
+    total_defaults = y_true.sum()
+    
+    return defaults_captured / total_defaults if total_defaults > 0 else 0
+
+
+# =============================================================================
+# 4. MODEL TRAINING AND EVALUATION
+# =============================================================================
+
+def train_and_evaluate_single_config(X_train, X_test, y_train, y_test, params, config_name):
+    """
+    Train XGBoost with given params and evaluate on train/test.
+    """
+    start_time = time.time()
+    
+    # Create and train model
+    model = XGBClassifier(
+        **params,
+        eval_metric='auc',
+        random_state=42,
+        use_label_encoder=False,
+        verbosity=0
+    )
+    
+    model.fit(X_train, y_train)
+    training_time = time.time() - start_time
+    
+    # Train predictions
+    y_train_pred = model.predict(X_train)
+    y_train_proba = model.predict_proba(X_train)[:, 1]
+    train_metrics = calculate_metrics(y_train, y_train_pred, y_train_proba)
+    
+    # Test predictions
+    y_test_pred = model.predict(X_test)
+    y_test_proba = model.predict_proba(X_test)[:, 1]
+    test_metrics = calculate_metrics(y_test, y_test_pred, y_test_proba)
+    
+    # Calculate overfitting gaps
+    overfit_gaps = {
+        'roc_auc_gap': train_metrics['roc_auc'] - test_metrics['roc_auc'],
+        'pr_auc_gap': train_metrics['pr_auc'] - test_metrics['pr_auc'],
+        'f1_gap': train_metrics['f1'] - test_metrics['f1']
+    }
+    
+    return {
+        'config_name': config_name,
+        'params': params,
+        'train_metrics': train_metrics,
+        'test_metrics': test_metrics,
+        'overfit_gaps': overfit_gaps,
+        'training_time': training_time,
+        'model': model,
+        'y_test_proba': y_test_proba
+    }
+
+
+def evaluate_all_configs(X_train, X_test, y_train, y_test, configs):
+    """
+    Evaluate all hyperparameter configurations.
+    """
+    results = {}
+    
+    print("\n" + "="*70)
+    print("EVALUATING HYPERPARAMETER CONFIGURATIONS")
+    print("="*70)
+    
+    for config_name, params in configs.items():
+        print(f"\nEvaluating: {config_name}...", end=" ")
+        
+        result = train_and_evaluate_single_config(
+            X_train, X_test, y_train, y_test, params, config_name
+        )
+        results[config_name] = result
+        
+        print(f"Done! (Train AUC: {result['train_metrics']['roc_auc']:.4f}, "
+              f"Test AUC: {result['test_metrics']['roc_auc']:.4f}, "
+              f"Gap: {result['overfit_gaps']['roc_auc_gap']:.4f})")
+    
+    return results
+
+
+def run_grid_search(X_train, X_test, y_train, y_test, param_grid, scale_pos_weight, max_combinations=50):
+    """
+    Run grid search over parameter combinations.
+    """
+    print("\n" + "="*70)
+    print("RUNNING GRID SEARCH")
+    print("="*70)
+    
+    # Generate all combinations
+    keys = list(param_grid.keys())
+    values = list(param_grid.values())
+    all_combinations = list(product(*values))
+    
+    # Limit combinations if too many
+    if len(all_combinations) > max_combinations:
+        np.random.seed(42)
+        indices = np.random.choice(len(all_combinations), max_combinations, replace=False)
+        selected_combinations = [all_combinations[i] for i in indices]
+        print(f"Randomly selected {max_combinations} from {len(all_combinations)} combinations")
+    else:
+        selected_combinations = all_combinations
+        print(f"Testing all {len(all_combinations)} combinations")
+    
+    results = []
+    
+    for i, combo in enumerate(selected_combinations):
+        params = dict(zip(keys, combo))
+        params['scale_pos_weight'] = scale_pos_weight
+        
+        if (i + 1) % 10 == 0:
+            print(f"Progress: {i+1}/{len(selected_combinations)}")
+        
+        result = train_and_evaluate_single_config(
+            X_train, X_test, y_train, y_test, params, f"Grid_{i+1}"
+        )
+        results.append(result)
+    
+    return results
+
+
+# =============================================================================
+# 5. RESULTS ANALYSIS
+# =============================================================================
+
+def create_results_dataframe(results):
+    """
+    Convert results dict to DataFrame for analysis.
+    """
+    rows = []
+    
+    for config_name, result in results.items():
+        row = {
+            'Config': config_name,
+            # Train metrics
+            'Train_ROC_AUC': result['train_metrics']['roc_auc'],
+            'Train_PR_AUC': result['train_metrics']['pr_auc'],
+            'Train_F1': result['train_metrics']['f1'],
+            'Train_Recall': result['train_metrics']['recall'],
+            'Train_Precision': result['train_metrics']['precision'],
+            # Test metrics
+            'Test_ROC_AUC': result['test_metrics']['roc_auc'],
+            'Test_PR_AUC': result['test_metrics']['pr_auc'],
+            'Test_F1': result['test_metrics']['f1'],
+            'Test_Recall': result['test_metrics']['recall'],
+            'Test_Precision': result['test_metrics']['precision'],
+            # Capture rates
+            'Test_Capture_Top10%': result['test_metrics']['capture_top_10pct'],
+            'Test_Capture_Top20%': result['test_metrics']['capture_top_20pct'],
+            # Overfitting
+            'ROC_AUC_Gap': result['overfit_gaps']['roc_auc_gap'],
+            'PR_AUC_Gap': result['overfit_gaps']['pr_auc_gap'],
+            'F1_Gap': result['overfit_gaps']['f1_gap'],
+            # Time
+            'Training_Time': result['training_time']
+        }
+        
+        # Add key params
+        params = result['params']
+        row['n_estimators'] = params.get('n_estimators')
+        row['max_depth'] = params.get('max_depth')
+        row['learning_rate'] = params.get('learning_rate')
+        row['min_child_weight'] = params.get('min_child_weight')
+        row['subsample'] = params.get('subsample')
+        row['gamma'] = params.get('gamma')
+        row['reg_alpha'] = params.get('reg_alpha')
+        row['reg_lambda'] = params.get('reg_lambda')
+        
+        rows.append(row)
+    
+    df = pd.DataFrame(rows)
+    return df
+
+
+def create_grid_results_dataframe(grid_results):
+    """
+    Convert grid search results to DataFrame.
+    """
+    rows = []
+    
+    for result in grid_results:
+        row = {
+            'Config': result['config_name'],
+            'Train_ROC_AUC': result['train_metrics']['roc_auc'],
+            'Test_ROC_AUC': result['test_metrics']['roc_auc'],
+            'Train_PR_AUC': result['train_metrics']['pr_auc'],
+            'Test_PR_AUC': result['test_metrics']['pr_auc'],
+            'ROC_AUC_Gap': result['overfit_gaps']['roc_auc_gap'],
+            'PR_AUC_Gap': result['overfit_gaps']['pr_auc_gap'],
+            'Training_Time': result['training_time']
+        }
+        
+        params = result['params']
+        row['n_estimators'] = params.get('n_estimators')
+        row['max_depth'] = params.get('max_depth')
+        row['learning_rate'] = params.get('learning_rate')
+        row['min_child_weight'] = params.get('min_child_weight')
+        row['subsample'] = params.get('subsample')
+        row['colsample_bytree'] = params.get('colsample_bytree')
+        row['gamma'] = params.get('gamma')
+        row['reg_alpha'] = params.get('reg_alpha')
+        row['reg_lambda'] = params.get('reg_lambda')
+        
+        rows.append(row)
+    
+    return pd.DataFrame(rows)
+
+
+def analyze_results(results_df):
+    """
+    Analyze and summarize results.
+    """
+    print("\n" + "="*70)
+    print("RESULTS ANALYSIS")
+    print("="*70)
+    
+    # Sort by Test ROC-AUC
+    df_sorted = results_df.sort_values('Test_ROC_AUC', ascending=False)
+    
+    print("\n### Performance Ranking (by Test ROC-AUC) ###\n")
+    display_cols = ['Config', 'Test_ROC_AUC', 'Test_PR_AUC', 'Train_ROC_AUC', 
+                    'ROC_AUC_Gap', 'Test_Recall']
+    print(df_sorted[display_cols].to_string(index=False))
+    
+    # Best and worst
+    best = df_sorted.iloc[0]
+    worst = df_sorted.iloc[-1]
+    default = results_df[results_df['Config'] == 'DEFAULT'].iloc[0]
+    
+    print("\n### Key Findings ###")
+    print(f"\nBest Config: {best['Config']}")
+    print(f"  Test ROC-AUC: {best['Test_ROC_AUC']:.4f}")
+    print(f"  Overfit Gap: {best['ROC_AUC_Gap']:.4f}")
+    
+    print(f"\nDEFAULT Config:")
+    print(f"  Test ROC-AUC: {default['Test_ROC_AUC']:.4f}")
+    print(f"  Overfit Gap: {default['ROC_AUC_Gap']:.4f}")
+    
+    print(f"\nWorst Config: {worst['Config']}")
+    print(f"  Test ROC-AUC: {worst['Test_ROC_AUC']:.4f}")
+    print(f"  Overfit Gap: {worst['ROC_AUC_Gap']:.4f}")
+    
+    # Improvement analysis
+    improvement = ((best['Test_ROC_AUC'] - default['Test_ROC_AUC']) / 
+                   default['Test_ROC_AUC'] * 100)
+    
+    print(f"\n### Improvement Analysis ###")
+    print(f"Best vs DEFAULT improvement: {improvement:.2f}%")
+    print(f"AUC Range: {worst['Test_ROC_AUC']:.4f} - {best['Test_ROC_AUC']:.4f}")
+    print(f"Spread: {best['Test_ROC_AUC'] - worst['Test_ROC_AUC']:.4f}")
+    
+    # Overfitting analysis
+    print("\n### Overfitting Analysis ###")
+    low_overfit = results_df[results_df['ROC_AUC_Gap'] < 0.03]
+    high_overfit = results_df[results_df['ROC_AUC_Gap'] > 0.05]
+    
+    print(f"Configs with LOW overfitting (<0.03 gap): {len(low_overfit)}")
+    print(f"Configs with HIGH overfitting (>0.05 gap): {len(high_overfit)}")
+    
+    return df_sorted
+
+
+def calculate_statistics(results_df):
+    """
+    Calculate summary statistics across all configurations.
+    """
+    stats = {
+        'Test_ROC_AUC': {
+            'mean': results_df['Test_ROC_AUC'].mean(),
+            'std': results_df['Test_ROC_AUC'].std(),
+            'min': results_df['Test_ROC_AUC'].min(),
+            'max': results_df['Test_ROC_AUC'].max(),
+            'range': results_df['Test_ROC_AUC'].max() - results_df['Test_ROC_AUC'].min()
+        },
+        'Test_PR_AUC': {
+            'mean': results_df['Test_PR_AUC'].mean(),
+            'std': results_df['Test_PR_AUC'].std(),
+            'min': results_df['Test_PR_AUC'].min(),
+            'max': results_df['Test_PR_AUC'].max(),
+            'range': results_df['Test_PR_AUC'].max() - results_df['Test_PR_AUC'].min()
+        },
+        'ROC_AUC_Gap': {
+            'mean': results_df['ROC_AUC_Gap'].mean(),
+            'std': results_df['ROC_AUC_Gap'].std(),
+            'min': results_df['ROC_AUC_Gap'].min(),
+            'max': results_df['ROC_AUC_Gap'].max()
+        }
+    }
+    
+    print("\n### Summary Statistics ###\n")
+    stats_df = pd.DataFrame(stats).T
+    print(stats_df.to_string())
+    
+    return stats
+
+
+# =============================================================================
+# 6. VISUALIZATION
+# =============================================================================
+
+def plot_train_test_comparison(results_df, save_path=None):
+    """
+    Bar plot comparing train vs test performance for each config.
+    """
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+    
+    configs = results_df['Config'].values
+    x = np.arange(len(configs))
+    width = 0.35
+    
+    # ROC-AUC comparison
+    ax1 = axes[0]
+    bars1 = ax1.bar(x - width/2, results_df['Train_ROC_AUC'], width, 
+                     label='Train', color='#3498db', alpha=0.8)
+    bars2 = ax1.bar(x + width/2, results_df['Test_ROC_AUC'], width,
+                     label='Test', color='#e74c3c', alpha=0.8)
+    
+    ax1.set_ylabel('ROC-AUC', fontsize=12)
+    ax1.set_title('Train vs Test ROC-AUC by Configuration', fontsize=14, fontweight='bold')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(configs, rotation=45, ha='right')
+    ax1.legend()
+    ax1.set_ylim(0.5, 1.05)
+    ax1.axhline(y=results_df[results_df['Config']=='DEFAULT']['Test_ROC_AUC'].values[0],
+                color='green', linestyle='--', label='DEFAULT baseline', alpha=0.7)
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Add gap annotations
+    for i, (tr, te) in enumerate(zip(results_df['Train_ROC_AUC'], results_df['Test_ROC_AUC'])):
+        gap = tr - te
+        color = 'red' if gap > 0.05 else 'orange' if gap > 0.02 else 'green'
+        ax1.annotate(f'{gap:.3f}', xy=(i, max(tr, te) + 0.01),
+                     ha='center', fontsize=8, color=color, fontweight='bold')
+    
+    # PR-AUC comparison
+    ax2 = axes[1]
+    bars3 = ax2.bar(x - width/2, results_df['Train_PR_AUC'], width,
+                     label='Train', color='#3498db', alpha=0.8)
+    bars4 = ax2.bar(x + width/2, results_df['Test_PR_AUC'], width,
+                     label='Test', color='#e74c3c', alpha=0.8)
+    
+    ax2.set_ylabel('PR-AUC', fontsize=12)
+    ax2.set_title('Train vs Test PR-AUC by Configuration', fontsize=14, fontweight='bold')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(configs, rotation=45, ha='right')
+    ax2.legend()
+    ax2.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_overfitting_heatmap(results_df, save_path=None):
+    """
+    Heatmap showing overfitting by configuration.
+    """
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Prepare data for heatmap
+    overfit_data = results_df[['Config', 'ROC_AUC_Gap', 'PR_AUC_Gap', 'F1_Gap']].set_index('Config')
+    
+    sns.heatmap(overfit_data.T, annot=True, fmt='.3f', cmap='RdYlGn_r',
+                center=0.03, ax=ax, cbar_kws={'label': 'Overfitting Gap'})
+    
+    ax.set_title('Overfitting Analysis: Train-Test Gap by Configuration\n(Green=Good, Red=Overfitting)',
+                 fontsize=14, fontweight='bold')
+    ax.set_xlabel('Configuration')
+    ax.set_ylabel('Metric Gap')
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_roc_curves_all(results, y_test, save_path=None):
+    """
+    Plot ROC curves for all configurations.
+    """
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    colors = plt.cm.tab10(np.linspace(0, 1, len(results)))
+    
+    for (config_name, result), color in zip(results.items(), colors):
+        y_proba = result['y_test_proba']
+        fpr, tpr, _ = roc_curve(y_test, y_proba)
+        auc = result['test_metrics']['roc_auc']
+        
+        linewidth = 3 if config_name == 'DEFAULT' else 1.5
+        linestyle = '-' if config_name == 'DEFAULT' else '--'
+        
+        ax.plot(fpr, tpr, color=color, lw=linewidth, linestyle=linestyle,
+                label=f"{config_name} (AUC={auc:.4f})")
+    
+    ax.plot([0, 1], [0, 1], 'k--', lw=1, label='Random')
+    ax.set_xlabel('False Positive Rate', fontsize=12)
+    ax.set_ylabel('True Positive Rate', fontsize=12)
+    ax.set_title('ROC Curves: All Hyperparameter Configurations', fontsize=14, fontweight='bold')
+    ax.legend(loc='lower right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_pr_curves_all(results, y_test, save_path=None):
+    """
+    Plot Precision-Recall curves for all configurations.
+    """
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    colors = plt.cm.tab10(np.linspace(0, 1, len(results)))
+    baseline = sum(y_test) / len(y_test)
+    
+    for (config_name, result), color in zip(results.items(), colors):
+        y_proba = result['y_test_proba']
+        precision, recall, _ = precision_recall_curve(y_test, y_proba)
+        pr_auc = result['test_metrics']['pr_auc']
+        
+        linewidth = 3 if config_name == 'DEFAULT' else 1.5
+        linestyle = '-' if config_name == 'DEFAULT' else '--'
+        
+        ax.plot(recall, precision, color=color, lw=linewidth, linestyle=linestyle,
+                label=f"{config_name} (PR-AUC={pr_auc:.4f})")
+    
+    ax.axhline(y=baseline, color='k', linestyle='--', label=f'Baseline ({baseline:.4f})')
+    ax.set_xlabel('Recall', fontsize=12)
+    ax.set_ylabel('Precision', fontsize=12)
+    ax.set_title('Precision-Recall Curves: All Configurations\n(More Important for Imbalanced Data)',
+                 fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_parameter_impact(results_df, save_path=None):
+    """
+    Show how individual parameters affect performance.
+    """
+    fig, axes = plt.subplots(2, 4, figsize=(18, 10))
+    axes = axes.flatten()
+    
+    params_to_plot = ['n_estimators', 'max_depth', 'learning_rate', 'min_child_weight',
+                      'subsample', 'gamma', 'reg_alpha', 'reg_lambda']
+    
+    for idx, param in enumerate(params_to_plot):
+        ax = axes[idx]
+        
+        if param in results_df.columns:
+            # Scatter plot with color by overfitting
+            scatter = ax.scatter(results_df[param], results_df['Test_ROC_AUC'],
+                                 c=results_df['ROC_AUC_Gap'], cmap='RdYlGn_r',
+                                 s=100, alpha=0.7, edgecolors='black')
+            
+            ax.set_xlabel(param, fontsize=10)
+            ax.set_ylabel('Test ROC-AUC', fontsize=10)
+            ax.set_title(f'Impact of {param}', fontsize=11, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            
+            # Add colorbar
+            plt.colorbar(scatter, ax=ax, label='Overfit Gap')
+    
+    plt.suptitle('Parameter Impact on Test Performance\n(Color = Overfitting Level)',
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_performance_distribution(results_df, save_path=None):
+    """
+    Distribution plots of performance metrics.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Test ROC-AUC distribution
+    ax1 = axes[0, 0]
+    ax1.hist(results_df['Test_ROC_AUC'], bins=15, color='#3498db', alpha=0.7, edgecolor='black')
+    ax1.axvline(results_df[results_df['Config']=='DEFAULT']['Test_ROC_AUC'].values[0],
+                color='red', linestyle='--', linewidth=2, label='DEFAULT')
+    ax1.set_xlabel('Test ROC-AUC')
+    ax1.set_ylabel('Count')
+    ax1.set_title('Distribution of Test ROC-AUC')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Overfitting gap distribution
+    ax2 = axes[0, 1]
+    ax2.hist(results_df['ROC_AUC_Gap'], bins=15, color='#e74c3c', alpha=0.7, edgecolor='black')
+    ax2.axvline(0.05, color='red', linestyle='--', linewidth=2, label='High Overfit Threshold')
+    ax2.axvline(0.02, color='orange', linestyle='--', linewidth=2, label='Moderate Threshold')
+    ax2.set_xlabel('ROC-AUC Gap (Train-Test)')
+    ax2.set_ylabel('Count')
+    ax2.set_title('Distribution of Overfitting')
+    ax2.legend()
+    ax2.grid(axis='y', alpha=0.3)
+    
+    # Test vs Train scatter
+    ax3 = axes[1, 0]
+    colors = ['red' if g > 0.05 else 'orange' if g > 0.02 else 'green' 
+              for g in results_df['ROC_AUC_Gap']]
+    ax3.scatter(results_df['Train_ROC_AUC'], results_df['Test_ROC_AUC'],
+                c=colors, s=100, alpha=0.7, edgecolors='black')
+    ax3.plot([0.5, 1], [0.5, 1], 'k--', label='Perfect (No Overfit)')
+    ax3.set_xlabel('Train ROC-AUC')
+    ax3.set_ylabel('Test ROC-AUC')
+    ax3.set_title('Train vs Test Performance\n(Green=Low Overfit, Red=High Overfit)')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # PR-AUC comparison
+    ax4 = axes[1, 1]
+    ax4.bar(results_df['Config'], results_df['Test_PR_AUC'], color='#2ecc71', alpha=0.7)
+    ax4.set_xlabel('Configuration')
+    ax4.set_ylabel('Test PR-AUC')
+    ax4.set_title('PR-AUC by Configuration\n(Key Metric for Imbalanced Data)')
+    ax4.tick_params(axis='x', rotation=45)
+    ax4.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+# =============================================================================
+# 7. CROSS-VALIDATION
+# =============================================================================
+
+def cross_validate_config(X, y, params, n_splits=5):
+    """
+    Perform stratified cross-validation for a single configuration.
+    """
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    train_aucs, test_aucs = [], []
+    train_pr_aucs, test_pr_aucs = [], []
+    
+    for train_idx, val_idx in skf.split(X, y):
+        X_train_cv, X_val_cv = X[train_idx], X[val_idx]
+        y_train_cv, y_val_cv = y[train_idx], y[val_idx]
+        
+        model = XGBClassifier(
+            **params,
+            eval_metric='auc',
+            random_state=42,
+            use_label_encoder=False,
+            verbosity=0
+        )
+        
+        model.fit(X_train_cv, y_train_cv)
+        
+        # Train metrics
+        y_train_proba = model.predict_proba(X_train_cv)[:, 1]
+        train_aucs.append(roc_auc_score(y_train_cv, y_train_proba))
+        train_pr_aucs.append(average_precision_score(y_train_cv, y_train_proba))
+        
+        # Val metrics
+        y_val_proba = model.predict_proba(X_val_cv)[:, 1]
+        test_aucs.append(roc_auc_score(y_val_cv, y_val_proba))
+        test_pr_aucs.append(average_precision_score(y_val_cv, y_val_proba))
+    
+    return {
+        'train_roc_auc_mean': np.mean(train_aucs),
+        'train_roc_auc_std': np.std(train_aucs),
+        'test_roc_auc_mean': np.mean(test_aucs),
+        'test_roc_auc_std': np.std(test_aucs),
+        'train_pr_auc_mean': np.mean(train_pr_aucs),
+        'train_pr_auc_std': np.std(train_pr_aucs),
+        'test_pr_auc_mean': np.mean(test_pr_aucs),
+        'test_pr_auc_std': np.std(test_pr_aucs),
+        'roc_auc_gap': np.mean(train_aucs) - np.mean(test_aucs)
+    }
+
+
+def cross_validate_all_configs(X, y, configs, n_splits=5):
+    """
+    Cross-validate all configurations.
+    """
+    print("\n" + "="*70)
+    print(f"CROSS-VALIDATION ({n_splits}-Fold)")
+    print("="*70)
+    
+    cv_results = {}
+    
+    for config_name, params in configs.items():
+        print(f"CV for {config_name}...", end=" ")
+        cv_result = cross_validate_config(X, y, params, n_splits)
+        cv_results[config_name] = cv_result
+        print(f"Done! (Test AUC: {cv_result['test_roc_auc_mean']:.4f} ± {cv_result['test_roc_auc_std']:.4f})")
+    
+    return cv_results
+
+
+def create_cv_results_dataframe(cv_results):
+    """
+    Convert CV results to DataFrame.
+    """
+    rows = []
+    for config_name, result in cv_results.items():
+        rows.append({
+            'Config': config_name,
+            'CV_Test_ROC_AUC': result['test_roc_auc_mean'],
+            'CV_Test_ROC_AUC_Std': result['test_roc_auc_std'],
+            'CV_Train_ROC_AUC': result['train_roc_auc_mean'],
+            'CV_ROC_AUC_Gap': result['roc_auc_gap'],
+            'CV_Test_PR_AUC': result['test_pr_auc_mean'],
+            'CV_Test_PR_AUC_Std': result['test_pr_auc_std']
+        })
+    
+    return pd.DataFrame(rows).sort_values('CV_Test_ROC_AUC', ascending=False)
+
+
+# =============================================================================
+# 8. FINAL REPORT
+# =============================================================================
+
+def generate_final_report(results_df, cv_results_df=None):
+    """
+    Generate comprehensive final report.
+    """
+    print("\n" + "="*80)
+    print("FINAL REPORT: XGBoost Hyperparameter Analysis")
+    print("="*80)
+    
+    default_results = results_df[results_df['Config'] == 'DEFAULT'].iloc[0]
+    best_results = results_df.sort_values('Test_ROC_AUC', ascending=False).iloc[0]
+    least_overfit = results_df.sort_values('ROC_AUC_Gap').iloc[0]
+    
+    print(f"""
+    ┌─────────────────────────────────────────────────────────────────────────────┐
+    │                           PERFORMANCE SUMMARY                               │
+    ├─────────────────────────────────────────────────────────────────────────────┤
+    │                                                                             │
+    │  DEFAULT Configuration:                                                     │
+    │    • Test ROC-AUC: {default_results['Test_ROC_AUC']:.4f}                                               │
+    │    • Test PR-AUC:  {default_results['Test_PR_AUC']:.4f}                                               │
+    │    • Overfit Gap:  {default_results['ROC_AUC_Gap']:.4f}                                               │
+    │                                                                             │
+    │  BEST Configuration: {best_results['Config']:15s}                                    │
+    │    • Test ROC-AUC: {best_results['Test_ROC_AUC']:.4f}                                               │
+    │    • Test PR-AUC:  {best_results['Test_PR_AUC']:.4f}                                               │
+    │    • Overfit Gap:  {best_results['ROC_AUC_Gap']:.4f}                                               │
+    │                                                                             │
+    │  LEAST OVERFITTING: {least_overfit['Config']:15s}                                     │
+    │    • Test ROC-AUC: {least_overfit['Test_ROC_AUC']:.4f}                                               │
+    │    • Overfit Gap:  {least_overfit['ROC_AUC_Gap']:.4f}                                               │
+    │                                                                             │
+    └─────────────────────────────────────────────────────────────────────────────┘
+    """)
+    
+    # Improvement calculation
+    improvement = ((best_results['Test_ROC_AUC'] - default_results['Test_ROC_AUC']) / 
+                   default_results['Test_ROC_AUC'] * 100)
+    
+    overfit_increase = best_results['ROC_AUC_Gap'] - default_results['ROC_AUC_Gap']
+    
+    print(f"""
+    ┌─────────────────────────────────────────────────────────────────────────────┐
+    │                           KEY FINDINGS                                      │
+    ├─────────────────────────────────────────────────────────────────────────────┤
+    │                                                                             │
+    │  1. IMPROVEMENT FROM TUNING:                                                │
+    │     • Best vs DEFAULT: {improvement:+.2f}% improvement                                 │
+    │     • Absolute gain: {best_results['Test_ROC_AUC'] - default_results['Test_ROC_AUC']:+.4f}                                            │
+    │                                                                             │
+    │  2. OVERFITTING ANALYSIS:                                                   │
+    │     • DEFAULT overfitting: {default_results['ROC_AUC_Gap']:.4f}                                       │
+    │     • Best config overfitting: {best_results['ROC_AUC_Gap']:.4f}                                   │
+    │     • Change in overfitting: {overfit_increase:+.4f}                                      │
+    │                                                                             │
+    │  3. PERFORMANCE RANGE:                                                      │
+    │     • Min Test AUC: {results_df['Test_ROC_AUC'].min():.4f}                                              │
+    │     • Max Test AUC: {results_df['Test_ROC_AUC'].max():.4f}                                              │
+    │     • Spread: {results_df['Test_ROC_AUC'].max() - results_df['Test_ROC_AUC'].min():.4f}                                                     │
+    │                                                                             │
+    └─────────────────────────────────────────────────────────────────────────────┘
+    """)
+    
+    # Recommendation
+    if improvement < 2:
+        recommendation = "DEFAULT"
+        reason = "Tuning provides <2% improvement - not worth the complexity"
+    elif best_results['ROC_AUC_Gap'] > default_results['ROC_AUC_Gap'] + 0.03:
+        recommendation = "DEFAULT or CONSERVATIVE"
+        reason = "Best config shows significant overfitting"
+    else:
+        recommendation = best_results['Config']
+        reason = "Meaningful improvement with acceptable overfitting"
+    
+    print(f"""
+    ┌─────────────────────────────────────────────────────────────────────────────┐
+    │                           RECOMMENDATION                                    │
+    ├─────────────────────────────────────────────────────────────────────────────┤
+    │                                                                             │
+    │  RECOMMENDED CONFIG: {recommendation:20s}                               │
+    │                                                                             │
+    │  REASON: {reason:55s}        │
+    │                                                                             │
+    │  FOR 300 DEFAULTS IN 33K OBSERVATIONS:                                      │
+    │  • Default parameters are often sufficient                                  │
+    │  • Complex tuning increases overfitting risk                                │
+    │  • Simpler models generalize better with limited positive cases             │
+    │  • Focus on PR-AUC, not just ROC-AUC for imbalanced data                   │
+    │                                                                             │
+    └─────────────────────────────────────────────────────────────────────────────┘
+    """)
+    
+    return recommendation
+
+
+# =============================================================================
+# 9. MAIN EXECUTION
+# =============================================================================
+
+def run_full_xgb_analysis(X=None, y=None, run_cv=True, run_grid=False):
+    """
+    Run complete XGBoost hyperparameter analysis.
+    """
+    # Create data if not provided
+    if X is None or y is None:
+        print("Creating synthetic imbalanced dataset...")
+        X, y = create_imbalanced_data(n_samples=33000, n_defaults=300)
+    
+    # Split data
+    X_train, X_test, y_train, y_test = split_data(X, y)
+    
+    # Get configurations
+    configs = get_hyperparameter_configs(y_train)
+    
+    # Evaluate all configurations
+    results = evaluate_all_configs(X_train, X_test, y_train, y_test, configs)
+    
+    # Create results DataFrame
+    results_df = create_results_dataframe(results)
+    
+    # Analyze results
+    sorted_df = analyze_results(results_df)
+    
+    # Calculate statistics
+    stats = calculate_statistics(results_df)
+    
+    # Cross-validation (optional)
+    cv_results_df = None
+    if run_cv:
+        cv_results = cross_validate_all_configs(X_train, y_train, configs)
+        cv_results_df = create_cv_results_dataframe(cv_results)
+        print("\n### Cross-Validation Results ###\n")
+        print(cv_results_df.to_string(index=False))
+    
+    # Grid search (optional)
+    if run_grid:
+        param_grid, scale_pos_weight = get_grid_search_params(y_train)
+        grid_results = run_grid_search(X_train, X_test, y_train, y_test, 
+                                        param_grid, scale_pos_weight, max_combinations=50)
+        grid_df = create_grid_results_dataframe(grid_results)
+        print("\n### Grid Search Best Results ###\n")
+        print(grid_df.sort_values('Test_ROC_AUC', ascending=False).head(10).to_string(index=False))
+    
+    # Visualizations
+    print("\n" + "="*70)
+    print("GENERATING VISUALIZATIONS")
+    print("="*70)
+    
+    plot_train_test_comparison(results_df)
+    plot_overfitting_heatmap(results_df)
+    plot_roc_curves_all(results, y_test)
+    plot_pr_curves_all(results, y_test)
+    plot_parameter_impact(results_df)
+    plot_performance_distribution(results_df)
+    
+    # Final report
+    recommendation = generate_final_report(results_df, cv_results_df)
+    
+    return {
+        'results': results,
+        'results_df': results_df,
+        'cv_results_df': cv_results_df,
+        'recommendation': recommendation,
+        'X_train': X_train,
+        'X_test': X_test,
+        'y_train': y_train,
+        'y_test': y_test
+    }
+
+
+# =============================================================================
+# RUN ANALYSIS
+# =============================================================================
+
+if __name__ == "__main__":
+    # Run full analysis
+    analysis = run_full_xgb_analysis(run_cv=True, run_grid=False)
+    
+    # Access results
+    print("\n\nFinal Results DataFrame:")
+    print(analysis['results_df'][['Config', 'Test_ROC_AUC', 'Test_PR_AUC', 
+                                   'ROC_AUC_Gap', 'Training_Time']].to_string(index=False))
+
+
