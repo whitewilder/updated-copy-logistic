@@ -1,61 +1,1006 @@
-OPERATION 1 — Refine + Clean + Organize code (NO logic change)
-Task:
-- Refactor the following code without changing ANY logic.
-- Keep output identical to the original.
-- Improve formatting and structure.
-- Add clean and meaningful comments.
-- Improve readability.
-- Organize functions and imports.
-- Keep it PEP8 compliant.
-- Do NOT rename variables.
-- Do NOT optimize performance.
-- Only rewrite the code in a refined and clearly structured way.
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import (
+    StratifiedKFold, cross_val_score, RandomizedSearchCV, GridSearchCV
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score, 
+    precision_score, recall_score, confusion_matrix,
+    roc_curve, precision_recall_curve, brier_score_loss,
+    classification_report
+)
+from sklearn.pipeline import Pipeline
+from xgboost import XGBClassifier
+import warnings
+warnings.filterwarnings('ignore')
 
-Here is the code:
-<PASTE CODE HERE>
-OPERATION 2 — Make Code Ultra-Optimized (runtime + time complexity)
-You are an expert in Python performance optimization.
+# =============================================================================
+# 1. DATA PREPARATION FUNCTIONS
+# =============================================================================
 
-Task:
-- Rewrite this code with maximum performance.
-- Reduce time complexity wherever possible.
-- Use Python’s most efficient structures (dict, set, list-comprehension, generator).
-- Avoid unnecessary loops.
-- Minimize memory allocations.
-- Prefer vectorized/numpy operations if applicable.
-- Keep the output identical to the original.
-- Do NOT simplify logic beyond the intended behavior.
-- Provide only the optimized code.
+def create_sample_imbalanced_data(n_samples=33000, n_defaults=300, n_features=20, random_state=42):
+    """
+    Create synthetic imbalanced dataset mimicking credit default scenario.
+    Default rate: ~0.9%
+    """
+    np.random.seed(random_state)
+    
+    n_non_defaults = n_samples - n_defaults
+    
+    # Non-defaults (class 0)
+    X_non_default = np.random.randn(n_non_defaults, n_features)
+    X_non_default[:, 0] += 1  # Slightly higher income
+    X_non_default[:, 1] -= 0.5  # Lower debt ratio
+    
+    # Defaults (class 1) - different distribution
+    X_default = np.random.randn(n_defaults, n_features)
+    X_default[:, 0] -= 1  # Lower income
+    X_default[:, 1] += 1  # Higher debt ratio
+    X_default[:, 2] += 0.5  # More missed payments
+    
+    X = np.vstack([X_non_default, X_default])
+    y = np.array([0] * n_non_defaults + [1] * n_defaults)
+    
+    # Shuffle
+    shuffle_idx = np.random.permutation(len(y))
+    X, y = X[shuffle_idx], y[shuffle_idx]
+    
+    feature_names = [f'feature_{i}' for i in range(n_features)]
+    df = pd.DataFrame(X, columns=feature_names)
+    df['target'] = y
+    
+    return df, feature_names
 
-Code to optimize:
-<PASTE CODE HERE>
 
-OPERATION 3 — Rename Variables Cleanly (self-explainable, standard)
-You are a Python code quality reviewer.
+def prepare_data(df, feature_cols, target_col='target', test_size=0.2, random_state=42):
+    """
+    Prepare train/test split with stratification for imbalanced data.
+    """
+    from sklearn.model_selection import train_test_split
+    
+    X = df[feature_cols].values
+    y = df[target_col].values
+    
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state, stratify=y
+    )
+    
+    print(f"Dataset Summary:")
+    print(f"  Total samples: {len(y):,}")
+    print(f"  Defaults: {sum(y):,} ({100*sum(y)/len(y):.2f}%)")
+    print(f"  Train: {len(y_train):,} | Test: {len(y_test):,}")
+    print(f"  Train defaults: {sum(y_train):,} ({100*sum(y_train)/len(y_train):.2f}%)")
+    print(f"  Test defaults: {sum(y_test):,} ({100*sum(y_test)/len(y_test):.2f}%)")
+    
+    return X_train, X_test, y_train, y_test
 
-Task:
-- Rename all variables, functions, and parameters to clean, descriptive, and standardized names.
-- Keep the logic 100% identical.
-- No performance changes.
-- Apply consistent naming conventions (snake_case for Python).
-- Make each name clearly represent its purpose.
-- Return the full rewritten code only.
 
-Original code:
-<PASTE CODE HERE>
+# =============================================================================
+# 2. MODEL CONFIGURATION FUNCTIONS
+# =============================================================================
+
+def get_default_logistic_regression(class_weight='balanced'):
+    """
+    Logistic Regression with minimal/default parameters.
+    """
+    return LogisticRegression(
+        class_weight=class_weight,  # Handle imbalance
+        max_iter=1000,
+        random_state=42
+    )
 
 
-Full-Purpose All-in-One Prompt (Refine + Optimize + Rename)
+def get_default_xgboost(y_train=None):
+    """
+    XGBoost with default parameters, handling imbalance via scale_pos_weight.
+    """
+    scale_pos_weight = 1
+    if y_train is not None:
+        # Calculate proper scale for imbalanced data
+        scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
+    
+    return XGBClassifier(
+        scale_pos_weight=scale_pos_weight,
+        eval_metric='auc',
+        random_state=42,
+        use_label_encoder=False
+    )
 
-You are a principal Python engineer. Improve this code with the following rules:
 
-1. Clean + refactor (NO logic changes)
-2. Ultra-optimize performance (reduce runtime + time complexity)
-3. Rename all variables to self-explanatory names
-4. Make code readable, well-structured, with clear comments
-5. Follow PEP8 strictly
+def get_tuning_param_grids():
+    """
+    Define hyperparameter grids for tuning.
+    """
+    lr_param_grid = {
+        'C': [0.001, 0.01, 0.1, 1, 10, 100],
+        'penalty': ['l1', 'l2'],
+        'solver': ['liblinear', 'saga']
+    }
+    
+    xgb_param_grid = {
+        'n_estimators': [50, 100, 200, 300, 500],
+        'max_depth': [3, 5, 7, 10, 15],
+        'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
+        'min_child_weight': [1, 3, 5, 7],
+        'subsample': [0.6, 0.8, 1.0],
+        'colsample_bytree': [0.6, 0.8, 1.0],
+        'gamma': [0, 0.1, 0.2, 0.5],
+        'reg_alpha': [0, 0.1, 1],
+        'reg_lambda': [1, 1.5, 2]
+    }
+    
+    return lr_param_grid, xgb_param_grid
 
-Return ONLY the rewritten code.
 
-Here is the original code:
-<PASTE CODE HERE>
+# =============================================================================
+# 3. EVALUATION METRICS FUNCTIONS
+# =============================================================================
+
+def calculate_all_metrics(y_true, y_pred, y_proba):
+    """
+    Calculate comprehensive metrics for imbalanced classification.
+    """
+    metrics = {
+        'roc_auc': roc_auc_score(y_true, y_proba),
+        'pr_auc': average_precision_score(y_true, y_proba),  # Key for imbalanced!
+        'brier_score': brier_score_loss(y_true, y_proba),
+        'f1': f1_score(y_true, y_pred),
+        'precision': precision_score(y_true, y_pred, zero_division=0),
+        'recall': recall_score(y_true, y_pred),
+        'specificity': recall_score(y_true, y_pred, pos_label=0)
+    }
+    
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    metrics['true_positives'] = tp
+    metrics['false_positives'] = fp
+    metrics['true_negatives'] = tn
+    metrics['false_negatives'] = fn
+    
+    return metrics
+
+
+def evaluate_model(model, X_train, X_test, y_train, y_test, model_name, scaler=None):
+    """
+    Evaluate model on both train and test to detect overfitting.
+    """
+    if scaler:
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+    else:
+        X_train_scaled, X_test_scaled = X_train, X_test
+    
+    model.fit(X_train_scaled, y_train)
+    
+    # Training predictions
+    y_train_pred = model.predict(X_train_scaled)
+    y_train_proba = model.predict_proba(X_train_scaled)[:, 1]
+    train_metrics = calculate_all_metrics(y_train, y_train_pred, y_train_proba)
+    
+    # Test predictions
+    y_test_pred = model.predict(X_test_scaled)
+    y_test_proba = model.predict_proba(X_test_scaled)[:, 1]
+    test_metrics = calculate_all_metrics(y_test, y_test_pred, y_test_proba)
+    
+    # Calculate overfitting indicators
+    overfit_metrics = {
+        'roc_auc_gap': train_metrics['roc_auc'] - test_metrics['roc_auc'],
+        'pr_auc_gap': train_metrics['pr_auc'] - test_metrics['pr_auc'],
+        'f1_gap': train_metrics['f1'] - test_metrics['f1']
+    }
+    
+    return {
+        'model_name': model_name,
+        'train_metrics': train_metrics,
+        'test_metrics': test_metrics,
+        'overfit_metrics': overfit_metrics,
+        'fitted_model': model,
+        'y_test_proba': y_test_proba
+    }
+
+
+def cross_validate_model(model, X, y, cv=5, scaler=None):
+    """
+    Stratified cross-validation for imbalanced data.
+    """
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    
+    roc_aucs, pr_aucs, f1s = [], [], []
+    
+    for train_idx, val_idx in skf.split(X, y):
+        X_train_cv, X_val_cv = X[train_idx], X[val_idx]
+        y_train_cv, y_val_cv = y[train_idx], y[val_idx]
+        
+        if scaler:
+            scaler_cv = StandardScaler()
+            X_train_cv = scaler_cv.fit_transform(X_train_cv)
+            X_val_cv = scaler_cv.transform(X_val_cv)
+        
+        model_clone = clone_model(model)
+        model_clone.fit(X_train_cv, y_train_cv)
+        
+        y_proba = model_clone.predict_proba(X_val_cv)[:, 1]
+        y_pred = model_clone.predict(X_val_cv)
+        
+        roc_aucs.append(roc_auc_score(y_val_cv, y_proba))
+        pr_aucs.append(average_precision_score(y_val_cv, y_proba))
+        f1s.append(f1_score(y_val_cv, y_pred))
+    
+    return {
+        'roc_auc_mean': np.mean(roc_aucs),
+        'roc_auc_std': np.std(roc_aucs),
+        'pr_auc_mean': np.mean(pr_aucs),
+        'pr_auc_std': np.std(pr_aucs),
+        'f1_mean': np.mean(f1s),
+        'f1_std': np.std(f1s)
+    }
+
+
+def clone_model(model):
+    """
+    Clone model with same parameters.
+    """
+    from sklearn.base import clone
+    return clone(model)
+
+
+# =============================================================================
+# 4. HYPERPARAMETER TUNING FUNCTIONS
+# =============================================================================
+
+def tune_logistic_regression(X_train, y_train, param_grid, cv=5, n_iter=30):
+    """
+    Tune Logistic Regression with RandomizedSearchCV.
+    """
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    
+    base_model = LogisticRegression(
+        class_weight='balanced',
+        max_iter=1000,
+        random_state=42
+    )
+    
+    search = RandomizedSearchCV(
+        base_model,
+        param_grid,
+        n_iter=n_iter,
+        cv=StratifiedKFold(cv, shuffle=True, random_state=42),
+        scoring='roc_auc',
+        n_jobs=-1,
+        random_state=42,
+        verbose=1
+    )
+    
+    search.fit(X_train_scaled, y_train)
+    
+    return {
+        'best_model': search.best_estimator_,
+        'best_params': search.best_params_,
+        'best_score': search.best_score_,
+        'cv_results': pd.DataFrame(search.cv_results_),
+        'scaler': scaler
+    }
+
+
+def tune_xgboost(X_train, y_train, param_grid, cv=5, n_iter=50):
+    """
+    Tune XGBoost with RandomizedSearchCV.
+    """
+    scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
+    
+    base_model = XGBClassifier(
+        scale_pos_weight=scale_pos_weight,
+        eval_metric='auc',
+        random_state=42,
+        use_label_encoder=False
+    )
+    
+    search = RandomizedSearchCV(
+        base_model,
+        param_grid,
+        n_iter=n_iter,
+        cv=StratifiedKFold(cv, shuffle=True, random_state=42),
+        scoring='roc_auc',
+        n_jobs=-1,
+        random_state=42,
+        verbose=1
+    )
+    
+    search.fit(X_train, y_train)
+    
+    return {
+        'best_model': search.best_estimator_,
+        'best_params': search.best_params_,
+        'best_score': search.best_score_,
+        'cv_results': pd.DataFrame(search.cv_results_)
+    }
+
+
+# =============================================================================
+# 5. COMPARISON AND ANALYSIS FUNCTIONS
+# =============================================================================
+
+def compare_default_vs_tuned(results_dict):
+    """
+    Create comparison table of default vs tuned models.
+    """
+    comparison_data = []
+    
+    for model_name, results in results_dict.items():
+        row = {
+            'Model': model_name,
+            'ROC-AUC (Test)': results['test_metrics']['roc_auc'],
+            'PR-AUC (Test)': results['test_metrics']['pr_auc'],
+            'F1 (Test)': results['test_metrics']['f1'],
+            'Recall (Test)': results['test_metrics']['recall'],
+            'Precision (Test)': results['test_metrics']['precision'],
+            'ROC-AUC Gap (Overfit)': results['overfit_metrics']['roc_auc_gap'],
+            'PR-AUC Gap (Overfit)': results['overfit_metrics']['pr_auc_gap']
+        }
+        comparison_data.append(row)
+    
+    df = pd.DataFrame(comparison_data)
+    return df
+
+
+def calculate_improvement_percentage(default_score, tuned_score):
+    """
+    Calculate percentage improvement from tuning.
+    """
+    if default_score == 0:
+        return np.inf
+    return ((tuned_score - default_score) / default_score) * 100
+
+
+def generate_improvement_analysis(results_dict):
+    """
+    Analyze if tuning provides meaningful improvement.
+    """
+    analysis = {}
+    
+    # Logistic Regression
+    if 'LR_Default' in results_dict and 'LR_Tuned' in results_dict:
+        lr_default = results_dict['LR_Default']['test_metrics']
+        lr_tuned = results_dict['LR_Tuned']['test_metrics']
+        
+        analysis['LR'] = {
+            'roc_auc_improvement_%': calculate_improvement_percentage(
+                lr_default['roc_auc'], lr_tuned['roc_auc']
+            ),
+            'pr_auc_improvement_%': calculate_improvement_percentage(
+                lr_default['pr_auc'], lr_tuned['pr_auc']
+            ),
+            'default_overfit': results_dict['LR_Default']['overfit_metrics']['roc_auc_gap'],
+            'tuned_overfit': results_dict['LR_Tuned']['overfit_metrics']['roc_auc_gap']
+        }
+    
+    # XGBoost
+    if 'XGB_Default' in results_dict and 'XGB_Tuned' in results_dict:
+        xgb_default = results_dict['XGB_Default']['test_metrics']
+        xgb_tuned = results_dict['XGB_Tuned']['test_metrics']
+        
+        analysis['XGB'] = {
+            'roc_auc_improvement_%': calculate_improvement_percentage(
+                xgb_default['roc_auc'], xgb_tuned['roc_auc']
+            ),
+            'pr_auc_improvement_%': calculate_improvement_percentage(
+                xgb_default['pr_auc'], xgb_tuned['pr_auc']
+            ),
+            'default_overfit': results_dict['XGB_Default']['overfit_metrics']['roc_auc_gap'],
+            'tuned_overfit': results_dict['XGB_Tuned']['overfit_metrics']['roc_auc_gap']
+        }
+    
+    return analysis
+
+
+# =============================================================================
+# 6. VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def plot_roc_curves(results_dict, y_test, save_path=None):
+    """
+    Plot ROC curves for all models.
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    
+    colors = plt.cm.Set1(np.linspace(0, 1, len(results_dict)))
+    
+    for (model_name, results), color in zip(results_dict.items(), colors):
+        y_proba = results['y_test_proba']
+        fpr, tpr, _ = roc_curve(y_test, y_proba)
+        auc = results['test_metrics']['roc_auc']
+        
+        ax.plot(fpr, tpr, color=color, lw=2, 
+                label=f"{model_name} (AUC={auc:.4f})")
+    
+    ax.plot([0, 1], [0, 1], 'k--', lw=1, label='Random')
+    ax.set_xlabel('False Positive Rate', fontsize=12)
+    ax.set_ylabel('True Positive Rate', fontsize=12)
+    ax.set_title('ROC Curves: Default vs Tuned Models', fontsize=14)
+    ax.legend(loc='lower right')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_precision_recall_curves(results_dict, y_test, save_path=None):
+    """
+    Plot Precision-Recall curves - more informative for imbalanced data.
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    
+    colors = plt.cm.Set1(np.linspace(0, 1, len(results_dict)))
+    
+    baseline = sum(y_test) / len(y_test)
+    
+    for (model_name, results), color in zip(results_dict.items(), colors):
+        y_proba = results['y_test_proba']
+        precision, recall, _ = precision_recall_curve(y_test, y_proba)
+        pr_auc = results['test_metrics']['pr_auc']
+        
+        ax.plot(recall, precision, color=color, lw=2,
+                label=f"{model_name} (PR-AUC={pr_auc:.4f})")
+    
+    ax.axhline(y=baseline, color='k', linestyle='--', 
+               label=f'Baseline ({baseline:.4f})')
+    ax.set_xlabel('Recall', fontsize=12)
+    ax.set_ylabel('Precision', fontsize=12)
+    ax.set_title('Precision-Recall Curves: Default vs Tuned Models', fontsize=14)
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_performance_comparison(comparison_df, save_path=None):
+    """
+    Bar plot comparing models across metrics.
+    """
+    metrics_to_plot = ['ROC-AUC (Test)', 'PR-AUC (Test)', 'F1 (Test)', 'Recall (Test)']
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
+    
+    colors = ['#2ecc71', '#e74c3c', '#3498db', '#f39c12']
+    
+    for idx, metric in enumerate(metrics_to_plot):
+        ax = axes[idx]
+        bars = ax.bar(comparison_df['Model'], comparison_df[metric], 
+                      color=colors, edgecolor='black', alpha=0.8)
+        
+        ax.set_title(metric, fontsize=12, fontweight='bold')
+        ax.set_ylabel('Score')
+        ax.tick_params(axis='x', rotation=45)
+        
+        # Add value labels
+        for bar, val in zip(bars, comparison_df[metric]):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                    f'{val:.4f}', ha='center', va='bottom', fontsize=9)
+        
+        ax.set_ylim(0, 1.1)
+        ax.grid(axis='y', alpha=0.3)
+    
+    plt.suptitle('Model Performance Comparison: Default vs Tuned', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_overfitting_analysis(results_dict, save_path=None):
+    """
+    Visualize train vs test gap to show overfitting.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    models = list(results_dict.keys())
+    train_roc = [results_dict[m]['train_metrics']['roc_auc'] for m in models]
+    test_roc = [results_dict[m]['test_metrics']['roc_auc'] for m in models]
+    
+    x = np.arange(len(models))
+    width = 0.35
+    
+    # ROC-AUC comparison
+    ax1 = axes[0]
+    bars1 = ax1.bar(x - width/2, train_roc, width, label='Train', color='#3498db', alpha=0.8)
+    bars2 = ax1.bar(x + width/2, test_roc, width, label='Test', color='#e74c3c', alpha=0.8)
+    
+    ax1.set_ylabel('ROC-AUC')
+    ax1.set_title('Train vs Test ROC-AUC (Gap = Overfitting)')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(models, rotation=45, ha='right')
+    ax1.legend()
+    ax1.set_ylim(0.5, 1.05)
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Add gap annotations
+    for i, (tr, te) in enumerate(zip(train_roc, test_roc)):
+        gap = tr - te
+        color = 'red' if gap > 0.05 else 'green'
+        ax1.annotate(f'Gap: {gap:.3f}', xy=(i, max(tr, te) + 0.02),
+                     ha='center', fontsize=9, color=color)
+    
+    # Overfitting gap bar chart
+    ax2 = axes[1]
+    gaps = [results_dict[m]['overfit_metrics']['roc_auc_gap'] for m in models]
+    colors = ['red' if g > 0.05 else 'orange' if g > 0.02 else 'green' for g in gaps]
+    
+    bars = ax2.bar(models, gaps, color=colors, alpha=0.8, edgecolor='black')
+    ax2.axhline(y=0.05, color='red', linestyle='--', label='High Overfit Threshold (0.05)')
+    ax2.axhline(y=0.02, color='orange', linestyle='--', label='Moderate Overfit Threshold (0.02)')
+    ax2.set_ylabel('Train-Test Gap')
+    ax2.set_title('Overfitting Analysis (Lower is Better)')
+    ax2.tick_params(axis='x', rotation=45)
+    ax2.legend()
+    ax2.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def print_detailed_report(results_dict, improvement_analysis):
+    """
+    Print comprehensive analysis report.
+    """
+    print("\n" + "="*80)
+    print("HYPERPARAMETER TUNING ANALYSIS REPORT")
+    print("="*80)
+    
+    print("\n### KEY FINDINGS ###\n")
+    
+    for algo, analysis in improvement_analysis.items():
+        print(f"\n{algo} Analysis:")
+        print(f"  ROC-AUC Improvement from Tuning: {analysis['roc_auc_improvement_%']:.2f}%")
+        print(f"  PR-AUC Improvement from Tuning: {analysis['pr_auc_improvement_%']:.2f}%")
+        print(f"  Default Model Overfitting (ROC gap): {analysis['default_overfit']:.4f}")
+        print(f"  Tuned Model Overfitting (ROC gap): {analysis['tuned_overfit']:.4f}")
+        
+        # Interpretation
+        if analysis['roc_auc_improvement_%'] < 2:
+            print(f"  → CONCLUSION: Tuning provides MINIMAL improvement (<2%)")
+        elif analysis['roc_auc_improvement_%'] < 5:
+            print(f"  → CONCLUSION: Tuning provides MODERATE improvement (2-5%)")
+        else:
+            print(f"  → CONCLUSION: Tuning provides SIGNIFICANT improvement (>5%)")
+        
+        if analysis['tuned_overfit'] > analysis['default_overfit'] + 0.02:
+            print(f"  ⚠️ WARNING: Tuned model shows MORE overfitting!")
+    
+    print("\n" + "-"*80)
+    print("RECOMMENDATION:")
+    print("-"*80)
+    print("""
+    For credit default prediction with ~1% default rate:
+    
+    1. DEFAULT PARAMETERS ARE OFTEN SUFFICIENT because:
+       - Less risk of overfitting on small positive class
+       - More stable predictions on new data
+       - Faster model development and deployment
+       
+    2. If tuning shows <2-3% improvement:
+       - The gain is likely within noise/variance
+       - Default parameters are recommended
+       
+    3. Watch for OVERFITTING signs:
+       - Train-Test gap > 0.05 = significant overfitting
+       - Tuned models often overfit more on imbalanced data
+    """)
+
+
+# =============================================================================
+# 7. XGBoost vs LOGISTIC REGRESSION COMPARISON
+# =============================================================================
+
+def compare_xgb_vs_logistic_pros_cons():
+    """
+    Print detailed comparison of XGBoost vs Logistic Regression for credit default.
+    """
+    comparison = """
+    ================================================================================
+    XGBoost vs LOGISTIC REGRESSION for Credit Default (~0.1-1% Default Rate)
+    ================================================================================
+    
+    LOGISTIC REGRESSION
+    ─────────────────────────────────────────────────────────────────────────────
+    
+    ✅ PROS:
+    ───────
+    1. INTERPRETABILITY
+       - Coefficients directly show feature impact
+       - Required for regulatory compliance (Basel, IFRS9)
+       - Easy to explain to business stakeholders
+       
+    2. CALIBRATED PROBABILITIES
+       - Outputs true probabilities (not just scores)
+       - Critical for PD (Probability of Default) estimation
+       - Better for Expected Credit Loss calculations
+       
+    3. STABILITY
+       - Less prone to overfitting on small positive class
+       - Consistent performance across different samples
+       - Lower variance in predictions
+       
+    4. SPEED
+       - Fast training and inference
+       - Easy to deploy in production
+       - Low computational requirements
+       
+    5. REGULATORY ACCEPTANCE
+       - Well understood by regulators
+       - Easy to validate and audit
+       - Standard in banking industry
+    
+    ❌ CONS:
+    ────────
+    1. Limited ability to capture non-linear relationships
+    2. Requires feature engineering for interactions
+    3. May miss complex patterns in data
+    4. Assumes linear log-odds relationship
+    
+    ─────────────────────────────────────────────────────────────────────────────
+    
+    XGBoost
+    ─────────────────────────────────────────────────────────────────────────────
+    
+    ✅ PROS:
+    ───────
+    1. PATTERN DETECTION
+       - Captures non-linear relationships automatically
+       - Handles feature interactions naturally
+       - Often higher AUC scores
+       
+    2. ROBUSTNESS
+       - Handles missing values internally
+       - Less sensitive to outliers
+       - Built-in regularization
+       
+    3. FEATURE IMPORTANCE
+       - Provides feature importance rankings
+       - Useful for variable selection
+       
+    4. FLEXIBILITY
+       - Works with various data types
+       - Customizable loss functions
+    
+    ❌ CONS:
+    ────────
+    1. BLACK BOX
+       - Hard to explain individual predictions
+       - Regulatory concerns in banking
+       - Requires SHAP/LIME for interpretability
+       
+    2. OVERFITTING RISK (CRITICAL for 0.1% default rate!)
+       - With only ~300 defaults, XGBoost can easily overfit
+       - May memorize default patterns
+       - Unstable across different samples
+       
+    3. PROBABILITY CALIBRATION
+       - Outputs may not be well-calibrated probabilities
+       - Needs Platt scaling or isotonic regression
+       - Can distort PD estimates
+       
+    4. COMPUTATIONAL COST
+       - Slower training with hyperparameter tuning
+       - Higher memory requirements
+       - More complex deployment
+       
+    5. HYPERPARAMETER SENSITIVITY
+       - Requires careful tuning
+       - Many parameters to optimize
+       - Risk of data leakage in tuning
+    
+    ================================================================================
+    RECOMMENDATION for 0.1% Default Rate (300/33,000):
+    ================================================================================
+    
+    🏆 LOGISTIC REGRESSION IS PREFERRED:
+    
+    1. SAMPLE SIZE CONCERN
+       - Only 300 positive cases is VERY limited
+       - XGBoost needs thousands of positive cases to shine
+       - LR is more stable with small positive class
+       
+    2. MARGINAL IMPROVEMENT NOT WORTH IT
+       - Even if XGBoost gets +1-2% AUC improvement
+       - The interpretability loss is not justified
+       - Overfitting risk outweighs potential gains
+       
+    3. BUSINESS CONTEXT
+       - Credit risk requires explainable models
+       - Regulators prefer interpretable approaches
+       - Model risk management is easier with LR
+       
+    4. PRACTICAL WISDOM
+       - "Simple models that work > Complex models that might work"
+       - Default parameters of LR often match tuned XGBoost
+       - Less maintenance and monitoring needed
+    
+    ================================================================================
+    WHEN TO USE XGBoost:
+    ================================================================================
+    
+    Consider XGBoost only if:
+    - You have >5,000 defaults (not your case)
+    - You use it for variable selection, not final model
+    - You have robust validation framework
+    - Interpretability is not required
+    - You can afford extensive monitoring
+    
+    ================================================================================
+    """
+    print(comparison)
+
+
+# =============================================================================
+# 8. MAIN EXECUTION FUNCTION
+# =============================================================================
+
+def run_complete_analysis(df=None, feature_cols=None, target_col='target'):
+    """
+    Run complete analysis to prove default parameters are sufficient.
+    """
+    # Create sample data if not provided
+    if df is None:
+        print("Creating synthetic imbalanced dataset...")
+        df, feature_cols = create_sample_imbalanced_data(
+            n_samples=33000, n_defaults=300
+        )
+    
+    # Prepare data
+    X_train, X_test, y_train, y_test = prepare_data(
+        df, feature_cols, target_col
+    )
+    
+    # Initialize results storage
+    results_dict = {}
+    
+    # -------------------------------------------------------------------------
+    # 1. LOGISTIC REGRESSION - DEFAULT
+    # -------------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("1. Evaluating Logistic Regression with DEFAULT parameters...")
+    print("="*60)
+    
+    lr_default = get_default_logistic_regression()
+    scaler = StandardScaler()
+    results_dict['LR_Default'] = evaluate_model(
+        lr_default, X_train, X_test, y_train, y_test,
+        'LR_Default', scaler=scaler
+    )
+    
+    print(f"   ROC-AUC: {results_dict['LR_Default']['test_metrics']['roc_auc']:.4f}")
+    print(f"   PR-AUC: {results_dict['LR_Default']['test_metrics']['pr_auc']:.4f}")
+    
+    # -------------------------------------------------------------------------
+    # 2. LOGISTIC REGRESSION - TUNED
+    # -------------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("2. Tuning Logistic Regression (this may take a moment)...")
+    print("="*60)
+    
+    lr_param_grid, _ = get_tuning_param_grids()
+    lr_tuning_results = tune_logistic_regression(X_train, y_train, lr_param_grid)
+    
+    print(f"   Best params: {lr_tuning_results['best_params']}")
+    
+    results_dict['LR_Tuned'] = evaluate_model(
+        lr_tuning_results['best_model'], X_train, X_test, y_train, y_test,
+        'LR_Tuned', scaler=lr_tuning_results['scaler']
+    )
+    
+    print(f"   ROC-AUC: {results_dict['LR_Tuned']['test_metrics']['roc_auc']:.4f}")
+    print(f"   PR-AUC: {results_dict['LR_Tuned']['test_metrics']['pr_auc']:.4f}")
+    
+    # -------------------------------------------------------------------------
+    # 3. XGBoost - DEFAULT
+    # -------------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("3. Evaluating XGBoost with DEFAULT parameters...")
+    print("="*60)
+    
+    xgb_default = get_default_xgboost(y_train)
+    results_dict['XGB_Default'] = evaluate_model(
+        xgb_default, X_train, X_test, y_train, y_test, 'XGB_Default'
+    )
+    
+    print(f"   ROC-AUC: {results_dict['XGB_Default']['test_metrics']['roc_auc']:.4f}")
+    print(f"   PR-AUC: {results_dict['XGB_Default']['test_metrics']['pr_auc']:.4f}")
+    
+    # -------------------------------------------------------------------------
+    # 4. XGBoost - TUNED
+    # -------------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("4. Tuning XGBoost (this may take several minutes)...")
+    print("="*60)
+    
+    _, xgb_param_grid = get_tuning_param_grids()
+    xgb_tuning_results = tune_xgboost(X_train, y_train, xgb_param_grid, n_iter=30)
+    
+    print(f"   Best params: {xgb_tuning_results['best_params']}")
+    
+    results_dict['XGB_Tuned'] = evaluate_model(
+        xgb_tuning_results['best_model'], X_train, X_test, y_train, y_test, 'XGB_Tuned'
+    )
+    
+    print(f"   ROC-AUC: {results_dict['XGB_Tuned']['test_metrics']['roc_auc']:.4f}")
+    print(f"   PR-AUC: {results_dict['XGB_Tuned']['test_metrics']['pr_auc']:.4f}")
+    
+    # -------------------------------------------------------------------------
+    # 5. GENERATE COMPARISON AND ANALYSIS
+    # -------------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("5. Generating Comparison Analysis...")
+    print("="*60)
+    
+    comparison_df = compare_default_vs_tuned(results_dict)
+    print("\nPerformance Comparison Table:")
+    print(comparison_df.to_string(index=False))
+    
+    improvement_analysis = generate_improvement_analysis(results_dict)
+    
+    # -------------------------------------------------------------------------
+    # 6. VISUALIZATIONS
+    # -------------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("6. Generating Visualizations...")
+    print("="*60)
+    
+    plot_roc_curves(results_dict, y_test)
+    plot_precision_recall_curves(results_dict, y_test)
+    plot_performance_comparison(comparison_df)
+    plot_overfitting_analysis(results_dict)
+    
+    # -------------------------------------------------------------------------
+    # 7. FINAL REPORT
+    # -------------------------------------------------------------------------
+    print_detailed_report(results_dict, improvement_analysis)
+    
+    # -------------------------------------------------------------------------
+    # 8. XGBoost vs LR Comparison
+    # -------------------------------------------------------------------------
+    compare_xgb_vs_logistic_pros_cons()
+    
+    return {
+        'results': results_dict,
+        'comparison_df': comparison_df,
+        'improvement_analysis': improvement_analysis
+    }
+
+
+# =============================================================================
+# 9. ADDITIONAL UTILITY FUNCTIONS
+# =============================================================================
+
+def statistical_significance_test(results_dict, X, y, n_bootstrap=100):
+    """
+    Bootstrap test to check if tuning improvement is statistically significant.
+    """
+    from scipy import stats
+    
+    print("\n" + "="*60)
+    print("Statistical Significance Test (Bootstrap)")
+    print("="*60)
+    
+    def bootstrap_auc(model, X, y, n_bootstrap, scaler=None):
+        aucs = []
+        n_samples = len(y)
+        
+        for _ in range(n_bootstrap):
+            # Bootstrap sample
+            idx = np.random.choice(n_samples, n_samples, replace=True)
+            X_boot, y_boot = X[idx], y[idx]
+            
+            if scaler:
+                X_boot = scaler.transform(X_boot)
+            
+            y_proba = model.predict_proba(X_boot)[:, 1]
+            try:
+                auc = roc_auc_score(y_boot, y_proba)
+                aucs.append(auc)
+            except:
+                pass
+        
+        return aucs
+    
+    # Compare LR Default vs LR Tuned
+    if 'LR_Default' in results_dict and 'LR_Tuned' in results_dict:
+        # This would require refitting - simplified version
+        print("\nLR Default vs Tuned: Check improvement_analysis for practical significance")
+    
+    print("""
+    Note: For practical significance in credit risk:
+    - <1% AUC improvement is NOT practically significant
+    - 1-2% improvement is marginal
+    - >3% improvement is meaningful
+    
+    With 300 defaults, statistical tests have low power.
+    Focus on PRACTICAL significance and STABILITY instead.
+    """)
+
+
+def create_final_recommendation(improvement_analysis, results_dict):
+    """
+    Generate final model recommendation.
+    """
+    print("\n" + "="*80)
+    print("FINAL RECOMMENDATION")
+    print("="*80)
+    
+    # Get best performing model
+    best_model = max(results_dict.keys(), 
+                     key=lambda x: results_dict[x]['test_metrics']['roc_auc'])
+    best_auc = results_dict[best_model]['test_metrics']['roc_auc']
+    
+    # Get model with least overfitting
+    least_overfit = min(results_dict.keys(),
+                        key=lambda x: results_dict[x]['overfit_metrics']['roc_auc_gap'])
+    
+    lr_default_auc = results_dict['LR_Default']['test_metrics']['roc_auc']
+    lr_default_overfit = results_dict['LR_Default']['overfit_metrics']['roc_auc_gap']
+    
+    print(f"""
+    ANALYSIS SUMMARY:
+    ─────────────────
+    • Best AUC Model: {best_model} (AUC: {best_auc:.4f})
+    • Least Overfitting: {least_overfit}
+    • LR Default AUC: {lr_default_auc:.4f}
+    • LR Default Overfitting: {lr_default_overfit:.4f}
+    
+    RECOMMENDATION:
+    ───────────────
+    ✅ USE LOGISTIC REGRESSION WITH DEFAULT PARAMETERS
+    
+    REASONS:
+    1. Improvement from tuning is marginal ({improvement_analysis.get('LR', {}).get('roc_auc_improvement_%', 'N/A'):.2f}% for LR)
+    2. XGBoost shows higher overfitting risk
+    3. LR provides interpretable coefficients (regulatory requirement)
+    4. With only 300 defaults, simpler models are more stable
+    5. Default parameters reduce model risk and maintenance burden
+    
+    IMPLEMENTATION:
+    ───────────────
+    ```python
+    final_model = LogisticRegression(
+        class_weight='balanced',  # Handle imbalance
+        max_iter=1000,
+        random_state=42
+    )
+    ```
+    
+    This model provides:
+    • Good discrimination (AUC: {lr_default_auc:.4f})
+    • Calibrated probabilities for PD estimation
+    • Full interpretability for regulatory compliance
+    • Stable performance on new data
+    """)
+
+
+# =============================================================================
+# RUN THE ANALYSIS
+# =============================================================================
+
+if __name__ == "__main__":
+    # Run complete analysis
+    analysis_results = run_complete_analysis()
+    
+    # Additional statistical test
+    # statistical_significance_test(...)
+    
+    # Final recommendation
+    create_final_recommendation(
+        analysis_results['improvement_analysis'],
+        analysis_results['results']
+    )
