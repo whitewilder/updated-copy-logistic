@@ -1,2107 +1,473 @@
-import numpy as np
+
+
+#!/usr/bin/env python3
+"""
+V1 vs V2 Side-by-Side Visual Comparison Tool
+Places V1 and V2 content next to each other for easy visual comparison
+"""
+
+import os
+from pathlib import Path
+from datetime import datetime
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.model_selection import (
-    StratifiedKFold, cross_val_score, RandomizedSearchCV, GridSearchCV
-)
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    roc_auc_score, average_precision_score, f1_score, 
-    precision_score, recall_score, confusion_matrix,
-    roc_curve, precision_recall_curve, brier_score_loss,
-    classification_report
-)
-from sklearn.pipeline import Pipeline
-from xgboost import XGBClassifier
-import warnings
-warnings.filterwarnings('ignore')
 
-# =============================================================================
-# 1. DATA PREPARATION FUNCTIONS
-# =============================================================================
+# PDF handling
+try:
+    from pdf2image import convert_from_path
+    from PIL import Image
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    print("Note: Install pdf2image and Pillow for PDF comparison")
 
-def create_sample_imbalanced_data(n_samples=33000, n_defaults=300, n_features=20, random_state=42):
-    """
-    Create synthetic imbalanced dataset mimicking credit default scenario.
-    Default rate: ~0.9%
-    """
-    np.random.seed(random_state)
-    
-    n_non_defaults = n_samples - n_defaults
-    
-    # Non-defaults (class 0)
-    X_non_default = np.random.randn(n_non_defaults, n_features)
-    X_non_default[:, 0] += 1  # Slightly higher income
-    X_non_default[:, 1] -= 0.5  # Lower debt ratio
-    
-    # Defaults (class 1) - different distribution
-    X_default = np.random.randn(n_defaults, n_features)
-    X_default[:, 0] -= 1  # Lower income
-    X_default[:, 1] += 1  # Higher debt ratio
-    X_default[:, 2] += 0.5  # More missed payments
-    
-    X = np.vstack([X_non_default, X_default])
-    y = np.array([0] * n_non_defaults + [1] * n_defaults)
-    
-    # Shuffle
-    shuffle_idx = np.random.permutation(len(y))
-    X, y = X[shuffle_idx], y[shuffle_idx]
-    
-    feature_names = [f'feature_{i}' for i in range(n_features)]
-    df = pd.DataFrame(X, columns=feature_names)
-    df['target'] = y
-    
-    return df, feature_names
-
-
-def prepare_data(df, feature_cols, target_col='target', test_size=0.2, random_state=42):
-    """
-    Prepare train/test split with stratification for imbalanced data.
-    """
-    from sklearn.model_selection import train_test_split
-    
-    X = df[feature_cols].values
-    y = df[target_col].values
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, stratify=y
-    )
-    
-    print(f"Dataset Summary:")
-    print(f"  Total samples: {len(y):,}")
-    print(f"  Defaults: {sum(y):,} ({100*sum(y)/len(y):.2f}%)")
-    print(f"  Train: {len(y_train):,} | Test: {len(y_test):,}")
-    print(f"  Train defaults: {sum(y_train):,} ({100*sum(y_train)/len(y_train):.2f}%)")
-    print(f"  Test defaults: {sum(y_test):,} ({100*sum(y_test)/len(y_test):.2f}%)")
-    
-    return X_train, X_test, y_train, y_test
+# Excel styling
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 # =============================================================================
-# 2. MODEL CONFIGURATION FUNCTIONS
+# COLORS AND STYLES
 # =============================================================================
 
-def get_default_logistic_regression(class_weight='balanced'):
-    """
-    Logistic Regression with minimal/default parameters.
-    """
-    return LogisticRegression(
-        class_weight=class_weight,  # Handle imbalance
-        max_iter=1000,
-        random_state=42
-    )
+V1_HEADER_COLOR = "1F4E79"  # Dark Blue
+V2_HEADER_COLOR = "C65911"  # Dark Orange
+V1_LIGHT_COLOR = "D6EAF8"   # Light Blue
+V2_LIGHT_COLOR = "FDEBD0"   # Light Orange
+SEPARATOR_COLOR = "808080"  # Gray
+WHITE = "FFFFFF"
 
 
-def get_default_xgboost(y_train=None):
-    """
-    XGBoost with default parameters, handling imbalance via scale_pos_weight.
-    """
-    scale_pos_weight = 1
-    if y_train is not None:
-        # Calculate proper scale for imbalanced data
-        scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
-    
-    return XGBClassifier(
-        scale_pos_weight=scale_pos_weight,
-        eval_metric='auc',
-        random_state=42,
-        use_label_encoder=False
-    )
-
-
-def get_tuning_param_grids():
-    """
-    Define hyperparameter grids for tuning.
-    """
-    lr_param_grid = {
-        'C': [0.001, 0.01, 0.1, 1, 10, 100],
-        'penalty': ['l1', 'l2'],
-        'solver': ['liblinear', 'saga']
-    }
-    
-    xgb_param_grid = {
-        'n_estimators': [50, 100, 200, 300, 500],
-        'max_depth': [3, 5, 7, 10, 15],
-        'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
-        'min_child_weight': [1, 3, 5, 7],
-        'subsample': [0.6, 0.8, 1.0],
-        'colsample_bytree': [0.6, 0.8, 1.0],
-        'gamma': [0, 0.1, 0.2, 0.5],
-        'reg_alpha': [0, 0.1, 1],
-        'reg_lambda': [1, 1.5, 2]
-    }
-    
-    return lr_param_grid, xgb_param_grid
-
-
-# =============================================================================
-# 3. EVALUATION METRICS FUNCTIONS
-# =============================================================================
-
-def calculate_all_metrics(y_true, y_pred, y_proba):
-    """
-    Calculate comprehensive metrics for imbalanced classification.
-    """
-    metrics = {
-        'roc_auc': roc_auc_score(y_true, y_proba),
-        'pr_auc': average_precision_score(y_true, y_proba),  # Key for imbalanced!
-        'brier_score': brier_score_loss(y_true, y_proba),
-        'f1': f1_score(y_true, y_pred),
-        'precision': precision_score(y_true, y_pred, zero_division=0),
-        'recall': recall_score(y_true, y_pred),
-        'specificity': recall_score(y_true, y_pred, pos_label=0)
-    }
-    
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    metrics['true_positives'] = tp
-    metrics['false_positives'] = fp
-    metrics['true_negatives'] = tn
-    metrics['false_negatives'] = fn
-    
-    return metrics
-
-
-def evaluate_model(model, X_train, X_test, y_train, y_test, model_name, scaler=None):
-    """
-    Evaluate model on both train and test to detect overfitting.
-    """
-    if scaler:
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-    else:
-        X_train_scaled, X_test_scaled = X_train, X_test
-    
-    model.fit(X_train_scaled, y_train)
-    
-    # Training predictions
-    y_train_pred = model.predict(X_train_scaled)
-    y_train_proba = model.predict_proba(X_train_scaled)[:, 1]
-    train_metrics = calculate_all_metrics(y_train, y_train_pred, y_train_proba)
-    
-    # Test predictions
-    y_test_pred = model.predict(X_test_scaled)
-    y_test_proba = model.predict_proba(X_test_scaled)[:, 1]
-    test_metrics = calculate_all_metrics(y_test, y_test_pred, y_test_proba)
-    
-    # Calculate overfitting indicators
-    overfit_metrics = {
-        'roc_auc_gap': train_metrics['roc_auc'] - test_metrics['roc_auc'],
-        'pr_auc_gap': train_metrics['pr_auc'] - test_metrics['pr_auc'],
-        'f1_gap': train_metrics['f1'] - test_metrics['f1']
-    }
-    
+def get_v1_header_style():
     return {
-        'model_name': model_name,
-        'train_metrics': train_metrics,
-        'test_metrics': test_metrics,
-        'overfit_metrics': overfit_metrics,
-        'fitted_model': model,
-        'y_test_proba': y_test_proba
+        'fill': PatternFill(start_color=V1_HEADER_COLOR, end_color=V1_HEADER_COLOR, fill_type='solid'),
+        'font': Font(color=WHITE, bold=True, size=11),
+        'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True)
     }
 
 
-def cross_validate_model(model, X, y, cv=5, scaler=None):
-    """
-    Stratified cross-validation for imbalanced data.
-    """
-    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
-    
-    roc_aucs, pr_aucs, f1s = [], [], []
-    
-    for train_idx, val_idx in skf.split(X, y):
-        X_train_cv, X_val_cv = X[train_idx], X[val_idx]
-        y_train_cv, y_val_cv = y[train_idx], y[val_idx]
-        
-        if scaler:
-            scaler_cv = StandardScaler()
-            X_train_cv = scaler_cv.fit_transform(X_train_cv)
-            X_val_cv = scaler_cv.transform(X_val_cv)
-        
-        model_clone = clone_model(model)
-        model_clone.fit(X_train_cv, y_train_cv)
-        
-        y_proba = model_clone.predict_proba(X_val_cv)[:, 1]
-        y_pred = model_clone.predict(X_val_cv)
-        
-        roc_aucs.append(roc_auc_score(y_val_cv, y_proba))
-        pr_aucs.append(average_precision_score(y_val_cv, y_proba))
-        f1s.append(f1_score(y_val_cv, y_pred))
-    
+def get_v2_header_style():
     return {
-        'roc_auc_mean': np.mean(roc_aucs),
-        'roc_auc_std': np.std(roc_aucs),
-        'pr_auc_mean': np.mean(pr_aucs),
-        'pr_auc_std': np.std(pr_aucs),
-        'f1_mean': np.mean(f1s),
-        'f1_std': np.std(f1s)
+        'fill': PatternFill(start_color=V2_HEADER_COLOR, end_color=V2_HEADER_COLOR, fill_type='solid'),
+        'font': Font(color=WHITE, bold=True, size=11),
+        'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True)
     }
 
 
-def clone_model(model):
-    """
-    Clone model with same parameters.
-    """
-    from sklearn.base import clone
-    return clone(model)
-
-
-# =============================================================================
-# 4. HYPERPARAMETER TUNING FUNCTIONS
-# =============================================================================
-
-def tune_logistic_regression(X_train, y_train, param_grid, cv=5, n_iter=30):
-    """
-    Tune Logistic Regression with RandomizedSearchCV.
-    """
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    
-    base_model = LogisticRegression(
-        class_weight='balanced',
-        max_iter=1000,
-        random_state=42
-    )
-    
-    search = RandomizedSearchCV(
-        base_model,
-        param_grid,
-        n_iter=n_iter,
-        cv=StratifiedKFold(cv, shuffle=True, random_state=42),
-        scoring='roc_auc',
-        n_jobs=-1,
-        random_state=42,
-        verbose=1
-    )
-    
-    search.fit(X_train_scaled, y_train)
-    
+def get_v1_cell_style():
     return {
-        'best_model': search.best_estimator_,
-        'best_params': search.best_params_,
-        'best_score': search.best_score_,
-        'cv_results': pd.DataFrame(search.cv_results_),
-        'scaler': scaler
+        'fill': PatternFill(start_color=V1_LIGHT_COLOR, end_color=V1_LIGHT_COLOR, fill_type='solid'),
+        'alignment': Alignment(vertical='top', wrap_text=True)
     }
 
 
-def tune_xgboost(X_train, y_train, param_grid, cv=5, n_iter=50):
-    """
-    Tune XGBoost with RandomizedSearchCV.
-    """
-    scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
-    
-    base_model = XGBClassifier(
-        scale_pos_weight=scale_pos_weight,
-        eval_metric='auc',
-        random_state=42,
-        use_label_encoder=False
-    )
-    
-    search = RandomizedSearchCV(
-        base_model,
-        param_grid,
-        n_iter=n_iter,
-        cv=StratifiedKFold(cv, shuffle=True, random_state=42),
-        scoring='roc_auc',
-        n_jobs=-1,
-        random_state=42,
-        verbose=1
-    )
-    
-    search.fit(X_train, y_train)
-    
+def get_v2_cell_style():
     return {
-        'best_model': search.best_estimator_,
-        'best_params': search.best_params_,
-        'best_score': search.best_score_,
-        'cv_results': pd.DataFrame(search.cv_results_)
+        'fill': PatternFill(start_color=V2_LIGHT_COLOR, end_color=V2_LIGHT_COLOR, fill_type='solid'),
+        'alignment': Alignment(vertical='top', wrap_text=True)
     }
 
 
-# =============================================================================
-# 5. COMPARISON AND ANALYSIS FUNCTIONS
-# =============================================================================
-
-def compare_default_vs_tuned(results_dict):
-    """
-    Create comparison table of default vs tuned models.
-    """
-    comparison_data = []
-    
-    for model_name, results in results_dict.items():
-        row = {
-            'Model': model_name,
-            'ROC-AUC (Test)': results['test_metrics']['roc_auc'],
-            'PR-AUC (Test)': results['test_metrics']['pr_auc'],
-            'F1 (Test)': results['test_metrics']['f1'],
-            'Recall (Test)': results['test_metrics']['recall'],
-            'Precision (Test)': results['test_metrics']['precision'],
-            'ROC-AUC Gap (Overfit)': results['overfit_metrics']['roc_auc_gap'],
-            'PR-AUC Gap (Overfit)': results['overfit_metrics']['pr_auc_gap']
-        }
-        comparison_data.append(row)
-    
-    df = pd.DataFrame(comparison_data)
-    return df
-
-
-def calculate_improvement_percentage(default_score, tuned_score):
-    """
-    Calculate percentage improvement from tuning.
-    """
-    if default_score == 0:
-        return np.inf
-    return ((tuned_score - default_score) / default_score) * 100
-
-
-def generate_improvement_analysis(results_dict):
-    """
-    Analyze if tuning provides meaningful improvement.
-    """
-    analysis = {}
-    
-    # Logistic Regression
-    if 'LR_Default' in results_dict and 'LR_Tuned' in results_dict:
-        lr_default = results_dict['LR_Default']['test_metrics']
-        lr_tuned = results_dict['LR_Tuned']['test_metrics']
-        
-        analysis['LR'] = {
-            'roc_auc_improvement_%': calculate_improvement_percentage(
-                lr_default['roc_auc'], lr_tuned['roc_auc']
-            ),
-            'pr_auc_improvement_%': calculate_improvement_percentage(
-                lr_default['pr_auc'], lr_tuned['pr_auc']
-            ),
-            'default_overfit': results_dict['LR_Default']['overfit_metrics']['roc_auc_gap'],
-            'tuned_overfit': results_dict['LR_Tuned']['overfit_metrics']['roc_auc_gap']
-        }
-    
-    # XGBoost
-    if 'XGB_Default' in results_dict and 'XGB_Tuned' in results_dict:
-        xgb_default = results_dict['XGB_Default']['test_metrics']
-        xgb_tuned = results_dict['XGB_Tuned']['test_metrics']
-        
-        analysis['XGB'] = {
-            'roc_auc_improvement_%': calculate_improvement_percentage(
-                xgb_default['roc_auc'], xgb_tuned['roc_auc']
-            ),
-            'pr_auc_improvement_%': calculate_improvement_percentage(
-                xgb_default['pr_auc'], xgb_tuned['pr_auc']
-            ),
-            'default_overfit': results_dict['XGB_Default']['overfit_metrics']['roc_auc_gap'],
-            'tuned_overfit': results_dict['XGB_Tuned']['overfit_metrics']['roc_auc_gap']
-        }
-    
-    return analysis
-
-
-# =============================================================================
-# 6. VISUALIZATION FUNCTIONS
-# =============================================================================
-
-def plot_roc_curves(results_dict, y_test, save_path=None):
-    """
-    Plot ROC curves for all models.
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-    
-    colors = plt.cm.Set1(np.linspace(0, 1, len(results_dict)))
-    
-    for (model_name, results), color in zip(results_dict.items(), colors):
-        y_proba = results['y_test_proba']
-        fpr, tpr, _ = roc_curve(y_test, y_proba)
-        auc = results['test_metrics']['roc_auc']
-        
-        ax.plot(fpr, tpr, color=color, lw=2, 
-                label=f"{model_name} (AUC={auc:.4f})")
-    
-    ax.plot([0, 1], [0, 1], 'k--', lw=1, label='Random')
-    ax.set_xlabel('False Positive Rate', fontsize=12)
-    ax.set_ylabel('True Positive Rate', fontsize=12)
-    ax.set_title('ROC Curves: Default vs Tuned Models', fontsize=14)
-    ax.legend(loc='lower right')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_precision_recall_curves(results_dict, y_test, save_path=None):
-    """
-    Plot Precision-Recall curves - more informative for imbalanced data.
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-    
-    colors = plt.cm.Set1(np.linspace(0, 1, len(results_dict)))
-    
-    baseline = sum(y_test) / len(y_test)
-    
-    for (model_name, results), color in zip(results_dict.items(), colors):
-        y_proba = results['y_test_proba']
-        precision, recall, _ = precision_recall_curve(y_test, y_proba)
-        pr_auc = results['test_metrics']['pr_auc']
-        
-        ax.plot(recall, precision, color=color, lw=2,
-                label=f"{model_name} (PR-AUC={pr_auc:.4f})")
-    
-    ax.axhline(y=baseline, color='k', linestyle='--', 
-               label=f'Baseline ({baseline:.4f})')
-    ax.set_xlabel('Recall', fontsize=12)
-    ax.set_ylabel('Precision', fontsize=12)
-    ax.set_title('Precision-Recall Curves: Default vs Tuned Models', fontsize=14)
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_performance_comparison(comparison_df, save_path=None):
-    """
-    Bar plot comparing models across metrics.
-    """
-    metrics_to_plot = ['ROC-AUC (Test)', 'PR-AUC (Test)', 'F1 (Test)', 'Recall (Test)']
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    axes = axes.flatten()
-    
-    colors = ['#2ecc71', '#e74c3c', '#3498db', '#f39c12']
-    
-    for idx, metric in enumerate(metrics_to_plot):
-        ax = axes[idx]
-        bars = ax.bar(comparison_df['Model'], comparison_df[metric], 
-                      color=colors, edgecolor='black', alpha=0.8)
-        
-        ax.set_title(metric, fontsize=12, fontweight='bold')
-        ax.set_ylabel('Score')
-        ax.tick_params(axis='x', rotation=45)
-        
-        # Add value labels
-        for bar, val in zip(bars, comparison_df[metric]):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f'{val:.4f}', ha='center', va='bottom', fontsize=9)
-        
-        ax.set_ylim(0, 1.1)
-        ax.grid(axis='y', alpha=0.3)
-    
-    plt.suptitle('Model Performance Comparison: Default vs Tuned', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_overfitting_analysis(results_dict, save_path=None):
-    """
-    Visualize train vs test gap to show overfitting.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    models = list(results_dict.keys())
-    train_roc = [results_dict[m]['train_metrics']['roc_auc'] for m in models]
-    test_roc = [results_dict[m]['test_metrics']['roc_auc'] for m in models]
-    
-    x = np.arange(len(models))
-    width = 0.35
-    
-    # ROC-AUC comparison
-    ax1 = axes[0]
-    bars1 = ax1.bar(x - width/2, train_roc, width, label='Train', color='#3498db', alpha=0.8)
-    bars2 = ax1.bar(x + width/2, test_roc, width, label='Test', color='#e74c3c', alpha=0.8)
-    
-    ax1.set_ylabel('ROC-AUC')
-    ax1.set_title('Train vs Test ROC-AUC (Gap = Overfitting)')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(models, rotation=45, ha='right')
-    ax1.legend()
-    ax1.set_ylim(0.5, 1.05)
-    ax1.grid(axis='y', alpha=0.3)
-    
-    # Add gap annotations
-    for i, (tr, te) in enumerate(zip(train_roc, test_roc)):
-        gap = tr - te
-        color = 'red' if gap > 0.05 else 'green'
-        ax1.annotate(f'Gap: {gap:.3f}', xy=(i, max(tr, te) + 0.02),
-                     ha='center', fontsize=9, color=color)
-    
-    # Overfitting gap bar chart
-    ax2 = axes[1]
-    gaps = [results_dict[m]['overfit_metrics']['roc_auc_gap'] for m in models]
-    colors = ['red' if g > 0.05 else 'orange' if g > 0.02 else 'green' for g in gaps]
-    
-    bars = ax2.bar(models, gaps, color=colors, alpha=0.8, edgecolor='black')
-    ax2.axhline(y=0.05, color='red', linestyle='--', label='High Overfit Threshold (0.05)')
-    ax2.axhline(y=0.02, color='orange', linestyle='--', label='Moderate Overfit Threshold (0.02)')
-    ax2.set_ylabel('Train-Test Gap')
-    ax2.set_title('Overfitting Analysis (Lower is Better)')
-    ax2.tick_params(axis='x', rotation=45)
-    ax2.legend()
-    ax2.grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def print_detailed_report(results_dict, improvement_analysis):
-    """
-    Print comprehensive analysis report.
-    """
-    print("\n" + "="*80)
-    print("HYPERPARAMETER TUNING ANALYSIS REPORT")
-    print("="*80)
-    
-    print("\n### KEY FINDINGS ###\n")
-    
-    for algo, analysis in improvement_analysis.items():
-        print(f"\n{algo} Analysis:")
-        print(f"  ROC-AUC Improvement from Tuning: {analysis['roc_auc_improvement_%']:.2f}%")
-        print(f"  PR-AUC Improvement from Tuning: {analysis['pr_auc_improvement_%']:.2f}%")
-        print(f"  Default Model Overfitting (ROC gap): {analysis['default_overfit']:.4f}")
-        print(f"  Tuned Model Overfitting (ROC gap): {analysis['tuned_overfit']:.4f}")
-        
-        # Interpretation
-        if analysis['roc_auc_improvement_%'] < 2:
-            print(f"  → CONCLUSION: Tuning provides MINIMAL improvement (<2%)")
-        elif analysis['roc_auc_improvement_%'] < 5:
-            print(f"  → CONCLUSION: Tuning provides MODERATE improvement (2-5%)")
-        else:
-            print(f"  → CONCLUSION: Tuning provides SIGNIFICANT improvement (>5%)")
-        
-        if analysis['tuned_overfit'] > analysis['default_overfit'] + 0.02:
-            print(f"  ⚠️ WARNING: Tuned model shows MORE overfitting!")
-    
-    print("\n" + "-"*80)
-    print("RECOMMENDATION:")
-    print("-"*80)
-    print("""
-    For credit default prediction with ~1% default rate:
-    
-    1. DEFAULT PARAMETERS ARE OFTEN SUFFICIENT because:
-       - Less risk of overfitting on small positive class
-       - More stable predictions on new data
-       - Faster model development and deployment
-       
-    2. If tuning shows <2-3% improvement:
-       - The gain is likely within noise/variance
-       - Default parameters are recommended
-       
-    3. Watch for OVERFITTING signs:
-       - Train-Test gap > 0.05 = significant overfitting
-       - Tuned models often overfit more on imbalanced data
-    """)
-
-
-# =============================================================================
-# 7. XGBoost vs LOGISTIC REGRESSION COMPARISON
-# =============================================================================
-
-def compare_xgb_vs_logistic_pros_cons():
-    """
-    Print detailed comparison of XGBoost vs Logistic Regression for credit default.
-    """
-    comparison = """
-    ================================================================================
-    XGBoost vs LOGISTIC REGRESSION for Credit Default (~0.1-1% Default Rate)
-    ================================================================================
-    
-    LOGISTIC REGRESSION
-    ─────────────────────────────────────────────────────────────────────────────
-    
-    ✅ PROS:
-    ───────
-    1. INTERPRETABILITY
-       - Coefficients directly show feature impact
-       - Required for regulatory compliance (Basel, IFRS9)
-       - Easy to explain to business stakeholders
-       
-    2. CALIBRATED PROBABILITIES
-       - Outputs true probabilities (not just scores)
-       - Critical for PD (Probability of Default) estimation
-       - Better for Expected Credit Loss calculations
-       
-    3. STABILITY
-       - Less prone to overfitting on small positive class
-       - Consistent performance across different samples
-       - Lower variance in predictions
-       
-    4. SPEED
-       - Fast training and inference
-       - Easy to deploy in production
-       - Low computational requirements
-       
-    5. REGULATORY ACCEPTANCE
-       - Well understood by regulators
-       - Easy to validate and audit
-       - Standard in banking industry
-    
-    ❌ CONS:
-    ────────
-    1. Limited ability to capture non-linear relationships
-    2. Requires feature engineering for interactions
-    3. May miss complex patterns in data
-    4. Assumes linear log-odds relationship
-    
-    ─────────────────────────────────────────────────────────────────────────────
-    
-    XGBoost
-    ─────────────────────────────────────────────────────────────────────────────
-    
-    ✅ PROS:
-    ───────
-    1. PATTERN DETECTION
-       - Captures non-linear relationships automatically
-       - Handles feature interactions naturally
-       - Often higher AUC scores
-       
-    2. ROBUSTNESS
-       - Handles missing values internally
-       - Less sensitive to outliers
-       - Built-in regularization
-       
-    3. FEATURE IMPORTANCE
-       - Provides feature importance rankings
-       - Useful for variable selection
-       
-    4. FLEXIBILITY
-       - Works with various data types
-       - Customizable loss functions
-    
-    ❌ CONS:
-    ────────
-    1. BLACK BOX
-       - Hard to explain individual predictions
-       - Regulatory concerns in banking
-       - Requires SHAP/LIME for interpretability
-       
-    2. OVERFITTING RISK (CRITICAL for 0.1% default rate!)
-       - With only ~300 defaults, XGBoost can easily overfit
-       - May memorize default patterns
-       - Unstable across different samples
-       
-    3. PROBABILITY CALIBRATION
-       - Outputs may not be well-calibrated probabilities
-       - Needs Platt scaling or isotonic regression
-       - Can distort PD estimates
-       
-    4. COMPUTATIONAL COST
-       - Slower training with hyperparameter tuning
-       - Higher memory requirements
-       - More complex deployment
-       
-    5. HYPERPARAMETER SENSITIVITY
-       - Requires careful tuning
-       - Many parameters to optimize
-       - Risk of data leakage in tuning
-    
-    ================================================================================
-    RECOMMENDATION for 0.1% Default Rate (300/33,000):
-    ================================================================================
-    
-    🏆 LOGISTIC REGRESSION IS PREFERRED:
-    
-    1. SAMPLE SIZE CONCERN
-       - Only 300 positive cases is VERY limited
-       - XGBoost needs thousands of positive cases to shine
-       - LR is more stable with small positive class
-       
-    2. MARGINAL IMPROVEMENT NOT WORTH IT
-       - Even if XGBoost gets +1-2% AUC improvement
-       - The interpretability loss is not justified
-       - Overfitting risk outweighs potential gains
-       
-    3. BUSINESS CONTEXT
-       - Credit risk requires explainable models
-       - Regulators prefer interpretable approaches
-       - Model risk management is easier with LR
-       
-    4. PRACTICAL WISDOM
-       - "Simple models that work > Complex models that might work"
-       - Default parameters of LR often match tuned XGBoost
-       - Less maintenance and monitoring needed
-    
-    ================================================================================
-    WHEN TO USE XGBoost:
-    ================================================================================
-    
-    Consider XGBoost only if:
-    - You have >5,000 defaults (not your case)
-    - You use it for variable selection, not final model
-    - You have robust validation framework
-    - Interpretability is not required
-    - You can afford extensive monitoring
-    
-    ================================================================================
-    """
-    print(comparison)
-
-
-# =============================================================================
-# 8. MAIN EXECUTION FUNCTION
-# =============================================================================
-
-def run_complete_analysis(df=None, feature_cols=None, target_col='target'):
-    """
-    Run complete analysis to prove default parameters are sufficient.
-    """
-    # Create sample data if not provided
-    if df is None:
-        print("Creating synthetic imbalanced dataset...")
-        df, feature_cols = create_sample_imbalanced_data(
-            n_samples=33000, n_defaults=300
-        )
-    
-    # Prepare data
-    X_train, X_test, y_train, y_test = prepare_data(
-        df, feature_cols, target_col
-    )
-    
-    # Initialize results storage
-    results_dict = {}
-    
-    # -------------------------------------------------------------------------
-    # 1. LOGISTIC REGRESSION - DEFAULT
-    # -------------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("1. Evaluating Logistic Regression with DEFAULT parameters...")
-    print("="*60)
-    
-    lr_default = get_default_logistic_regression()
-    scaler = StandardScaler()
-    results_dict['LR_Default'] = evaluate_model(
-        lr_default, X_train, X_test, y_train, y_test,
-        'LR_Default', scaler=scaler
-    )
-    
-    print(f"   ROC-AUC: {results_dict['LR_Default']['test_metrics']['roc_auc']:.4f}")
-    print(f"   PR-AUC: {results_dict['LR_Default']['test_metrics']['pr_auc']:.4f}")
-    
-    # -------------------------------------------------------------------------
-    # 2. LOGISTIC REGRESSION - TUNED
-    # -------------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("2. Tuning Logistic Regression (this may take a moment)...")
-    print("="*60)
-    
-    lr_param_grid, _ = get_tuning_param_grids()
-    lr_tuning_results = tune_logistic_regression(X_train, y_train, lr_param_grid)
-    
-    print(f"   Best params: {lr_tuning_results['best_params']}")
-    
-    results_dict['LR_Tuned'] = evaluate_model(
-        lr_tuning_results['best_model'], X_train, X_test, y_train, y_test,
-        'LR_Tuned', scaler=lr_tuning_results['scaler']
-    )
-    
-    print(f"   ROC-AUC: {results_dict['LR_Tuned']['test_metrics']['roc_auc']:.4f}")
-    print(f"   PR-AUC: {results_dict['LR_Tuned']['test_metrics']['pr_auc']:.4f}")
-    
-    # -------------------------------------------------------------------------
-    # 3. XGBoost - DEFAULT
-    # -------------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("3. Evaluating XGBoost with DEFAULT parameters...")
-    print("="*60)
-    
-    xgb_default = get_default_xgboost(y_train)
-    results_dict['XGB_Default'] = evaluate_model(
-        xgb_default, X_train, X_test, y_train, y_test, 'XGB_Default'
-    )
-    
-    print(f"   ROC-AUC: {results_dict['XGB_Default']['test_metrics']['roc_auc']:.4f}")
-    print(f"   PR-AUC: {results_dict['XGB_Default']['test_metrics']['pr_auc']:.4f}")
-    
-    # -------------------------------------------------------------------------
-    # 4. XGBoost - TUNED
-    # -------------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("4. Tuning XGBoost (this may take several minutes)...")
-    print("="*60)
-    
-    _, xgb_param_grid = get_tuning_param_grids()
-    xgb_tuning_results = tune_xgboost(X_train, y_train, xgb_param_grid, n_iter=30)
-    
-    print(f"   Best params: {xgb_tuning_results['best_params']}")
-    
-    results_dict['XGB_Tuned'] = evaluate_model(
-        xgb_tuning_results['best_model'], X_train, X_test, y_train, y_test, 'XGB_Tuned'
-    )
-    
-    print(f"   ROC-AUC: {results_dict['XGB_Tuned']['test_metrics']['roc_auc']:.4f}")
-    print(f"   PR-AUC: {results_dict['XGB_Tuned']['test_metrics']['pr_auc']:.4f}")
-    
-    # -------------------------------------------------------------------------
-    # 5. GENERATE COMPARISON AND ANALYSIS
-    # -------------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("5. Generating Comparison Analysis...")
-    print("="*60)
-    
-    comparison_df = compare_default_vs_tuned(results_dict)
-    print("\nPerformance Comparison Table:")
-    print(comparison_df.to_string(index=False))
-    
-    improvement_analysis = generate_improvement_analysis(results_dict)
-    
-    # -------------------------------------------------------------------------
-    # 6. VISUALIZATIONS
-    # -------------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("6. Generating Visualizations...")
-    print("="*60)
-    
-    plot_roc_curves(results_dict, y_test)
-    plot_precision_recall_curves(results_dict, y_test)
-    plot_performance_comparison(comparison_df)
-    plot_overfitting_analysis(results_dict)
-    
-    # -------------------------------------------------------------------------
-    # 7. FINAL REPORT
-    # -------------------------------------------------------------------------
-    print_detailed_report(results_dict, improvement_analysis)
-    
-    # -------------------------------------------------------------------------
-    # 8. XGBoost vs LR Comparison
-    # -------------------------------------------------------------------------
-    compare_xgb_vs_logistic_pros_cons()
-    
+def get_separator_style():
     return {
-        'results': results_dict,
-        'comparison_df': comparison_df,
-        'improvement_analysis': improvement_analysis
+        'fill': PatternFill(start_color=SEPARATOR_COLOR, end_color=SEPARATOR_COLOR, fill_type='solid')
     }
 
 
-# =============================================================================
-# 9. ADDITIONAL UTILITY FUNCTIONS
-# =============================================================================
-
-def statistical_significance_test(results_dict, X, y, n_bootstrap=100):
-    """
-    Bootstrap test to check if tuning improvement is statistically significant.
-    """
-    from scipy import stats
-    
-    print("\n" + "="*60)
-    print("Statistical Significance Test (Bootstrap)")
-    print("="*60)
-    
-    def bootstrap_auc(model, X, y, n_bootstrap, scaler=None):
-        aucs = []
-        n_samples = len(y)
-        
-        for _ in range(n_bootstrap):
-            # Bootstrap sample
-            idx = np.random.choice(n_samples, n_samples, replace=True)
-            X_boot, y_boot = X[idx], y[idx]
-            
-            if scaler:
-                X_boot = scaler.transform(X_boot)
-            
-            y_proba = model.predict_proba(X_boot)[:, 1]
-            try:
-                auc = roc_auc_score(y_boot, y_proba)
-                aucs.append(auc)
-            except:
-                pass
-        
-        return aucs
-    
-    # Compare LR Default vs LR Tuned
-    if 'LR_Default' in results_dict and 'LR_Tuned' in results_dict:
-        # This would require refitting - simplified version
-        print("\nLR Default vs Tuned: Check improvement_analysis for practical significance")
-    
-    print("""
-    Note: For practical significance in credit risk:
-    - <1% AUC improvement is NOT practically significant
-    - 1-2% improvement is marginal
-    - >3% improvement is meaningful
-    
-    With 300 defaults, statistical tests have low power.
-    Focus on PRACTICAL significance and STABILITY instead.
-    """)
-
-
-def create_final_recommendation(improvement_analysis, results_dict):
-    """
-    Generate final model recommendation.
-    """
-    print("\n" + "="*80)
-    print("FINAL RECOMMENDATION")
-    print("="*80)
-    
-    # Get best performing model
-    best_model = max(results_dict.keys(), 
-                     key=lambda x: results_dict[x]['test_metrics']['roc_auc'])
-    best_auc = results_dict[best_model]['test_metrics']['roc_auc']
-    
-    # Get model with least overfitting
-    least_overfit = min(results_dict.keys(),
-                        key=lambda x: results_dict[x]['overfit_metrics']['roc_auc_gap'])
-    
-    lr_default_auc = results_dict['LR_Default']['test_metrics']['roc_auc']
-    lr_default_overfit = results_dict['LR_Default']['overfit_metrics']['roc_auc_gap']
-    
-    print(f"""
-    ANALYSIS SUMMARY:
-    ─────────────────
-    • Best AUC Model: {best_model} (AUC: {best_auc:.4f})
-    • Least Overfitting: {least_overfit}
-    • LR Default AUC: {lr_default_auc:.4f}
-    • LR Default Overfitting: {lr_default_overfit:.4f}
-    
-    RECOMMENDATION:
-    ───────────────
-    ✅ USE LOGISTIC REGRESSION WITH DEFAULT PARAMETERS
-    
-    REASONS:
-    1. Improvement from tuning is marginal ({improvement_analysis.get('LR', {}).get('roc_auc_improvement_%', 'N/A'):.2f}% for LR)
-    2. XGBoost shows higher overfitting risk
-    3. LR provides interpretable coefficients (regulatory requirement)
-    4. With only 300 defaults, simpler models are more stable
-    5. Default parameters reduce model risk and maintenance burden
-    
-    IMPLEMENTATION:
-    ───────────────
-    ```python
-    final_model = LogisticRegression(
-        class_weight='balanced',  # Handle imbalance
-        max_iter=1000,
-        random_state=42
-    )
-    ```
-    
-    This model provides:
-    • Good discrimination (AUC: {lr_default_auc:.4f})
-    • Calibrated probabilities for PD estimation
-    • Full interpretability for regulatory compliance
-    • Stable performance on new data
-    """)
-
-
-# =============================================================================
-# RUN THE ANALYSIS
-# =============================================================================
-
-if __name__ == "__main__":
-    # Run complete analysis
-    analysis_results = run_complete_analysis()
-    
-    # Additional statistical test
-    # statistical_significance_test(...)
-    
-    # Final recommendation
-    create_final_recommendation(
-        analysis_results['improvement_analysis'],
-        analysis_results['results']
+def get_border():
+    return Border(
+        left=Side(style='thin', color='AAAAAA'),
+        right=Side(style='thin', color='AAAAAA'),
+        top=Side(style='thin', color='AAAAAA'),
+        bottom=Side(style='thin', color='AAAAAA')
     )
 
 
-
-shsjskimport numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.metrics import (
-    roc_auc_score, average_precision_score, f1_score,
-    precision_score, recall_score, confusion_matrix,
-    roc_curve, precision_recall_curve, brier_score_loss
-)
-from xgboost import XGBClassifier
-from itertools import product
-import time
-import warnings
-warnings.filterwarnings('ignore')
-
-
 # =============================================================================
-# 1. DATA PREPARATION
+# FILE DISCOVERY
 # =============================================================================
 
-def create_imbalanced_data(n_samples=33000, n_defaults=300, n_features=20, random_state=42):
-    """
-    Create synthetic imbalanced credit default dataset.
-    """
-    np.random.seed(random_state)
+def find_files(root_folder, extensions):
+    """Find all files with given extensions in folder"""
+    files = {}
+    root = Path(root_folder).resolve()
     
-    n_non_defaults = n_samples - n_defaults
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if Path(filename).suffix.lower() in extensions:
+                abs_path = os.path.join(dirpath, filename)
+                rel_path = os.path.relpath(abs_path, root)
+                files[rel_path] = abs_path
     
-    # Non-defaults
-    X_non_default = np.random.randn(n_non_defaults, n_features)
-    X_non_default[:, 0] += 1
-    X_non_default[:, 1] -= 0.5
-    
-    # Defaults - different distribution
-    X_default = np.random.randn(n_defaults, n_features)
-    X_default[:, 0] -= 1
-    X_default[:, 1] += 1
-    X_default[:, 2] += 0.5
-    
-    X = np.vstack([X_non_default, X_default])
-    y = np.array([0] * n_non_defaults + [1] * n_defaults)
-    
-    # Shuffle
-    shuffle_idx = np.random.permutation(len(y))
-    X, y = X[shuffle_idx], y[shuffle_idx]
-    
-    return X, y
+    return files
 
 
-def split_data(X, y, test_size=0.2, random_state=42):
-    """
-    Stratified train-test split.
-    """
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, stratify=y
-    )
-    
-    print("="*60)
-    print("DATA SUMMARY")
-    print("="*60)
-    print(f"Total: {len(y):,} | Defaults: {sum(y):,} ({100*sum(y)/len(y):.2f}%)")
-    print(f"Train: {len(y_train):,} | Defaults: {sum(y_train):,} ({100*sum(y_train)/len(y_train):.2f}%)")
-    print(f"Test:  {len(y_test):,} | Defaults: {sum(y_test):,} ({100*sum(y_test)/len(y_test):.2f}%)")
-    print("="*60)
-    
-    return X_train, X_test, y_train, y_test
-
-
-# =============================================================================
-# 2. HYPERPARAMETER CONFIGURATIONS
-# =============================================================================
-
-def get_hyperparameter_configs(y_train):
-    """
-    Define multiple hyperparameter configurations to test.
-    Returns dict of config_name: params
-    """
-    scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
-    
-    configs = {
-        # DEFAULT CONFIGURATION
-        'DEFAULT': {
-            'n_estimators': 100,
-            'max_depth': 6,
-            'learning_rate': 0.3,
-            'min_child_weight': 1,
-            'subsample': 1.0,
-            'colsample_bytree': 1.0,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # CONSERVATIVE - Less overfitting
-        'CONSERVATIVE': {
-            'n_estimators': 50,
-            'max_depth': 3,
-            'learning_rate': 0.1,
-            'min_child_weight': 5,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'gamma': 0.1,
-            'reg_alpha': 0.1,
-            'reg_lambda': 1.5,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # AGGRESSIVE - More complex
-        'AGGRESSIVE': {
-            'n_estimators': 300,
-            'max_depth': 10,
-            'learning_rate': 0.1,
-            'min_child_weight': 1,
-            'subsample': 1.0,
-            'colsample_bytree': 1.0,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # HIGH REGULARIZATION
-        'HIGH_REG': {
-            'n_estimators': 100,
-            'max_depth': 4,
-            'learning_rate': 0.1,
-            'min_child_weight': 10,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
-            'gamma': 0.5,
-            'reg_alpha': 1,
-            'reg_lambda': 2,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # LOW LEARNING RATE + MORE TREES
-        'LOW_LR': {
-            'n_estimators': 500,
-            'max_depth': 4,
-            'learning_rate': 0.01,
-            'min_child_weight': 3,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # SHALLOW TREES
-        'SHALLOW': {
-            'n_estimators': 200,
-            'max_depth': 2,
-            'learning_rate': 0.1,
-            'min_child_weight': 1,
-            'subsample': 0.9,
-            'colsample_bytree': 0.9,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # DEEP TREES
-        'DEEP': {
-            'n_estimators': 100,
-            'max_depth': 15,
-            'learning_rate': 0.1,
-            'min_child_weight': 1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # BALANCED TUNED
-        'BALANCED': {
-            'n_estimators': 150,
-            'max_depth': 5,
-            'learning_rate': 0.05,
-            'min_child_weight': 3,
-            'subsample': 0.85,
-            'colsample_bytree': 0.85,
-            'gamma': 0.1,
-            'reg_alpha': 0.1,
-            'reg_lambda': 1.2,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # MINIMAL TREES
-        'MINIMAL': {
-            'n_estimators': 20,
-            'max_depth': 3,
-            'learning_rate': 0.3,
-            'min_child_weight': 5,
-            'subsample': 1.0,
-            'colsample_bytree': 1.0,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'scale_pos_weight': scale_pos_weight
-        },
-        
-        # MAXIMUM REGULARIZATION
-        'MAX_REG': {
-            'n_estimators': 100,
-            'max_depth': 3,
-            'learning_rate': 0.05,
-            'min_child_weight': 20,
-            'subsample': 0.6,
-            'colsample_bytree': 0.6,
-            'gamma': 1.0,
-            'reg_alpha': 5,
-            'reg_lambda': 5,
-            'scale_pos_weight': scale_pos_weight
-        }
-    }
-    
-    return configs
-
-
-def get_grid_search_params(y_train):
-    """
-    Define parameter grid for exhaustive search.
-    """
-    scale_pos_weight = (len(y_train) - sum(y_train)) / sum(y_train)
-    
-    param_grid = {
-        'n_estimators': [50, 100, 200],
-        'max_depth': [3, 5, 7],
-        'learning_rate': [0.01, 0.1, 0.3],
-        'min_child_weight': [1, 5, 10],
-        'subsample': [0.7, 0.85, 1.0],
-        'colsample_bytree': [0.7, 0.85, 1.0],
-        'gamma': [0, 0.1, 0.5],
-        'reg_alpha': [0, 0.1, 1],
-        'reg_lambda': [1, 1.5, 2]
-    }
-    
-    return param_grid, scale_pos_weight
-
-
-# =============================================================================
-# 3. METRICS CALCULATION
-# =============================================================================
-
-def calculate_metrics(y_true, y_pred, y_proba):
-    """
-    Calculate all relevant metrics for binary classification.
-    """
-    metrics = {}
-    
-    # Probability-based metrics
-    metrics['roc_auc'] = roc_auc_score(y_true, y_proba)
-    metrics['pr_auc'] = average_precision_score(y_true, y_proba)
-    metrics['brier_score'] = brier_score_loss(y_true, y_proba)
-    
-    # Threshold-based metrics
-    metrics['f1'] = f1_score(y_true, y_pred, zero_division=0)
-    metrics['precision'] = precision_score(y_true, y_pred, zero_division=0)
-    metrics['recall'] = recall_score(y_true, y_pred, zero_division=0)
-    metrics['specificity'] = recall_score(y_true, y_pred, pos_label=0)
-    
-    # Confusion matrix values
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    metrics['tp'] = tp
-    metrics['fp'] = fp
-    metrics['tn'] = tn
-    metrics['fn'] = fn
-    
-    # Capture rate at different thresholds
-    metrics['capture_top_10pct'] = calculate_capture_rate(y_true, y_proba, 0.10)
-    metrics['capture_top_20pct'] = calculate_capture_rate(y_true, y_proba, 0.20)
-    
-    return metrics
-
-
-def calculate_capture_rate(y_true, y_proba, top_pct):
-    """
-    Calculate what percentage of defaults are captured in top X% of predictions.
-    """
-    n_top = int(len(y_true) * top_pct)
-    top_indices = np.argsort(y_proba)[-n_top:]
-    defaults_captured = y_true[top_indices].sum()
-    total_defaults = y_true.sum()
-    
-    return defaults_captured / total_defaults if total_defaults > 0 else 0
-
-
-# =============================================================================
-# 4. MODEL TRAINING AND EVALUATION
-# =============================================================================
-
-def train_and_evaluate_single_config(X_train, X_test, y_train, y_test, params, config_name):
-    """
-    Train XGBoost with given params and evaluate on train/test.
-    """
-    start_time = time.time()
-    
-    # Create and train model
-    model = XGBClassifier(
-        **params,
-        eval_metric='auc',
-        random_state=42,
-        use_label_encoder=False,
-        verbosity=0
-    )
-    
-    model.fit(X_train, y_train)
-    training_time = time.time() - start_time
-    
-    # Train predictions
-    y_train_pred = model.predict(X_train)
-    y_train_proba = model.predict_proba(X_train)[:, 1]
-    train_metrics = calculate_metrics(y_train, y_train_pred, y_train_proba)
-    
-    # Test predictions
-    y_test_pred = model.predict(X_test)
-    y_test_proba = model.predict_proba(X_test)[:, 1]
-    test_metrics = calculate_metrics(y_test, y_test_pred, y_test_proba)
-    
-    # Calculate overfitting gaps
-    overfit_gaps = {
-        'roc_auc_gap': train_metrics['roc_auc'] - test_metrics['roc_auc'],
-        'pr_auc_gap': train_metrics['pr_auc'] - test_metrics['pr_auc'],
-        'f1_gap': train_metrics['f1'] - test_metrics['f1']
-    }
-    
-    return {
-        'config_name': config_name,
-        'params': params,
-        'train_metrics': train_metrics,
-        'test_metrics': test_metrics,
-        'overfit_gaps': overfit_gaps,
-        'training_time': training_time,
-        'model': model,
-        'y_test_proba': y_test_proba
-    }
-
-
-def evaluate_all_configs(X_train, X_test, y_train, y_test, configs):
-    """
-    Evaluate all hyperparameter configurations.
-    """
-    results = {}
-    
-    print("\n" + "="*70)
-    print("EVALUATING HYPERPARAMETER CONFIGURATIONS")
-    print("="*70)
-    
-    for config_name, params in configs.items():
-        print(f"\nEvaluating: {config_name}...", end=" ")
-        
-        result = train_and_evaluate_single_config(
-            X_train, X_test, y_train, y_test, params, config_name
-        )
-        results[config_name] = result
-        
-        print(f"Done! (Train AUC: {result['train_metrics']['roc_auc']:.4f}, "
-              f"Test AUC: {result['test_metrics']['roc_auc']:.4f}, "
-              f"Gap: {result['overfit_gaps']['roc_auc_gap']:.4f})")
-    
-    return results
-
-
-def run_grid_search(X_train, X_test, y_train, y_test, param_grid, scale_pos_weight, max_combinations=50):
-    """
-    Run grid search over parameter combinations.
-    """
-    print("\n" + "="*70)
-    print("RUNNING GRID SEARCH")
-    print("="*70)
-    
-    # Generate all combinations
-    keys = list(param_grid.keys())
-    values = list(param_grid.values())
-    all_combinations = list(product(*values))
-    
-    # Limit combinations if too many
-    if len(all_combinations) > max_combinations:
-        np.random.seed(42)
-        indices = np.random.choice(len(all_combinations), max_combinations, replace=False)
-        selected_combinations = [all_combinations[i] for i in indices]
-        print(f"Randomly selected {max_combinations} from {len(all_combinations)} combinations")
-    else:
-        selected_combinations = all_combinations
-        print(f"Testing all {len(all_combinations)} combinations")
-    
-    results = []
-    
-    for i, combo in enumerate(selected_combinations):
-        params = dict(zip(keys, combo))
-        params['scale_pos_weight'] = scale_pos_weight
-        
-        if (i + 1) % 10 == 0:
-            print(f"Progress: {i+1}/{len(selected_combinations)}")
-        
-        result = train_and_evaluate_single_config(
-            X_train, X_test, y_train, y_test, params, f"Grid_{i+1}"
-        )
-        results.append(result)
-    
-    return results
-
-
-# =============================================================================
-# 5. RESULTS ANALYSIS
-# =============================================================================
-
-def create_results_dataframe(results):
-    """
-    Convert results dict to DataFrame for analysis.
-    """
-    rows = []
-    
-    for config_name, result in results.items():
-        row = {
-            'Config': config_name,
-            # Train metrics
-            'Train_ROC_AUC': result['train_metrics']['roc_auc'],
-            'Train_PR_AUC': result['train_metrics']['pr_auc'],
-            'Train_F1': result['train_metrics']['f1'],
-            'Train_Recall': result['train_metrics']['recall'],
-            'Train_Precision': result['train_metrics']['precision'],
-            # Test metrics
-            'Test_ROC_AUC': result['test_metrics']['roc_auc'],
-            'Test_PR_AUC': result['test_metrics']['pr_auc'],
-            'Test_F1': result['test_metrics']['f1'],
-            'Test_Recall': result['test_metrics']['recall'],
-            'Test_Precision': result['test_metrics']['precision'],
-            # Capture rates
-            'Test_Capture_Top10%': result['test_metrics']['capture_top_10pct'],
-            'Test_Capture_Top20%': result['test_metrics']['capture_top_20pct'],
-            # Overfitting
-            'ROC_AUC_Gap': result['overfit_gaps']['roc_auc_gap'],
-            'PR_AUC_Gap': result['overfit_gaps']['pr_auc_gap'],
-            'F1_Gap': result['overfit_gaps']['f1_gap'],
-            # Time
-            'Training_Time': result['training_time']
-        }
-        
-        # Add key params
-        params = result['params']
-        row['n_estimators'] = params.get('n_estimators')
-        row['max_depth'] = params.get('max_depth')
-        row['learning_rate'] = params.get('learning_rate')
-        row['min_child_weight'] = params.get('min_child_weight')
-        row['subsample'] = params.get('subsample')
-        row['gamma'] = params.get('gamma')
-        row['reg_alpha'] = params.get('reg_alpha')
-        row['reg_lambda'] = params.get('reg_lambda')
-        
-        rows.append(row)
-    
-    df = pd.DataFrame(rows)
-    return df
-
-
-def create_grid_results_dataframe(grid_results):
-    """
-    Convert grid search results to DataFrame.
-    """
-    rows = []
-    
-    for result in grid_results:
-        row = {
-            'Config': result['config_name'],
-            'Train_ROC_AUC': result['train_metrics']['roc_auc'],
-            'Test_ROC_AUC': result['test_metrics']['roc_auc'],
-            'Train_PR_AUC': result['train_metrics']['pr_auc'],
-            'Test_PR_AUC': result['test_metrics']['pr_auc'],
-            'ROC_AUC_Gap': result['overfit_gaps']['roc_auc_gap'],
-            'PR_AUC_Gap': result['overfit_gaps']['pr_auc_gap'],
-            'Training_Time': result['training_time']
-        }
-        
-        params = result['params']
-        row['n_estimators'] = params.get('n_estimators')
-        row['max_depth'] = params.get('max_depth')
-        row['learning_rate'] = params.get('learning_rate')
-        row['min_child_weight'] = params.get('min_child_weight')
-        row['subsample'] = params.get('subsample')
-        row['colsample_bytree'] = params.get('colsample_bytree')
-        row['gamma'] = params.get('gamma')
-        row['reg_alpha'] = params.get('reg_alpha')
-        row['reg_lambda'] = params.get('reg_lambda')
-        
-        rows.append(row)
-    
-    return pd.DataFrame(rows)
-
-
-def analyze_results(results_df):
-    """
-    Analyze and summarize results.
-    """
-    print("\n" + "="*70)
-    print("RESULTS ANALYSIS")
-    print("="*70)
-    
-    # Sort by Test ROC-AUC
-    df_sorted = results_df.sort_values('Test_ROC_AUC', ascending=False)
-    
-    print("\n### Performance Ranking (by Test ROC-AUC) ###\n")
-    display_cols = ['Config', 'Test_ROC_AUC', 'Test_PR_AUC', 'Train_ROC_AUC', 
-                    'ROC_AUC_Gap', 'Test_Recall']
-    print(df_sorted[display_cols].to_string(index=False))
-    
-    # Best and worst
-    best = df_sorted.iloc[0]
-    worst = df_sorted.iloc[-1]
-    default = results_df[results_df['Config'] == 'DEFAULT'].iloc[0]
-    
-    print("\n### Key Findings ###")
-    print(f"\nBest Config: {best['Config']}")
-    print(f"  Test ROC-AUC: {best['Test_ROC_AUC']:.4f}")
-    print(f"  Overfit Gap: {best['ROC_AUC_Gap']:.4f}")
-    
-    print(f"\nDEFAULT Config:")
-    print(f"  Test ROC-AUC: {default['Test_ROC_AUC']:.4f}")
-    print(f"  Overfit Gap: {default['ROC_AUC_Gap']:.4f}")
-    
-    print(f"\nWorst Config: {worst['Config']}")
-    print(f"  Test ROC-AUC: {worst['Test_ROC_AUC']:.4f}")
-    print(f"  Overfit Gap: {worst['ROC_AUC_Gap']:.4f}")
-    
-    # Improvement analysis
-    improvement = ((best['Test_ROC_AUC'] - default['Test_ROC_AUC']) / 
-                   default['Test_ROC_AUC'] * 100)
-    
-    print(f"\n### Improvement Analysis ###")
-    print(f"Best vs DEFAULT improvement: {improvement:.2f}%")
-    print(f"AUC Range: {worst['Test_ROC_AUC']:.4f} - {best['Test_ROC_AUC']:.4f}")
-    print(f"Spread: {best['Test_ROC_AUC'] - worst['Test_ROC_AUC']:.4f}")
-    
-    # Overfitting analysis
-    print("\n### Overfitting Analysis ###")
-    low_overfit = results_df[results_df['ROC_AUC_Gap'] < 0.03]
-    high_overfit = results_df[results_df['ROC_AUC_Gap'] > 0.05]
-    
-    print(f"Configs with LOW overfitting (<0.03 gap): {len(low_overfit)}")
-    print(f"Configs with HIGH overfitting (>0.05 gap): {len(high_overfit)}")
-    
-    return df_sorted
-
-
-def calculate_statistics(results_df):
-    """
-    Calculate summary statistics across all configurations.
-    """
-    stats = {
-        'Test_ROC_AUC': {
-            'mean': results_df['Test_ROC_AUC'].mean(),
-            'std': results_df['Test_ROC_AUC'].std(),
-            'min': results_df['Test_ROC_AUC'].min(),
-            'max': results_df['Test_ROC_AUC'].max(),
-            'range': results_df['Test_ROC_AUC'].max() - results_df['Test_ROC_AUC'].min()
-        },
-        'Test_PR_AUC': {
-            'mean': results_df['Test_PR_AUC'].mean(),
-            'std': results_df['Test_PR_AUC'].std(),
-            'min': results_df['Test_PR_AUC'].min(),
-            'max': results_df['Test_PR_AUC'].max(),
-            'range': results_df['Test_PR_AUC'].max() - results_df['Test_PR_AUC'].min()
-        },
-        'ROC_AUC_Gap': {
-            'mean': results_df['ROC_AUC_Gap'].mean(),
-            'std': results_df['ROC_AUC_Gap'].std(),
-            'min': results_df['ROC_AUC_Gap'].min(),
-            'max': results_df['ROC_AUC_Gap'].max()
-        }
-    }
-    
-    print("\n### Summary Statistics ###\n")
-    stats_df = pd.DataFrame(stats).T
-    print(stats_df.to_string())
-    
-    return stats
-
-
-# =============================================================================
-# 6. VISUALIZATION
-# =============================================================================
-
-def plot_train_test_comparison(results_df, save_path=None):
-    """
-    Bar plot comparing train vs test performance for each config.
-    """
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
-    
-    configs = results_df['Config'].values
-    x = np.arange(len(configs))
-    width = 0.35
-    
-    # ROC-AUC comparison
-    ax1 = axes[0]
-    bars1 = ax1.bar(x - width/2, results_df['Train_ROC_AUC'], width, 
-                     label='Train', color='#3498db', alpha=0.8)
-    bars2 = ax1.bar(x + width/2, results_df['Test_ROC_AUC'], width,
-                     label='Test', color='#e74c3c', alpha=0.8)
-    
-    ax1.set_ylabel('ROC-AUC', fontsize=12)
-    ax1.set_title('Train vs Test ROC-AUC by Configuration', fontsize=14, fontweight='bold')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(configs, rotation=45, ha='right')
-    ax1.legend()
-    ax1.set_ylim(0.5, 1.05)
-    ax1.axhline(y=results_df[results_df['Config']=='DEFAULT']['Test_ROC_AUC'].values[0],
-                color='green', linestyle='--', label='DEFAULT baseline', alpha=0.7)
-    ax1.grid(axis='y', alpha=0.3)
-    
-    # Add gap annotations
-    for i, (tr, te) in enumerate(zip(results_df['Train_ROC_AUC'], results_df['Test_ROC_AUC'])):
-        gap = tr - te
-        color = 'red' if gap > 0.05 else 'orange' if gap > 0.02 else 'green'
-        ax1.annotate(f'{gap:.3f}', xy=(i, max(tr, te) + 0.01),
-                     ha='center', fontsize=8, color=color, fontweight='bold')
-    
-    # PR-AUC comparison
-    ax2 = axes[1]
-    bars3 = ax2.bar(x - width/2, results_df['Train_PR_AUC'], width,
-                     label='Train', color='#3498db', alpha=0.8)
-    bars4 = ax2.bar(x + width/2, results_df['Test_PR_AUC'], width,
-                     label='Test', color='#e74c3c', alpha=0.8)
-    
-    ax2.set_ylabel('PR-AUC', fontsize=12)
-    ax2.set_title('Train vs Test PR-AUC by Configuration', fontsize=14, fontweight='bold')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(configs, rotation=45, ha='right')
-    ax2.legend()
-    ax2.grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_overfitting_heatmap(results_df, save_path=None):
-    """
-    Heatmap showing overfitting by configuration.
-    """
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Prepare data for heatmap
-    overfit_data = results_df[['Config', 'ROC_AUC_Gap', 'PR_AUC_Gap', 'F1_Gap']].set_index('Config')
-    
-    sns.heatmap(overfit_data.T, annot=True, fmt='.3f', cmap='RdYlGn_r',
-                center=0.03, ax=ax, cbar_kws={'label': 'Overfitting Gap'})
-    
-    ax.set_title('Overfitting Analysis: Train-Test Gap by Configuration\n(Green=Good, Red=Overfitting)',
-                 fontsize=14, fontweight='bold')
-    ax.set_xlabel('Configuration')
-    ax.set_ylabel('Metric Gap')
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_roc_curves_all(results, y_test, save_path=None):
-    """
-    Plot ROC curves for all configurations.
-    """
-    fig, ax = plt.subplots(figsize=(12, 10))
-    
-    colors = plt.cm.tab10(np.linspace(0, 1, len(results)))
-    
-    for (config_name, result), color in zip(results.items(), colors):
-        y_proba = result['y_test_proba']
-        fpr, tpr, _ = roc_curve(y_test, y_proba)
-        auc = result['test_metrics']['roc_auc']
-        
-        linewidth = 3 if config_name == 'DEFAULT' else 1.5
-        linestyle = '-' if config_name == 'DEFAULT' else '--'
-        
-        ax.plot(fpr, tpr, color=color, lw=linewidth, linestyle=linestyle,
-                label=f"{config_name} (AUC={auc:.4f})")
-    
-    ax.plot([0, 1], [0, 1], 'k--', lw=1, label='Random')
-    ax.set_xlabel('False Positive Rate', fontsize=12)
-    ax.set_ylabel('True Positive Rate', fontsize=12)
-    ax.set_title('ROC Curves: All Hyperparameter Configurations', fontsize=14, fontweight='bold')
-    ax.legend(loc='lower right', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_pr_curves_all(results, y_test, save_path=None):
-    """
-    Plot Precision-Recall curves for all configurations.
-    """
-    fig, ax = plt.subplots(figsize=(12, 10))
-    
-    colors = plt.cm.tab10(np.linspace(0, 1, len(results)))
-    baseline = sum(y_test) / len(y_test)
-    
-    for (config_name, result), color in zip(results.items(), colors):
-        y_proba = result['y_test_proba']
-        precision, recall, _ = precision_recall_curve(y_test, y_proba)
-        pr_auc = result['test_metrics']['pr_auc']
-        
-        linewidth = 3 if config_name == 'DEFAULT' else 1.5
-        linestyle = '-' if config_name == 'DEFAULT' else '--'
-        
-        ax.plot(recall, precision, color=color, lw=linewidth, linestyle=linestyle,
-                label=f"{config_name} (PR-AUC={pr_auc:.4f})")
-    
-    ax.axhline(y=baseline, color='k', linestyle='--', label=f'Baseline ({baseline:.4f})')
-    ax.set_xlabel('Recall', fontsize=12)
-    ax.set_ylabel('Precision', fontsize=12)
-    ax.set_title('Precision-Recall Curves: All Configurations\n(More Important for Imbalanced Data)',
-                 fontsize=14, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_parameter_impact(results_df, save_path=None):
-    """
-    Show how individual parameters affect performance.
-    """
-    fig, axes = plt.subplots(2, 4, figsize=(18, 10))
-    axes = axes.flatten()
-    
-    params_to_plot = ['n_estimators', 'max_depth', 'learning_rate', 'min_child_weight',
-                      'subsample', 'gamma', 'reg_alpha', 'reg_lambda']
-    
-    for idx, param in enumerate(params_to_plot):
-        ax = axes[idx]
-        
-        if param in results_df.columns:
-            # Scatter plot with color by overfitting
-            scatter = ax.scatter(results_df[param], results_df['Test_ROC_AUC'],
-                                 c=results_df['ROC_AUC_Gap'], cmap='RdYlGn_r',
-                                 s=100, alpha=0.7, edgecolors='black')
-            
-            ax.set_xlabel(param, fontsize=10)
-            ax.set_ylabel('Test ROC-AUC', fontsize=10)
-            ax.set_title(f'Impact of {param}', fontsize=11, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            
-            # Add colorbar
-            plt.colorbar(scatter, ax=ax, label='Overfit Gap')
-    
-    plt.suptitle('Parameter Impact on Test Performance\n(Color = Overfitting Level)',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_performance_distribution(results_df, save_path=None):
-    """
-    Distribution plots of performance metrics.
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-    # Test ROC-AUC distribution
-    ax1 = axes[0, 0]
-    ax1.hist(results_df['Test_ROC_AUC'], bins=15, color='#3498db', alpha=0.7, edgecolor='black')
-    ax1.axvline(results_df[results_df['Config']=='DEFAULT']['Test_ROC_AUC'].values[0],
-                color='red', linestyle='--', linewidth=2, label='DEFAULT')
-    ax1.set_xlabel('Test ROC-AUC')
-    ax1.set_ylabel('Count')
-    ax1.set_title('Distribution of Test ROC-AUC')
-    ax1.legend()
-    ax1.grid(axis='y', alpha=0.3)
-    
-    # Overfitting gap distribution
-    ax2 = axes[0, 1]
-    ax2.hist(results_df['ROC_AUC_Gap'], bins=15, color='#e74c3c', alpha=0.7, edgecolor='black')
-    ax2.axvline(0.05, color='red', linestyle='--', linewidth=2, label='High Overfit Threshold')
-    ax2.axvline(0.02, color='orange', linestyle='--', linewidth=2, label='Moderate Threshold')
-    ax2.set_xlabel('ROC-AUC Gap (Train-Test)')
-    ax2.set_ylabel('Count')
-    ax2.set_title('Distribution of Overfitting')
-    ax2.legend()
-    ax2.grid(axis='y', alpha=0.3)
-    
-    # Test vs Train scatter
-    ax3 = axes[1, 0]
-    colors = ['red' if g > 0.05 else 'orange' if g > 0.02 else 'green' 
-              for g in results_df['ROC_AUC_Gap']]
-    ax3.scatter(results_df['Train_ROC_AUC'], results_df['Test_ROC_AUC'],
-                c=colors, s=100, alpha=0.7, edgecolors='black')
-    ax3.plot([0.5, 1], [0.5, 1], 'k--', label='Perfect (No Overfit)')
-    ax3.set_xlabel('Train ROC-AUC')
-    ax3.set_ylabel('Test ROC-AUC')
-    ax3.set_title('Train vs Test Performance\n(Green=Low Overfit, Red=High Overfit)')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    
-    # PR-AUC comparison
-    ax4 = axes[1, 1]
-    ax4.bar(results_df['Config'], results_df['Test_PR_AUC'], color='#2ecc71', alpha=0.7)
-    ax4.set_xlabel('Configuration')
-    ax4.set_ylabel('Test PR-AUC')
-    ax4.set_title('PR-AUC by Configuration\n(Key Metric for Imbalanced Data)')
-    ax4.tick_params(axis='x', rotation=45)
-    ax4.grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-# =============================================================================
-# 7. CROSS-VALIDATION
-# =============================================================================
-
-def cross_validate_config(X, y, params, n_splits=5):
-    """
-    Perform stratified cross-validation for a single configuration.
-    """
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    
-    train_aucs, test_aucs = [], []
-    train_pr_aucs, test_pr_aucs = [], []
-    
-    for train_idx, val_idx in skf.split(X, y):
-        X_train_cv, X_val_cv = X[train_idx], X[val_idx]
-        y_train_cv, y_val_cv = y[train_idx], y[val_idx]
-        
-        model = XGBClassifier(
-            **params,
-            eval_metric='auc',
-            random_state=42,
-            use_label_encoder=False,
-            verbosity=0
-        )
-        
-        model.fit(X_train_cv, y_train_cv)
-        
-        # Train metrics
-        y_train_proba = model.predict_proba(X_train_cv)[:, 1]
-        train_aucs.append(roc_auc_score(y_train_cv, y_train_proba))
-        train_pr_aucs.append(average_precision_score(y_train_cv, y_train_proba))
-        
-        # Val metrics
-        y_val_proba = model.predict_proba(X_val_cv)[:, 1]
-        test_aucs.append(roc_auc_score(y_val_cv, y_val_proba))
-        test_pr_aucs.append(average_precision_score(y_val_cv, y_val_proba))
-    
-    return {
-        'train_roc_auc_mean': np.mean(train_aucs),
-        'train_roc_auc_std': np.std(train_aucs),
-        'test_roc_auc_mean': np.mean(test_aucs),
-        'test_roc_auc_std': np.std(test_aucs),
-        'train_pr_auc_mean': np.mean(train_pr_aucs),
-        'train_pr_auc_std': np.std(train_pr_aucs),
-        'test_pr_auc_mean': np.mean(test_pr_aucs),
-        'test_pr_auc_std': np.std(test_pr_aucs),
-        'roc_auc_gap': np.mean(train_aucs) - np.mean(test_aucs)
-    }
-
-
-def cross_validate_all_configs(X, y, configs, n_splits=5):
-    """
-    Cross-validate all configurations.
-    """
-    print("\n" + "="*70)
-    print(f"CROSS-VALIDATION ({n_splits}-Fold)")
-    print("="*70)
-    
-    cv_results = {}
-    
-    for config_name, params in configs.items():
-        print(f"CV for {config_name}...", end=" ")
-        cv_result = cross_validate_config(X, y, params, n_splits)
-        cv_results[config_name] = cv_result
-        print(f"Done! (Test AUC: {cv_result['test_roc_auc_mean']:.4f} ± {cv_result['test_roc_auc_std']:.4f})")
-    
-    return cv_results
-
-
-def create_cv_results_dataframe(cv_results):
-    """
-    Convert CV results to DataFrame.
-    """
-    rows = []
-    for config_name, result in cv_results.items():
-        rows.append({
-            'Config': config_name,
-            'CV_Test_ROC_AUC': result['test_roc_auc_mean'],
-            'CV_Test_ROC_AUC_Std': result['test_roc_auc_std'],
-            'CV_Train_ROC_AUC': result['train_roc_auc_mean'],
-            'CV_ROC_AUC_Gap': result['roc_auc_gap'],
-            'CV_Test_PR_AUC': result['test_pr_auc_mean'],
-            'CV_Test_PR_AUC_Std': result['test_pr_auc_std']
+def find_matching_files(v1_folder, v2_folder, extensions):
+    """Find files that exist in both V1 and V2"""
+    v1_files = find_files(v1_folder, extensions)
+    v2_files = find_files(v2_folder, extensions)
+    
+    common = set(v1_files.keys()) & set(v2_files.keys())
+    
+    matches = []
+    for name in sorted(common):
+        matches.append({
+            'name': name,
+            'v1_path': v1_files[name],
+            'v2_path': v2_files[name]
         })
     
-    return pd.DataFrame(rows).sort_values('CV_Test_ROC_AUC', ascending=False)
+    return matches
 
 
 # =============================================================================
-# 8. FINAL REPORT
+# READ FILES
 # =============================================================================
 
-def generate_final_report(results_df, cv_results_df=None):
+def read_excel(filepath):
+    """Read Excel file, return dict of sheet_name -> DataFrame"""
+    try:
+        return pd.read_excel(filepath, sheet_name=None, dtype=str)
+    except Exception as e:
+        return {'Error': pd.DataFrame({'Error': [str(e)]})}
+
+
+def read_csv(filepath):
+    """Read CSV file, return DataFrame"""
+    encodings = ['utf-8', 'latin-1', 'cp1252']
+    for enc in encodings:
+        try:
+            return pd.read_csv(filepath, encoding=enc, dtype=str)
+        except:
+            continue
+    return pd.DataFrame({'Error': ['Could not read file']})
+
+
+# =============================================================================
+# WRITE SIDE-BY-SIDE EXCEL
+# =============================================================================
+
+def apply_style(cell, style_dict):
+    """Apply style dictionary to cell"""
+    for attr, value in style_dict.items():
+        setattr(cell, attr, value)
+    cell.border = get_border()
+
+
+def write_side_by_side_sheet(ws, df_v1, df_v2, sheet_name):
+    """Write V1 and V2 DataFrames side by side in worksheet"""
+    
+    # Calculate dimensions
+    v1_cols = len(df_v1.columns) if not df_v1.empty else 1
+    v2_cols = len(df_v2.columns) if not df_v2.empty else 1
+    separator_col = v1_cols + 1
+    v2_start_col = v1_cols + 2
+    
+    max_rows = max(len(df_v1), len(df_v2))
+    
+    # Row 1: Version Headers
+    v1_header_cell = ws.cell(row=1, column=1, value=f"═══ V1: {sheet_name} ═══")
+    apply_style(v1_header_cell, get_v1_header_style())
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=v1_cols)
+    
+    # Separator column header
+    sep_cell = ws.cell(row=1, column=separator_col, value="║")
+    apply_style(sep_cell, get_separator_style())
+    
+    v2_header_cell = ws.cell(row=1, column=v2_start_col, value=f"═══ V2: {sheet_name} ═══")
+    apply_style(v2_header_cell, get_v2_header_style())
+    if v2_cols > 1:
+        ws.merge_cells(start_row=1, start_column=v2_start_col, end_row=1, end_column=v2_start_col + v2_cols - 1)
+    
+    # Row 2: Column Headers for V1
+    for col_idx, col_name in enumerate(df_v1.columns, 1):
+        cell = ws.cell(row=2, column=col_idx, value=str(col_name))
+        apply_style(cell, get_v1_header_style())
+    
+    # Separator
+    sep_cell = ws.cell(row=2, column=separator_col, value="║")
+    apply_style(sep_cell, get_separator_style())
+    
+    # Row 2: Column Headers for V2
+    for col_idx, col_name in enumerate(df_v2.columns, 1):
+        cell = ws.cell(row=2, column=v2_start_col + col_idx - 1, value=str(col_name))
+        apply_style(cell, get_v2_header_style())
+    
+    # Data rows - V1
+    for row_idx, row_data in enumerate(df_v1.values, 3):
+        for col_idx, value in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=str(value) if pd.notna(value) else "")
+            apply_style(cell, get_v1_cell_style())
+        
+        # Separator
+        sep_cell = ws.cell(row=row_idx, column=separator_col, value="║")
+        apply_style(sep_cell, get_separator_style())
+    
+    # Data rows - V2
+    for row_idx, row_data in enumerate(df_v2.values, 3):
+        for col_idx, value in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=v2_start_col + col_idx - 1, value=str(value) if pd.notna(value) else "")
+            apply_style(cell, get_v2_cell_style())
+    
+    # Extend separator for all rows
+    for row_idx in range(3, max_rows + 3):
+        sep_cell = ws.cell(row=row_idx, column=separator_col, value="║")
+        apply_style(sep_cell, get_separator_style())
+    
+    # Set column widths
+    for col_idx in range(1, v2_start_col + v2_cols):
+        if col_idx == separator_col:
+            ws.column_dimensions[get_column_letter(col_idx)].width = 3
+        else:
+            ws.column_dimensions[get_column_letter(col_idx)].width = 18
+    
+    # Set row heights
+    ws.row_dimensions[1].height = 25
+    ws.row_dimensions[2].height = 22
+
+
+def get_column_letter(col_idx):
+    """Convert column index to Excel letter"""
+    result = ""
+    while col_idx > 0:
+        col_idx, remainder = divmod(col_idx - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+# =============================================================================
+# PROCESS FILES
+# =============================================================================
+
+def process_excel_files(matches, output_folder):
+    """Process Excel files and create side-by-side comparison"""
+    if not matches:
+        return
+    
+    print(f"\n📗 Processing {len(matches)} Excel file(s)...")
+    
+    for match in matches:
+        print(f"   → {match['name']}")
+        
+        v1_sheets = read_excel(match['v1_path'])
+        v2_sheets = read_excel(match['v2_path'])
+        
+        # Create output workbook
+        wb = Workbook()
+        wb.remove(wb.active)  # Remove default sheet
+        
+        # Get all sheet names
+        all_sheets = sorted(set(v1_sheets.keys()) | set(v2_sheets.keys()))
+        
+        for sheet_name in all_sheets:
+            # Get DataFrames (empty if sheet doesn't exist)
+            df_v1 = v1_sheets.get(sheet_name, pd.DataFrame({'(Sheet not in V1)': []}))
+            df_v2 = v2_sheets.get(sheet_name, pd.DataFrame({'(Sheet not in V2)': []}))
+            
+            # Create worksheet
+            safe_name = sheet_name[:31]  # Excel sheet name limit
+            ws = wb.create_sheet(title=safe_name)
+            
+            write_side_by_side_sheet(ws, df_v1, df_v2, sheet_name)
+        
+        # Save
+        output_name = Path(match['name']).stem + '_comparison.xlsx'
+        output_path = os.path.join(output_folder, output_name)
+        wb.save(output_path)
+        print(f"      ✓ Saved: {output_name}")
+
+
+def process_csv_files(matches, output_folder):
+    """Process CSV files and create side-by-side comparison"""
+    if not matches:
+        return
+    
+    print(f"\n📄 Processing {len(matches)} CSV file(s)...")
+    
+    for match in matches:
+        print(f"   → {match['name']}")
+        
+        df_v1 = read_csv(match['v1_path'])
+        df_v2 = read_csv(match['v2_path'])
+        
+        # Create output workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Comparison"
+        
+        sheet_name = Path(match['name']).stem
+        write_side_by_side_sheet(ws, df_v1, df_v2, sheet_name)
+        
+        # Save
+        output_name = Path(match['name']).stem + '_comparison.xlsx'
+        output_path = os.path.join(output_folder, output_name)
+        wb.save(output_path)
+        print(f"      ✓ Saved: {output_name}")
+
+
+def process_pdf_files(matches, output_folder):
+    """Process PDF files and create side-by-side page comparison"""
+    if not matches:
+        return
+    
+    if not PDF_SUPPORT:
+        print("\n📕 Skipping PDFs (install pdf2image and Pillow)")
+        return
+    
+    print(f"\n📕 Processing {len(matches)} PDF file(s)...")
+    
+    for match in matches:
+        print(f"   → {match['name']}")
+        
+        try:
+            # Convert PDFs to images
+            v1_pages = convert_from_path(match['v1_path'], dpi=150)
+            v2_pages = convert_from_path(match['v2_path'], dpi=150)
+            
+            max_pages = max(len(v1_pages), len(v2_pages))
+            
+            combined_images = []
+            
+            for i in range(max_pages):
+                # Get pages (or create blank if doesn't exist)
+                if i < len(v1_pages):
+                    v1_img = v1_pages[i]
+                else:
+                    v1_img = Image.new('RGB', v1_pages[0].size if v1_pages else (612, 792), 'white')
+                
+                if i < len(v2_pages):
+                    v2_img = v2_pages[i]
+                else:
+                    v2_img = Image.new('RGB', v2_pages[0].size if v2_pages else (612, 792), 'white')
+                
+                # Resize to same height
+                target_height = max(v1_img.height, v2_img.height)
+                
+                if v1_img.height != target_height:
+                    ratio = target_height / v1_img.height
+                    v1_img = v1_img.resize((int(v1_img.width * ratio), target_height))
+                
+                if v2_img.height != target_height:
+                    ratio = target_height / v2_img.height
+                    v2_img = v2_img.resize((int(v2_img.width * ratio), target_height))
+                
+                # Create separator
+                separator_width = 20
+                separator = Image.new('RGB', (separator_width, target_height), '#808080')
+                
+                # Create labels
+                label_height = 40
+                total_width = v1_img.width + separator_width + v2_img.width
+                
+                # Combine horizontally
+                combined = Image.new('RGB', (total_width, target_height + label_height), 'white')
+                
+                # Add labels
+                from PIL import ImageDraw
+                draw = ImageDraw.Draw(combined)
+                
+                # V1 label (blue background)
+                draw.rectangle([0, 0, v1_img.width, label_height], fill='#1F4E79')
+                draw.text((v1_img.width // 2 - 50, 10), f"V1 - Page {i+1}", fill='white')
+                
+                # V2 label (orange background)
+                draw.rectangle([v1_img.width + separator_width, 0, total_width, label_height], fill='#C65911')
+                draw.text((v1_img.width + separator_width + v2_img.width // 2 - 50, 10), f"V2 - Page {i+1}", fill='white')
+                
+                # Paste images
+                combined.paste(v1_img, (0, label_height))
+                combined.paste(separator, (v1_img.width, label_height))
+                combined.paste(v2_img, (v1_img.width + separator_width, label_height))
+                
+                combined_images.append(combined)
+            
+            # Save as PDF
+            output_name = Path(match['name']).stem + '_comparison.pdf'
+            output_path = os.path.join(output_folder, output_name)
+            
+            if combined_images:
+                combined_images[0].save(
+                    output_path, 
+                    save_all=True, 
+                    append_images=combined_images[1:] if len(combined_images) > 1 else []
+                )
+                print(f"      ✓ Saved: {output_name}")
+        
+        except Exception as e:
+            print(f"      ✗ Error: {str(e)}")
+
+
+# =============================================================================
+# MAIN FUNCTION
+# =============================================================================
+
+def compare_folders(v1_folder, v2_folder, output_folder):
     """
-    Generate comprehensive final report.
+    Main function to compare V1 and V2 folders.
+    Creates side-by-side visual comparisons for Excel, CSV, and PDF files.
+    
+    Args:
+        v1_folder: Path to V1 root folder
+        v2_folder: Path to V2 root folder  
+        output_folder: Path to save comparison outputs
     """
-    print("\n" + "="*80)
-    print("FINAL REPORT: XGBoost Hyperparameter Analysis")
-    print("="*80)
     
-    default_results = results_df[results_df['Config'] == 'DEFAULT'].iloc[0]
-    best_results = results_df.sort_values('Test_ROC_AUC', ascending=False).iloc[0]
-    least_overfit = results_df.sort_values('ROC_AUC_Gap').iloc[0]
+    print("\n" + "="*60)
+    print("  V1 vs V2 SIDE-BY-SIDE COMPARISON")
+    print("="*60)
+    print(f"\n  V1: {v1_folder}")
+    print(f"  V2: {v2_folder}")
+    print(f"  Output: {output_folder}")
+    print("="*60)
     
-    print(f"""
-    ┌─────────────────────────────────────────────────────────────────────────────┐
-    │                           PERFORMANCE SUMMARY                               │
-    ├─────────────────────────────────────────────────────────────────────────────┤
-    │                                                                             │
-    │  DEFAULT Configuration:                                                     │
-    │    • Test ROC-AUC: {default_results['Test_ROC_AUC']:.4f}                                               │
-    │    • Test PR-AUC:  {default_results['Test_PR_AUC']:.4f}                                               │
-    │    • Overfit Gap:  {default_results['ROC_AUC_Gap']:.4f}                                               │
-    │                                                                             │
-    │  BEST Configuration: {best_results['Config']:15s}                                    │
-    │    • Test ROC-AUC: {best_results['Test_ROC_AUC']:.4f}                                               │
-    │    • Test PR-AUC:  {best_results['Test_PR_AUC']:.4f}                                               │
-    │    • Overfit Gap:  {best_results['ROC_AUC_Gap']:.4f}                                               │
-    │                                                                             │
-    │  LEAST OVERFITTING: {least_overfit['Config']:15s}                                     │
-    │    • Test ROC-AUC: {least_overfit['Test_ROC_AUC']:.4f}                                               │
-    │    • Overfit Gap:  {least_overfit['ROC_AUC_Gap']:.4f}                                               │
-    │                                                                             │
-    └─────────────────────────────────────────────────────────────────────────────┘
-    """)
+    # Create output folder
+    os.makedirs(output_folder, exist_ok=True)
     
-    # Improvement calculation
-    improvement = ((best_results['Test_ROC_AUC'] - default_results['Test_ROC_AUC']) / 
-                   default_results['Test_ROC_AUC'] * 100)
+    # Find and process Excel files
+    excel_matches = find_matching_files(v1_folder, v2_folder, ['.xlsx', '.xls', '.xlsm'])
+    process_excel_files(excel_matches, output_folder)
     
-    overfit_increase = best_results['ROC_AUC_Gap'] - default_results['ROC_AUC_Gap']
+    # Find and process CSV files
+    csv_matches = find_matching_files(v1_folder, v2_folder, ['.csv', '.tsv'])
+    process_csv_files(csv_matches, output_folder)
     
-    print(f"""
-    ┌─────────────────────────────────────────────────────────────────────────────┐
-    │                           KEY FINDINGS                                      │
-    ├─────────────────────────────────────────────────────────────────────────────┤
-    │                                                                             │
-    │  1. IMPROVEMENT FROM TUNING:                                                │
-    │     • Best vs DEFAULT: {improvement:+.2f}% improvement                                 │
-    │     • Absolute gain: {best_results['Test_ROC_AUC'] - default_results['Test_ROC_AUC']:+.4f}                                            │
-    │                                                                             │
-    │  2. OVERFITTING ANALYSIS:                                                   │
-    │     • DEFAULT overfitting: {default_results['ROC_AUC_Gap']:.4f}                                       │
-    │     • Best config overfitting: {best_results['ROC_AUC_Gap']:.4f}                                   │
-    │     • Change in overfitting: {overfit_increase:+.4f}                                      │
-    │                                                                             │
-    │  3. PERFORMANCE RANGE:                                                      │
-    │     • Min Test AUC: {results_df['Test_ROC_AUC'].min():.4f}                                              │
-    │     • Max Test AUC: {results_df['Test_ROC_AUC'].max():.4f}                                              │
-    │     • Spread: {results_df['Test_ROC_AUC'].max() - results_df['Test_ROC_AUC'].min():.4f}                                                     │
-    │                                                                             │
-    └─────────────────────────────────────────────────────────────────────────────┘
-    """)
+    # Find and process PDF files
+    pdf_matches = find_matching_files(v1_folder, v2_folder, ['.pdf'])
+    process_pdf_files(pdf_matches, output_folder)
     
-    # Recommendation
-    if improvement < 2:
-        recommendation = "DEFAULT"
-        reason = "Tuning provides <2% improvement - not worth the complexity"
-    elif best_results['ROC_AUC_Gap'] > default_results['ROC_AUC_Gap'] + 0.03:
-        recommendation = "DEFAULT or CONSERVATIVE"
-        reason = "Best config shows significant overfitting"
+    # Summary
+    total = len(excel_matches) + len(csv_matches) + len(pdf_matches)
+    
+    print("\n" + "="*60)
+    print(f"  ✅ DONE! Created {total} comparison file(s)")
+    print(f"  📂 Output: {output_folder}")
+    print("="*60 + "\n")
+
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
+if __name__ == '__main__':
+    import sys
+    
+    if len(sys.argv) == 4:
+        v1 = sys.argv[1]
+        v2 = sys.argv[2]
+        output = sys.argv[3]
     else:
-        recommendation = best_results['Config']
-        reason = "Meaningful improvement with acceptable overfitting"
+        print("\n📂 V1 vs V2 Side-by-Side Comparison Tool")
+        print("-" * 40)
+        v1 = input("V1 folder path: ").strip()
+        v2 = input("V2 folder path: ").strip()
+        output = input("Output folder path: ").strip()
     
-    print(f"""
-    ┌─────────────────────────────────────────────────────────────────────────────┐
-    │                           RECOMMENDATION                                    │
-    ├─────────────────────────────────────────────────────────────────────────────┤
-    │                                                                             │
-    │  RECOMMENDED CONFIG: {recommendation:20s}                               │
-    │                                                                             │
-    │  REASON: {reason:55s}        │
-    │                                                                             │
-    │  FOR 300 DEFAULTS IN 33K OBSERVATIONS:                                      │
-    │  • Default parameters are often sufficient                                  │
-    │  • Complex tuning increases overfitting risk                                │
-    │  • Simpler models generalize better with limited positive cases             │
-    │  • Focus on PR-AUC, not just ROC-AUC for imbalanced data                   │
-    │                                                                             │
-    └─────────────────────────────────────────────────────────────────────────────┘
-    """)
+    if not os.path.exists(v1):
+        print(f"❌ V1 folder not found: {v1}")
+        sys.exit(1)
     
-    return recommendation
-
-
-# =============================================================================
-# 9. MAIN EXECUTION
-# =============================================================================
-
-def run_full_xgb_analysis(X=None, y=None, run_cv=True, run_grid=False):
-    """
-    Run complete XGBoost hyperparameter analysis.
-    """
-    # Create data if not provided
-    if X is None or y is None:
-        print("Creating synthetic imbalanced dataset...")
-        X, y = create_imbalanced_data(n_samples=33000, n_defaults=300)
+    if not os.path.exists(v2):
+        print(f"❌ V2 folder not found: {v2}")
+        sys.exit(1)
     
-    # Split data
-    X_train, X_test, y_train, y_test = split_data(X, y)
-    
-    # Get configurations
-    configs = get_hyperparameter_configs(y_train)
-    
-    # Evaluate all configurations
-    results = evaluate_all_configs(X_train, X_test, y_train, y_test, configs)
-    
-    # Create results DataFrame
-    results_df = create_results_dataframe(results)
-    
-    # Analyze results
-    sorted_df = analyze_results(results_df)
-    
-    # Calculate statistics
-    stats = calculate_statistics(results_df)
-    
-    # Cross-validation (optional)
-    cv_results_df = None
-    if run_cv:
-        cv_results = cross_validate_all_configs(X_train, y_train, configs)
-        cv_results_df = create_cv_results_dataframe(cv_results)
-        print("\n### Cross-Validation Results ###\n")
-        print(cv_results_df.to_string(index=False))
-    
-    # Grid search (optional)
-    if run_grid:
-        param_grid, scale_pos_weight = get_grid_search_params(y_train)
-        grid_results = run_grid_search(X_train, X_test, y_train, y_test, 
-                                        param_grid, scale_pos_weight, max_combinations=50)
-        grid_df = create_grid_results_dataframe(grid_results)
-        print("\n### Grid Search Best Results ###\n")
-        print(grid_df.sort_values('Test_ROC_AUC', ascending=False).head(10).to_string(index=False))
-    
-    # Visualizations
-    print("\n" + "="*70)
-    print("GENERATING VISUALIZATIONS")
-    print("="*70)
-    
-    plot_train_test_comparison(results_df)
-    plot_overfitting_heatmap(results_df)
-    plot_roc_curves_all(results, y_test)
-    plot_pr_curves_all(results, y_test)
-    plot_parameter_impact(results_df)
-    plot_performance_distribution(results_df)
-    
-    # Final report
-    recommendation = generate_final_report(results_df, cv_results_df)
-    
-    return {
-        'results': results,
-        'results_df': results_df,
-        'cv_results_df': cv_results_df,
-        'recommendation': recommendation,
-        'X_train': X_train,
-        'X_test': X_test,
-        'y_train': y_train,
-        'y_test': y_test
-    }
-
-
-# =============================================================================
-# RUN ANALYSIS
-# =============================================================================
-
-if __name__ == "__main__":
-    # Run full analysis
-    analysis = run_full_xgb_analysis(run_cv=True, run_grid=False)
-    
-    # Access results
-    print("\n\nFinal Results DataFrame:")
-    print(analysis['results_df'][['Config', 'Test_ROC_AUC', 'Test_PR_AUC', 
-                                   'ROC_AUC_Gap', 'Training_Time']].to_string(index=False))
-
-
+    compare_folders(v1, v2, output)
