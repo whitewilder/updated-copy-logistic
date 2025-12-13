@@ -1,473 +1,63 @@
+1. Code Style & Formatting
+Use Black for formatting (line length: 88 characters)
+
+Run black . before committing
+Configure pre-commit hooks to enforce automatically
+
+Follow PEP 8 with these key points:
+
+Use 4 spaces for indentation (never tabs)
+Two blank lines between top-level functions/classes
+One blank line between methods
+Use snake_case for functions and variables, PascalCase for classes
 
 
-#!/usr/bin/env python3
-"""
-V1 vs V2 Side-by-Side Visual Comparison Tool
-Places V1 and V2 content next to each other for easy visual comparison
-"""
-
-import os
-from pathlib import Path
-from datetime import datetime
-import pandas as pd
-
-# PDF handling
-try:
-    from pdf2image import convert_from_path
-    from PIL import Image
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
-    print("Note: Install pdf2image and Pillow for PDF comparison")
-
-# Excel styling
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils.dataframe import dataframe_to_rows
-
-
-# =============================================================================
-# COLORS AND STYLES
-# =============================================================================
-
-V1_HEADER_COLOR = "1F4E79"  # Dark Blue
-V2_HEADER_COLOR = "C65911"  # Dark Orange
-V1_LIGHT_COLOR = "D6EAF8"   # Light Blue
-V2_LIGHT_COLOR = "FDEBD0"   # Light Orange
-SEPARATOR_COLOR = "808080"  # Gray
-WHITE = "FFFFFF"
+project/
+├── data/
+│   ├── raw/
+│   └── processed/
+├── notebooks/
+│   ├── 01_exploratory_analysis.ipynb
+│   └── 02_model_development.ipynb
+├── src/
+│   ├── __init__.py
+│   ├── data/
+│   │   ├── __init__.py
+│   │   └── preprocessing.py
+│   ├── features/
+│   │   ├── __init__.py
+│   │   └── engineering.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── train.py
+│   └── utils/
+│       ├── __init__.py
+│       └── metrics.py
+├── tests/
+├── requirements.txt
+└── README.md
 
 
-def get_v1_header_style():
-    return {
-        'fill': PatternFill(start_color=V1_HEADER_COLOR, end_color=V1_HEADER_COLOR, fill_type='solid'),
-        'font': Font(color=WHITE, bold=True, size=11),
-        'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True)
-    }
 
 
-def get_v2_header_style():
-    return {
-        'fill': PatternFill(start_color=V2_HEADER_COLOR, end_color=V2_HEADER_COLOR, fill_type='solid'),
-        'font': Font(color=WHITE, bold=True, size=11),
-        'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True)
-    }
+Vectorization over loops:
+Efficient pandas operations:
 
+Use .query() for complex filtering
+Use .apply() only when necessary (vectorized operations are faster)
+Consider dask or polars for large datasets
 
-def get_v1_cell_style():
-    return {
-        'fill': PatternFill(start_color=V1_LIGHT_COLOR, end_color=V1_LIGHT_COLOR, fill_type='solid'),
-        'alignment': Alignment(vertical='top', wrap_text=True)
-    }
+Memory management:
 
+Use appropriate dtypes (e.g., int32 instead of int64 when possible)
+Delete large intermediate objects: del large_df
+Use chunking for very large files
 
-def get_v2_cell_style():
-    return {
-        'fill': PatternFill(start_color=V2_LIGHT_COLOR, end_color=V2_LIGHT_COLOR, fill_type='solid'),
-        'alignment': Alignment(vertical='top', wrap_text=True)
-    }
+12. Code Review Checklist
+Before submitting code for review:
 
-
-def get_separator_style():
-    return {
-        'fill': PatternFill(start_color=SEPARATOR_COLOR, end_color=SEPARATOR_COLOR, fill_type='solid')
-    }
-
-
-def get_border():
-    return Border(
-        left=Side(style='thin', color='AAAAAA'),
-        right=Side(style='thin', color='AAAAAA'),
-        top=Side(style='thin', color='AAAAAA'),
-        bottom=Side(style='thin', color='AAAAAA')
-    )
-
-
-# =============================================================================
-# FILE DISCOVERY
-# =============================================================================
-
-def find_files(root_folder, extensions):
-    """Find all files with given extensions in folder"""
-    files = {}
-    root = Path(root_folder).resolve()
-    
-    for dirpath, _, filenames in os.walk(root):
-        for filename in filenames:
-            if Path(filename).suffix.lower() in extensions:
-                abs_path = os.path.join(dirpath, filename)
-                rel_path = os.path.relpath(abs_path, root)
-                files[rel_path] = abs_path
-    
-    return files
-
-
-def find_matching_files(v1_folder, v2_folder, extensions):
-    """Find files that exist in both V1 and V2"""
-    v1_files = find_files(v1_folder, extensions)
-    v2_files = find_files(v2_folder, extensions)
-    
-    common = set(v1_files.keys()) & set(v2_files.keys())
-    
-    matches = []
-    for name in sorted(common):
-        matches.append({
-            'name': name,
-            'v1_path': v1_files[name],
-            'v2_path': v2_files[name]
-        })
-    
-    return matches
-
-
-# =============================================================================
-# READ FILES
-# =============================================================================
-
-def read_excel(filepath):
-    """Read Excel file, return dict of sheet_name -> DataFrame"""
-    try:
-        return pd.read_excel(filepath, sheet_name=None, dtype=str)
-    except Exception as e:
-        return {'Error': pd.DataFrame({'Error': [str(e)]})}
-
-
-def read_csv(filepath):
-    """Read CSV file, return DataFrame"""
-    encodings = ['utf-8', 'latin-1', 'cp1252']
-    for enc in encodings:
-        try:
-            return pd.read_csv(filepath, encoding=enc, dtype=str)
-        except:
-            continue
-    return pd.DataFrame({'Error': ['Could not read file']})
-
-
-# =============================================================================
-# WRITE SIDE-BY-SIDE EXCEL
-# =============================================================================
-
-def apply_style(cell, style_dict):
-    """Apply style dictionary to cell"""
-    for attr, value in style_dict.items():
-        setattr(cell, attr, value)
-    cell.border = get_border()
-
-
-def write_side_by_side_sheet(ws, df_v1, df_v2, sheet_name):
-    """Write V1 and V2 DataFrames side by side in worksheet"""
-    
-    # Calculate dimensions
-    v1_cols = len(df_v1.columns) if not df_v1.empty else 1
-    v2_cols = len(df_v2.columns) if not df_v2.empty else 1
-    separator_col = v1_cols + 1
-    v2_start_col = v1_cols + 2
-    
-    max_rows = max(len(df_v1), len(df_v2))
-    
-    # Row 1: Version Headers
-    v1_header_cell = ws.cell(row=1, column=1, value=f"═══ V1: {sheet_name} ═══")
-    apply_style(v1_header_cell, get_v1_header_style())
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=v1_cols)
-    
-    # Separator column header
-    sep_cell = ws.cell(row=1, column=separator_col, value="║")
-    apply_style(sep_cell, get_separator_style())
-    
-    v2_header_cell = ws.cell(row=1, column=v2_start_col, value=f"═══ V2: {sheet_name} ═══")
-    apply_style(v2_header_cell, get_v2_header_style())
-    if v2_cols > 1:
-        ws.merge_cells(start_row=1, start_column=v2_start_col, end_row=1, end_column=v2_start_col + v2_cols - 1)
-    
-    # Row 2: Column Headers for V1
-    for col_idx, col_name in enumerate(df_v1.columns, 1):
-        cell = ws.cell(row=2, column=col_idx, value=str(col_name))
-        apply_style(cell, get_v1_header_style())
-    
-    # Separator
-    sep_cell = ws.cell(row=2, column=separator_col, value="║")
-    apply_style(sep_cell, get_separator_style())
-    
-    # Row 2: Column Headers for V2
-    for col_idx, col_name in enumerate(df_v2.columns, 1):
-        cell = ws.cell(row=2, column=v2_start_col + col_idx - 1, value=str(col_name))
-        apply_style(cell, get_v2_header_style())
-    
-    # Data rows - V1
-    for row_idx, row_data in enumerate(df_v1.values, 3):
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=str(value) if pd.notna(value) else "")
-            apply_style(cell, get_v1_cell_style())
-        
-        # Separator
-        sep_cell = ws.cell(row=row_idx, column=separator_col, value="║")
-        apply_style(sep_cell, get_separator_style())
-    
-    # Data rows - V2
-    for row_idx, row_data in enumerate(df_v2.values, 3):
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=v2_start_col + col_idx - 1, value=str(value) if pd.notna(value) else "")
-            apply_style(cell, get_v2_cell_style())
-    
-    # Extend separator for all rows
-    for row_idx in range(3, max_rows + 3):
-        sep_cell = ws.cell(row=row_idx, column=separator_col, value="║")
-        apply_style(sep_cell, get_separator_style())
-    
-    # Set column widths
-    for col_idx in range(1, v2_start_col + v2_cols):
-        if col_idx == separator_col:
-            ws.column_dimensions[get_column_letter(col_idx)].width = 3
-        else:
-            ws.column_dimensions[get_column_letter(col_idx)].width = 18
-    
-    # Set row heights
-    ws.row_dimensions[1].height = 25
-    ws.row_dimensions[2].height = 22
-
-
-def get_column_letter(col_idx):
-    """Convert column index to Excel letter"""
-    result = ""
-    while col_idx > 0:
-        col_idx, remainder = divmod(col_idx - 1, 26)
-        result = chr(65 + remainder) + result
-    return result
-
-
-# =============================================================================
-# PROCESS FILES
-# =============================================================================
-
-def process_excel_files(matches, output_folder):
-    """Process Excel files and create side-by-side comparison"""
-    if not matches:
-        return
-    
-    print(f"\n📗 Processing {len(matches)} Excel file(s)...")
-    
-    for match in matches:
-        print(f"   → {match['name']}")
-        
-        v1_sheets = read_excel(match['v1_path'])
-        v2_sheets = read_excel(match['v2_path'])
-        
-        # Create output workbook
-        wb = Workbook()
-        wb.remove(wb.active)  # Remove default sheet
-        
-        # Get all sheet names
-        all_sheets = sorted(set(v1_sheets.keys()) | set(v2_sheets.keys()))
-        
-        for sheet_name in all_sheets:
-            # Get DataFrames (empty if sheet doesn't exist)
-            df_v1 = v1_sheets.get(sheet_name, pd.DataFrame({'(Sheet not in V1)': []}))
-            df_v2 = v2_sheets.get(sheet_name, pd.DataFrame({'(Sheet not in V2)': []}))
-            
-            # Create worksheet
-            safe_name = sheet_name[:31]  # Excel sheet name limit
-            ws = wb.create_sheet(title=safe_name)
-            
-            write_side_by_side_sheet(ws, df_v1, df_v2, sheet_name)
-        
-        # Save
-        output_name = Path(match['name']).stem + '_comparison.xlsx'
-        output_path = os.path.join(output_folder, output_name)
-        wb.save(output_path)
-        print(f"      ✓ Saved: {output_name}")
-
-
-def process_csv_files(matches, output_folder):
-    """Process CSV files and create side-by-side comparison"""
-    if not matches:
-        return
-    
-    print(f"\n📄 Processing {len(matches)} CSV file(s)...")
-    
-    for match in matches:
-        print(f"   → {match['name']}")
-        
-        df_v1 = read_csv(match['v1_path'])
-        df_v2 = read_csv(match['v2_path'])
-        
-        # Create output workbook
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Comparison"
-        
-        sheet_name = Path(match['name']).stem
-        write_side_by_side_sheet(ws, df_v1, df_v2, sheet_name)
-        
-        # Save
-        output_name = Path(match['name']).stem + '_comparison.xlsx'
-        output_path = os.path.join(output_folder, output_name)
-        wb.save(output_path)
-        print(f"      ✓ Saved: {output_name}")
-
-
-def process_pdf_files(matches, output_folder):
-    """Process PDF files and create side-by-side page comparison"""
-    if not matches:
-        return
-    
-    if not PDF_SUPPORT:
-        print("\n📕 Skipping PDFs (install pdf2image and Pillow)")
-        return
-    
-    print(f"\n📕 Processing {len(matches)} PDF file(s)...")
-    
-    for match in matches:
-        print(f"   → {match['name']}")
-        
-        try:
-            # Convert PDFs to images
-            v1_pages = convert_from_path(match['v1_path'], dpi=150)
-            v2_pages = convert_from_path(match['v2_path'], dpi=150)
-            
-            max_pages = max(len(v1_pages), len(v2_pages))
-            
-            combined_images = []
-            
-            for i in range(max_pages):
-                # Get pages (or create blank if doesn't exist)
-                if i < len(v1_pages):
-                    v1_img = v1_pages[i]
-                else:
-                    v1_img = Image.new('RGB', v1_pages[0].size if v1_pages else (612, 792), 'white')
-                
-                if i < len(v2_pages):
-                    v2_img = v2_pages[i]
-                else:
-                    v2_img = Image.new('RGB', v2_pages[0].size if v2_pages else (612, 792), 'white')
-                
-                # Resize to same height
-                target_height = max(v1_img.height, v2_img.height)
-                
-                if v1_img.height != target_height:
-                    ratio = target_height / v1_img.height
-                    v1_img = v1_img.resize((int(v1_img.width * ratio), target_height))
-                
-                if v2_img.height != target_height:
-                    ratio = target_height / v2_img.height
-                    v2_img = v2_img.resize((int(v2_img.width * ratio), target_height))
-                
-                # Create separator
-                separator_width = 20
-                separator = Image.new('RGB', (separator_width, target_height), '#808080')
-                
-                # Create labels
-                label_height = 40
-                total_width = v1_img.width + separator_width + v2_img.width
-                
-                # Combine horizontally
-                combined = Image.new('RGB', (total_width, target_height + label_height), 'white')
-                
-                # Add labels
-                from PIL import ImageDraw
-                draw = ImageDraw.Draw(combined)
-                
-                # V1 label (blue background)
-                draw.rectangle([0, 0, v1_img.width, label_height], fill='#1F4E79')
-                draw.text((v1_img.width // 2 - 50, 10), f"V1 - Page {i+1}", fill='white')
-                
-                # V2 label (orange background)
-                draw.rectangle([v1_img.width + separator_width, 0, total_width, label_height], fill='#C65911')
-                draw.text((v1_img.width + separator_width + v2_img.width // 2 - 50, 10), f"V2 - Page {i+1}", fill='white')
-                
-                # Paste images
-                combined.paste(v1_img, (0, label_height))
-                combined.paste(separator, (v1_img.width, label_height))
-                combined.paste(v2_img, (v1_img.width + separator_width, label_height))
-                
-                combined_images.append(combined)
-            
-            # Save as PDF
-            output_name = Path(match['name']).stem + '_comparison.pdf'
-            output_path = os.path.join(output_folder, output_name)
-            
-            if combined_images:
-                combined_images[0].save(
-                    output_path, 
-                    save_all=True, 
-                    append_images=combined_images[1:] if len(combined_images) > 1 else []
-                )
-                print(f"      ✓ Saved: {output_name}")
-        
-        except Exception as e:
-            print(f"      ✗ Error: {str(e)}")
-
-
-# =============================================================================
-# MAIN FUNCTION
-# =============================================================================
-
-def compare_folders(v1_folder, v2_folder, output_folder):
-    """
-    Main function to compare V1 and V2 folders.
-    Creates side-by-side visual comparisons for Excel, CSV, and PDF files.
-    
-    Args:
-        v1_folder: Path to V1 root folder
-        v2_folder: Path to V2 root folder  
-        output_folder: Path to save comparison outputs
-    """
-    
-    print("\n" + "="*60)
-    print("  V1 vs V2 SIDE-BY-SIDE COMPARISON")
-    print("="*60)
-    print(f"\n  V1: {v1_folder}")
-    print(f"  V2: {v2_folder}")
-    print(f"  Output: {output_folder}")
-    print("="*60)
-    
-    # Create output folder
-    os.makedirs(output_folder, exist_ok=True)
-    
-    # Find and process Excel files
-    excel_matches = find_matching_files(v1_folder, v2_folder, ['.xlsx', '.xls', '.xlsm'])
-    process_excel_files(excel_matches, output_folder)
-    
-    # Find and process CSV files
-    csv_matches = find_matching_files(v1_folder, v2_folder, ['.csv', '.tsv'])
-    process_csv_files(csv_matches, output_folder)
-    
-    # Find and process PDF files
-    pdf_matches = find_matching_files(v1_folder, v2_folder, ['.pdf'])
-    process_pdf_files(pdf_matches, output_folder)
-    
-    # Summary
-    total = len(excel_matches) + len(csv_matches) + len(pdf_matches)
-    
-    print("\n" + "="*60)
-    print(f"  ✅ DONE! Created {total} comparison file(s)")
-    print(f"  📂 Output: {output_folder}")
-    print("="*60 + "\n")
-
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
-
-if __name__ == '__main__':
-    import sys
-    
-    if len(sys.argv) == 4:
-        v1 = sys.argv[1]
-        v2 = sys.argv[2]
-        output = sys.argv[3]
-    else:
-        print("\n📂 V1 vs V2 Side-by-Side Comparison Tool")
-        print("-" * 40)
-        v1 = input("V1 folder path: ").strip()
-        v2 = input("V2 folder path: ").strip()
-        output = input("Output folder path: ").strip()
-    
-    if not os.path.exists(v1):
-        print(f"❌ V1 folder not found: {v1}")
-        sys.exit(1)
-    
-    if not os.path.exists(v2):
-        print(f"❌ V2 folder not found: {v2}")
-        sys.exit(1)
-    
-    compare_folders(v1, v2, output)
+ Code follows Black formatting
+ All functions have docstrings
+ Added unit tests for new functionality
+ Logging used instead of print statements
+ No hardcoded paths or credentials
