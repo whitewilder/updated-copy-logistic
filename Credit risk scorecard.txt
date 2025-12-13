@@ -1,3 +1,18 @@
+
+Refactor this code with these requirements (don't change logic):
+1. Remove hardcoded paths, use config/env variables
+2. Add logging after each meaningful step
+3. Add docstrings to all functions
+4. Replace loops/apply with vectorized operations
+5. Add del for large intermediate objects
+6. Replace complex filtering with .query()
+7. Add type hints
+8. Add error handling with try-except
+9. Follow PEP 8 standards
+
+Maintain exact same functionality and output.
+
+
 1. Code Style & Formatting
 Use Black for formatting (line length: 88 characters)
 
