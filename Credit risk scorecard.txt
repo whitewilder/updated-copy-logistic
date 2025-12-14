@@ -1,3 +1,108 @@
+import psutil
+import os
+import time
+import threading
+import csv
+from datetime import datetime
+from functools import wraps
+
+
+def monitor_function(
+    step_name=None,
+    log_file=None,
+    sample_interval=0.5,
+    peak_resolution=0.01,
+    print_stdout=True
+):
+    """
+    Unified function-level monitor:
+    - Background RSS + CPU sampling (like Task Manager)
+    - Function execution time
+    - Memory delta (before vs after)
+    - TRUE peak memory inside function (temporary spikes)
+
+    Safe for nohup / prod workloads
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            process = psutil.Process(os.getpid())
+            name = step_name or func.__name__
+
+            # -------- Baseline --------
+            mem_before = process.memory_info().rss / 1024**2
+            start_time = time.time()
+
+            peak_rss = 0
+            running = True
+
+            # -------- Background sampler (low freq) --------
+            def sampler():
+                nonlocal peak_rss
+                if log_file:
+                    with open(log_file, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            "timestamp", "step", "rss_mb", "cpu_percent"
+                        ])
+                        while running:
+                            rss = process.memory_info().rss / 1024**2
+                            cpu = process.cpu_percent(interval=None)
+                            peak_rss = max(peak_rss, rss)
+                            writer.writerow([
+                                datetime.now().isoformat(),
+                                name,
+                                round(rss, 2),
+                                round(cpu, 2)
+                            ])
+                            time.sleep(sample_interval)
+                else:
+                    while running:
+                        rss = process.memory_info().rss / 1024**2
+                        peak_rss = max(peak_rss, rss)
+                        time.sleep(sample_interval)
+
+            # -------- High-resolution peak tracker --------
+            def peak_tracker():
+                nonlocal peak_rss
+                while running:
+                    rss = process.memory_info().rss / 1024**2
+                    peak_rss = max(peak_rss, rss)
+                    time.sleep(peak_resolution)
+
+            t1 = threading.Thread(target=sampler, daemon=True)
+            t2 = threading.Thread(target=peak_tracker, daemon=True)
+
+            t1.start()
+            t2.start()
+
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                running = False
+                t1.join()
+                t2.join()
+
+            # -------- Final stats --------
+            mem_after = process.memory_info().rss / 1024**2
+            duration = round(time.time() - start_time, 2)
+
+            summary = (
+                f"[STEP] {name} | "
+                f"time={duration}s | "
+                f"mem_delta={round(mem_after - mem_before, 2)} MB | "
+                f"peak_mem={round(peak_rss, 2)} MB"
+            )
+
+            if print_stdout:
+                print(summary, flush=True)
+
+            return result
+
+        return wrapper
+    return decorator
+
 
 Refactor this code with these requirements (don't change logic):
 1. Remove hardcoded paths, use config/env variables
