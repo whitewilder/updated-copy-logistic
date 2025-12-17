@@ -1,183 +1,621 @@
-import psutil
+#!/usr/bin/env python3
+"""
+Fast Lightweight Code Search Engine
+Searches .py, .ipynb, .txt files
+Functional approach - minimal OOP
+"""
+
 import os
+import re
+import json
+import pickle
+import hashlib
+from pathlib import Path
+from collections import defaultdict
+from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor
 import time
-import threading
-import csv
-from datetime import datetime
-from functools import wraps
+
+# ============== CONFIGURATION ==============
+INDEX_CACHE_FILE = ".search_index.pkl"
+EXTENSIONS = {'.py', '.ipynb', '.txt'}
+SKIP_DIRS = {'__pycache__', '.git', 'venv', 'env', '.ipynb_checkpoints', 'node_modules', '.conda'}
 
 
-def monitor_function(
-    step_name=None,
-    log_file=None,
-    sample_interval=0.5,
-    peak_resolution=0.01,
-    print_stdout=True
-):
-    """
-    Unified function-level monitor:
-    - Background RSS + CPU sampling (like Task Manager)
-    - Function execution time
-    - Memory delta (before vs after)
-    - TRUE peak memory inside function (temporary spikes)
+# ============== FILE EXTRACTION FUNCTIONS ==============
 
-    Safe for nohup / prod workloads
-    """
+def read_file_safe(filepath):
+    """Safely read file content"""
+    encodings = ['utf-8', 'latin-1', 'cp1252']
+    for enc in encodings:
+        try:
+            with open(filepath, 'r', encoding=enc) as f:
+                return f.read()
+        except:
+            continue
+    return ""
 
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            process = psutil.Process(os.getpid())
-            name = step_name or func.__name__
 
-            # -------- Baseline --------
-            mem_before = process.memory_info().rss / 1024**2
-            start_time = time.time()
+def extract_ipynb(filepath):
+    """Extract cells from Jupyter notebook"""
+    try:
+        content = read_file_safe(filepath)
+        notebook = json.loads(content)
+        cells = notebook.get('cells', [])
+        
+        blocks = []
+        for idx, cell in enumerate(cells):
+            source = cell.get('source', [])
+            text = ''.join(source) if isinstance(source, list) else source
+            
+            if text.strip():
+                blocks.append({
+                    'type': 'cell',
+                    'cell_num': idx + 1,
+                    'cell_type': cell.get('cell_type', 'code'),
+                    'content': text
+                })
+        return blocks
+    except Exception as e:
+        return []
 
-            peak_rss = 0
-            running = True
 
-            # -------- Background sampler (low freq) --------
-            def sampler():
-                nonlocal peak_rss
-                if log_file:
-                    with open(log_file, "a", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow([
-                            "timestamp", "step", "rss_mb", "cpu_percent"
-                        ])
-                        while running:
-                            rss = process.memory_info().rss / 1024**2
-                            cpu = process.cpu_percent(interval=None)
-                            peak_rss = max(peak_rss, rss)
-                            writer.writerow([
-                                datetime.now().isoformat(),
-                                name,
-                                round(rss, 2),
-                                round(cpu, 2)
-                            ])
-                            time.sleep(sample_interval)
-                else:
-                    while running:
-                        rss = process.memory_info().rss / 1024**2
-                        peak_rss = max(peak_rss, rss)
-                        time.sleep(sample_interval)
+def extract_py(filepath):
+    """Extract code blocks from Python file"""
+    content = read_file_safe(filepath)
+    if not content:
+        return []
+    
+    blocks = []
+    lines = content.split('\n')
+    
+    # Split by function/class definitions
+    current_block = []
+    block_start = 1
+    
+    for i, line in enumerate(lines, 1):
+        # New block on def/class/major comment
+        if re.match(r'^(def |class |#\s*={3,}|#\s*-{3,})', line) and current_block:
+            blocks.append({
+                'type': 'block',
+                'line_start': block_start,
+                'line_end': i - 1,
+                'content': '\n'.join(current_block)
+            })
+            current_block = []
+            block_start = i
+        current_block.append(line)
+    
+    # Last block
+    if current_block:
+        blocks.append({
+            'type': 'block',
+            'line_start': block_start,
+            'line_end': len(lines),
+            'content': '\n'.join(current_block)
+        })
+    
+    # If no blocks found, treat whole file as one block
+    if not blocks:
+        blocks = [{'type': 'file', 'line_start': 1, 'content': content}]
+    
+    return blocks
 
-            # -------- High-resolution peak tracker --------
-            def peak_tracker():
-                nonlocal peak_rss
-                while running:
-                    rss = process.memory_info().rss / 1024**2
-                    peak_rss = max(peak_rss, rss)
-                    time.sleep(peak_resolution)
 
-            t1 = threading.Thread(target=sampler, daemon=True)
-            t2 = threading.Thread(target=peak_tracker, daemon=True)
+def extract_txt(filepath):
+    """Extract content from text file"""
+    content = read_file_safe(filepath)
+    if content.strip():
+        return [{'type': 'file', 'content': content}]
+    return []
 
-            t1.start()
-            t2.start()
 
+def extract_content(filepath):
+    """Route to correct extractor based on extension"""
+    ext = Path(filepath).suffix.lower()
+    extractors = {
+        '.ipynb': extract_ipynb,
+        '.py': extract_py,
+        '.txt': extract_txt
+    }
+    extractor = extractors.get(ext, extract_txt)
+    return extractor(filepath)
+
+
+# ============== INDEXING FUNCTIONS ==============
+
+def scan_directory(root_dir):
+    """Fast directory scanning"""
+    files = []
+    root_path = Path(root_dir).resolve()
+    
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        # Filter out skip directories
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith('.')]
+        
+        for fname in filenames:
+            if Path(fname).suffix.lower() in EXTENSIONS:
+                files.append(os.path.join(dirpath, fname))
+    
+    return files
+
+
+def tokenize(text):
+    """Fast tokenization - extract meaningful tokens"""
+    text = text.lower()
+    # Extract words, preserving underscores (for function names)
+    tokens = re.findall(r'[a-z_][a-z0-9_]*', text)
+    # Filter very short tokens
+    return [t for t in tokens if len(t) > 1]
+
+
+def get_file_hash(filepath):
+    """Quick hash for cache validation"""
+    try:
+        stat = os.stat(filepath)
+        return f"{filepath}:{stat.st_mtime}:{stat.st_size}"
+    except:
+        return None
+
+
+def process_file(filepath):
+    """Process single file - returns list of documents"""
+    docs = []
+    blocks = extract_content(filepath)
+    
+    for block in blocks:
+        content = block.get('content', '')
+        if len(content.strip()) < 5:  # Skip near-empty blocks
+            continue
+        
+        tokens = tokenize(content)
+        if not tokens:
+            continue
+        
+        # Calculate token frequencies
+        token_freq = defaultdict(int)
+        for t in tokens:
+            token_freq[t] += 1
+        
+        docs.append({
+            'filepath': filepath,
+            'block': block,
+            'content': content,
+            'tokens': dict(token_freq),
+            'length': len(tokens)
+        })
+    
+    return docs
+
+
+def build_index(root_dir, use_cache=True, verbose=True):
+    """Build inverted index with caching"""
+    root_dir = str(Path(root_dir).resolve())
+    cache_path = os.path.join(root_dir, INDEX_CACHE_FILE)
+    
+    # Try loading cache
+    if use_cache and os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                cache = pickle.load(f)
+            if verbose:
+                print(f"✓ Loaded cached index ({len(cache['docs'])} blocks)")
+            return cache['index'], cache['docs']
+        except:
+            pass
+    
+    if verbose:
+        print("Building index...", end=" ", flush=True)
+    
+    start = time.time()
+    files = scan_directory(root_dir)
+    
+    # Process files in parallel
+    all_docs = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = executor.map(process_file, files)
+        for doc_list in results:
+            all_docs.extend(doc_list)
+    
+    # Build inverted index
+    inverted_index = defaultdict(list)
+    for doc_id, doc in enumerate(all_docs):
+        doc['id'] = doc_id
+        for token, freq in doc['tokens'].items():
+            inverted_index[token].append((doc_id, freq))
+    
+    inverted_index = dict(inverted_index)
+    
+    # Save cache
+    try:
+        with open(cache_path, 'wb') as f:
+            pickle.dump({'index': inverted_index, 'docs': all_docs}, f)
+    except:
+        pass
+    
+    elapsed = time.time() - start
+    if verbose:
+        print(f"Done! {len(files)} files, {len(all_docs)} blocks in {elapsed:.2f}s")
+    
+    return inverted_index, all_docs
+
+
+# ============== SEARCH FUNCTIONS ==============
+
+def score_bm25(query_tokens, doc, inverted_index, total_docs, avg_doc_len, k1=1.5, b=0.75):
+    """BM25 scoring - fast and effective"""
+    score = 0.0
+    doc_len = doc['length']
+    doc_tokens = doc['tokens']
+    
+    for qt in query_tokens:
+        if qt not in doc_tokens:
+            continue
+        
+        tf = doc_tokens[qt]
+        df = len(inverted_index.get(qt, []))
+        
+        # IDF
+        idf = max(0.1, (total_docs - df + 0.5) / (df + 0.5))
+        
+        # TF normalization
+        tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avg_doc_len))
+        
+        score += idf * tf_norm
+    
+    return score
+
+
+def fuzzy_match_score(query, content, threshold=0.6):
+    """Fast fuzzy matching for exact phrase search"""
+    query_lower = query.lower()
+    content_lower = content.lower()
+    
+    # Exact substring match - high score
+    if query_lower in content_lower:
+        return 10.0
+    
+    # Check for partial matches
+    query_words = query_lower.split()
+    matches = sum(1 for w in query_words if w in content_lower)
+    
+    return matches * 2
+
+
+def search(query, inverted_index, docs, top_k=10, fuzzy=True):
+    """Main search function"""
+    query_tokens = tokenize(query)
+    
+    if not query_tokens:
+        return []
+    
+    # Pre-compute stats
+    total_docs = len(docs)
+    avg_doc_len = sum(d['length'] for d in docs) / max(total_docs, 1)
+    
+    # Get candidate documents (docs that have at least one query token)
+    candidates = set()
+    for qt in query_tokens:
+        if qt in inverted_index:
+            for doc_id, _ in inverted_index[qt]:
+                candidates.add(doc_id)
+        
+        # Partial token matching
+        for idx_token in inverted_index:
+            if qt in idx_token or idx_token in qt:
+                for doc_id, _ in inverted_index[idx_token]:
+                    candidates.add(doc_id)
+    
+    # Score candidates
+    scored = []
+    for doc_id in candidates:
+        doc = docs[doc_id]
+        
+        # BM25 score
+        score = score_bm25(query_tokens, doc, inverted_index, total_docs, avg_doc_len)
+        
+        # Fuzzy/phrase match bonus
+        if fuzzy:
+            score += fuzzy_match_score(query, doc['content'])
+        
+        scored.append((doc, score))
+    
+    # Sort and return top results
+    scored.sort(key=lambda x: -x[1])
+    return scored[:top_k]
+
+
+# ============== DISPLAY FUNCTIONS ==============
+
+def get_context_snippet(content, query, max_lines=12):
+    """Extract relevant snippet with context"""
+    lines = content.split('\n')
+    query_tokens = set(tokenize(query))
+    
+    # Find matching lines
+    match_indices = []
+    for i, line in enumerate(lines):
+        line_tokens = set(tokenize(line))
+        if query_tokens & line_tokens:
+            match_indices.append(i)
+    
+    if not match_indices:
+        # No direct match, return beginning
+        return '\n'.join(lines[:max_lines])
+    
+    # Get context around first few matches
+    shown_lines = set()
+    for idx in match_indices[:3]:
+        start = max(0, idx - 2)
+        end = min(len(lines), idx + 3)
+        shown_lines.update(range(start, end))
+    
+    shown_lines = sorted(shown_lines)[:max_lines]
+    
+    result = []
+    prev = -2
+    for i in shown_lines:
+        if i - prev > 1:
+            result.append("    ...")
+        # Highlight matching lines
+        prefix = " >> " if i in match_indices else "    "
+        result.append(f"{i+1:4d}{prefix}{lines[i]}")
+        prev = i
+    
+    return '\n'.join(result)
+
+
+def format_result(doc, score, query, rank):
+    """Format a single result for display"""
+    filepath = doc['filepath']
+    block = doc['block']
+    content = doc['content']
+    
+    # Location info
+    ext = Path(filepath).suffix.lower()
+    location = filepath
+    
+    if ext == '.ipynb':
+        cell_num = block.get('cell_num', '?')
+        cell_type = block.get('cell_type', 'code')
+        location += f" [Cell {cell_num}, {cell_type}]"
+    elif ext == '.py':
+        line_start = block.get('line_start', 1)
+        line_end = block.get('line_end', line_start)
+        location += f" [Lines {line_start}-{line_end}]"
+    
+    snippet = get_context_snippet(content, query)
+    
+    output = f"""
+┌{'─'*60}
+│ #{rank}  Score: {score:.2f}
+│ 📁 {location}
+├{'─'*60}
+{snippet}
+└{'─'*60}"""
+    
+    return output
+
+
+def print_results(results, query):
+    """Print all results"""
+    if not results:
+        print("\n❌ No results found.\n")
+        return
+    
+    print(f"\n📊 Found {len(results)} results:\n")
+    
+    for rank, (doc, score) in enumerate(results, 1):
+        print(format_result(doc, score, query, rank))
+
+
+# ============== MAIN INTERFACE ==============
+
+def quick_search(query, root_dir='.', top_k=10, rebuild=False):
+    """One-liner search function"""
+    idx, docs = build_index(root_dir, use_cache=not rebuild)
+    results = search(query, idx, docs, top_k=top_k)
+    print_results(results, query)
+    return results
+
+
+def interactive_mode(root_dir='.'):
+    """Interactive search REPL"""
+    print("\n" + "="*60)
+    print("  🔍 FAST CODE SEARCH ENGINE")
+    print("="*60)
+    
+    idx, docs = build_index(root_dir, use_cache=True)
+    
+    print("\nCommands:")
+    print("  <query>    - Search for code")
+    print("  :r         - Rebuild index")
+    print("  :q         - Quit")
+    print("  :top N     - Set number of results (default 10)")
+    print()
+    
+    top_k = 10
+    
+    while True:
+        try:
+            query = input("🔍 > ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nBye!")
+            break
+        
+        if not query:
+            continue
+        
+        # Commands
+        if query == ':q':
+            print("Bye!")
+            break
+        elif query == ':r':
+            idx, docs = build_index(root_dir, use_cache=False)
+            continue
+        elif query.startswith(':top '):
             try:
-                result = func(*args, **kwargs)
-            finally:
-                running = False
-                t1.join()
-                t2.join()
-
-            # -------- Final stats --------
-            mem_after = process.memory_info().rss / 1024**2
-            duration = round(time.time() - start_time, 2)
-
-            summary = (
-                f"[STEP] {name} | "
-                f"time={duration}s | "
-                f"mem_delta={round(mem_after - mem_before, 2)} MB | "
-                f"peak_mem={round(peak_rss, 2)} MB"
-            )
-
-            if print_stdout:
-                print(summary, flush=True)
-
-            return result
-
-        return wrapper
-    return decorator
+                top_k = int(query.split()[1])
+                print(f"Showing top {top_k} results")
+            except:
+                print("Usage: :top N")
+            continue
+        
+        # Search
+        start = time.time()
+        results = search(query, idx, docs, top_k=top_k)
+        elapsed = (time.time() - start) * 1000
+        
+        print(f"⏱️  Search completed in {elapsed:.1f}ms")
+        print_results(results, query)
 
 
-Refactor this code with these requirements (don't change logic):
-1. Remove hardcoded paths, use config/env variables
-2. Add logging after each meaningful step
-3. Add docstrings to all functions
-4. Replace loops/apply with vectorized operations
-5. Add del for large intermediate objects
-6. Replace complex filtering with .query()
-7. Add type hints
-8. Add error handling with try-except
-9. Follow PEP 8 standards
+# ============== CLI ENTRY POINT ==============
 
-Maintain exact same functionality and output.
+if __name__ == '__main__':
+    import sys
+    
+    args = sys.argv[1:]
+    
+    if not args:
+        # Interactive mode in current directory
+        interactive_mode('.')
+    
+    elif args[0] in ['-h', '--help']:
+        print("""
+Fast Code Search Engine
 
+Usage:
+    python code_search.py                    # Interactive mode (current dir)
+    python code_search.py <directory>        # Interactive mode (specified dir)
+    python code_search.py -s "query"         # Quick search current dir
+    python code_search.py -s "query" <dir>   # Quick search specified dir
+    python code_search.py --rebuild          # Rebuild index
 
-1. Code Style & Formatting
-Use Black for formatting (line length: 88 characters)
-
-Run black . before committing
-Configure pre-commit hooks to enforce automatically
-
-Follow PEP 8 with these key points:
-
-Use 4 spaces for indentation (never tabs)
-Two blank lines between top-level functions/classes
-One blank line between methods
-Use snake_case for functions and variables, PascalCase for classes
-
-
-project/
-├── data/
-│   ├── raw/
-│   └── processed/
-├── notebooks/
-│   ├── 01_exploratory_analysis.ipynb
-│   └── 02_model_development.ipynb
-├── src/
-│   ├── __init__.py
-│   ├── data/
-│   │   ├── __init__.py
-│   │   └── preprocessing.py
-│   ├── features/
-│   │   ├── __init__.py
-│   │   └── engineering.py
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── train.py
-│   └── utils/
-│       ├── __init__.py
-│       └── metrics.py
-├── tests/
-├── requirements.txt
-└── README.md
+Examples:
+    python code_search.py -s "pandas read_csv"
+    python code_search.py -s "neural network" ./projects
+    python code_search.py ~/my_notebooks
+        """)
+    
+    elif args[0] == '-s' and len(args) >= 2:
+        query = args[1]
+        root = args[2] if len(args) > 2 else '.'
+        quick_search(query, root)
+    
+    elif args[0] == '--rebuild':
+        root = args[1] if len(args) > 1 else '.'
+        build_index(root, use_cache=False)
+    
+    else:
+        # Treat as directory path
+        interactive_mode(args[0])
 
 
+# === In Jupyter Notebook or Python Script ===
+
+# Import and use
+from code_search import quick_search, build_index, search
+
+# Quick search in current directory
+quick_search("pandas dataframe")
+
+# Search in specific directory
+quick_search("neural network model", root_dir="./projects")
+
+# More control
+idx, docs = build_index("./my_notebooks")
+results = search("matplotlib plot", idx, docs, top_k=5)
+for doc, score in results:
+    print(f"{score:.2f} - {doc['filepath']}")
+
+ortrrrrrr
 
 
-Vectorization over loops:
-Efficient pandas operations:
+"""
+Minimal Code Search - Single Function
+Just copy-paste and use!
+"""
 
-Use .query() for complex filtering
-Use .apply() only when necessary (vectorized operations are faster)
-Consider dask or polars for large datasets
+import os, re, json
+from pathlib import Path
+from collections import defaultdict
 
-Memory management:
+def code_search(query, root_dir='.', top_k=10):
+    """
+    Search through .py, .ipynb, .txt files
+    Returns: list of (filepath, location, snippet, score)
+    """
+    query_tokens = set(re.findall(r'[a-z_][a-z0-9_]+', query.lower()))
+    results = []
+    
+    for dirpath, dirs, files in os.walk(root_dir):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'__pycache__', 'venv'}]
+        
+        for fname in files:
+            fpath = os.path.join(dirpath, fname)
+            ext = Path(fname).suffix.lower()
+            
+            if ext not in {'.py', '.ipynb', '.txt'}:
+                continue
+            
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                
+                # Handle notebooks
+                if ext == '.ipynb':
+                    nb = json.loads(content)
+                    for i, cell in enumerate(nb.get('cells', [])):
+                        src = ''.join(cell.get('source', []))
+                        score = len(query_tokens & set(re.findall(r'[a-z_][a-z0-9_]+', src.lower())))
+                        if query.lower() in src.lower():
+                            score += 5
+                        if score > 0:
+                            snippet = src[:200].replace('\n', ' ')
+                            results.append((fpath, f"Cell {i+1}", snippet, score))
+                else:
+                    # .py or .txt
+                    lines = content.split('\n')
+                    for i, line in enumerate(lines):
+                        score = len(query_tokens & set(re.findall(r'[a-z_][a-z0-9_]+', line.lower())))
+                        if query.lower() in line.lower():
+                            score += 5
+                        if score > 0:
+                            ctx = '\n'.join(lines[max(0,i-1):i+2])
+                            results.append((fpath, f"Line {i+1}", ctx[:200], score))
+            except:
+                continue
+    
+    # Sort by score, deduplicate nearby results
+    results.sort(key=lambda x: -x[3])
+    
+    # Print results
+    seen_files = defaultdict(int)
+    printed = 0
+    
+    print(f"\n🔍 Results for '{query}':\n")
+    for fpath, loc, snippet, score in results:
+        if seen_files[fpath] >= 2:  # Max 2 results per file
+            continue
+        seen_files[fpath] += 1
+        
+        print(f"📁 {fpath} [{loc}] (score: {score})")
+        print(f"   {snippet[:150]}...")
+        print()
+        
+        printed += 1
+        if printed >= top_k:
+            break
+    
+    return results[:top_k]
 
-Use appropriate dtypes (e.g., int32 instead of int64 when possible)
-Delete large intermediate objects: del large_df
-Use chunking for very large files
 
-12. Code Review Checklist
-Before submitting code for review:
+# === USAGE ===
+if __name__ == '__main__':
+    import sys
+    query = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else input("Search: ")
+    code_search(query)
 
- Code follows Black formatting
- All functions have docstrings
- Added unit tests for new functionality
- Logging used instead of print statements
- No hardcoded paths or credentials
+
+
