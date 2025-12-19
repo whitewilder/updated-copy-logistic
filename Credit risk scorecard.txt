@@ -1,621 +1,2373 @@
-#!/usr/bin/env python3
+
+
+# PD Model Visualizer - Complete Solution
+
+I'll create a comprehensive, modular PD Model Visualizer with all the features you requested. This solution uses Streamlit for the frontend and is designed to be easily expandable.
+
+## Project Structure
+
+```
+pd_model_visualizer/
+│
+├── app.py                    # Main Streamlit application
+├── config.py                 # Configuration and default parameters
+├── modules/
+│   ├── __init__.py
+│   ├── base_module.py        # Base class for all modules
+│   ├── financial_module.py   # Financial module
+│   ├── qualitative_module.py # Qualitative module
+│   ├── market_module.py      # Market module
+│   ├── macro_module.py       # Macro module
+│   └── score_engine.py       # Score calculation engine
+├── utils/
+│   ├── __init__.py
+│   ├── data_loader.py        # CSV/Excel data loading
+│   ├── calibration.py        # Calibration functions
+│   └── visualization.py      # Visualization utilities
+├── sample_data/
+│   └── sample_coefficients.csv
+└── requirements.txt
+```
+
+## Complete Code Implementation
+
+### 1. requirements.txt
+
+```text
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+openpyxl>=3.1.0
+xlrd>=2.0.0
+scipy>=1.11.0
+streamlit-sortables>=0.2.0
+```
+
+### 2. config.py
+
+```python
 """
-Fast Lightweight Code Search Engine
-Searches .py, .ipynb, .txt files
-Functional approach - minimal OOP
+Configuration file for PD Model Visualizer
+Contains default parameters, module definitions, and settings
 """
 
-import os
-import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Any
 import json
-import pickle
-import hashlib
-from pathlib import Path
-from collections import defaultdict
-from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor
-import time
 
-# ============== CONFIGURATION ==============
-INDEX_CACHE_FILE = ".search_index.pkl"
-EXTENSIONS = {'.py', '.ipynb', '.txt'}
-SKIP_DIRS = {'__pycache__', '.git', 'venv', 'env', '.ipynb_checkpoints', 'node_modules', '.conda'}
-
-
-# ============== FILE EXTRACTION FUNCTIONS ==============
-
-def read_file_safe(filepath):
-    """Safely read file content"""
-    encodings = ['utf-8', 'latin-1', 'cp1252']
-    for enc in encodings:
-        try:
-            with open(filepath, 'r', encoding=enc) as f:
-                return f.read()
-        except:
-            continue
-    return ""
+@dataclass
+class ModuleConfig:
+    """Configuration for a single module"""
+    name: str
+    variables: List[str]
+    coefficients: Dict[str, float]
+    intercept: float = 0.0
+    transformation: str = "linear"  # linear, log, sqrt, square
+    
+    def to_dict(self) -> Dict:
+        return {
+            "name": self.name,
+            "variables": self.variables,
+            "coefficients": self.coefficients,
+            "intercept": self.intercept,
+            "transformation": self.transformation
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'ModuleConfig':
+        return cls(**data)
 
 
-def extract_ipynb(filepath):
-    """Extract cells from Jupyter notebook"""
-    try:
-        content = read_file_safe(filepath)
-        notebook = json.loads(content)
-        cells = notebook.get('cells', [])
+@dataclass
+class CalibrationConfig:
+    """Post-calibration parameters"""
+    alpha: float = 0.0          # Intercept adjustment
+    beta: float = 1.0           # Slope adjustment
+    central_tendency: float = 0.02  # Long-run average PD
+    cycle_adjustment: float = 0.0   # PIT vs TTC adjustment
+    
+    # Second order fit parameters
+    gamma: float = 0.0          # Quadratic term coefficient
+    
+    # Margin of Conservatism (MoC)
+    moc_data_quality: float = 0.0
+    moc_model_uncertainty: float = 0.0
+    moc_economic_uncertainty: float = 0.0
+    
+    @property
+    def total_moc(self) -> float:
+        return (self.moc_data_quality + 
+                self.moc_model_uncertainty + 
+                self.moc_economic_uncertainty)
+
+
+@dataclass
+class DefaultModules:
+    """Default module configurations"""
+    
+    @staticmethod
+    def get_financial_module() -> ModuleConfig:
+        return ModuleConfig(
+            name="Financial",
+            variables=[
+                "leverage_ratio",
+                "current_ratio",
+                "debt_service_coverage",
+                "profit_margin",
+                "asset_turnover",
+                "interest_coverage"
+            ],
+            coefficients={
+                "leverage_ratio": 0.35,
+                "current_ratio": -0.25,
+                "debt_service_coverage": -0.30,
+                "profit_margin": -0.20,
+                "asset_turnover": -0.15,
+                "interest_coverage": -0.28
+            },
+            intercept=-1.5,
+            transformation="linear"
+        )
+    
+    @staticmethod
+    def get_qualitative_module() -> ModuleConfig:
+        return ModuleConfig(
+            name="Qualitative",
+            variables=[
+                "management_quality",
+                "industry_position",
+                "business_stability",
+                "governance_score"
+            ],
+            coefficients={
+                "management_quality": -0.15,
+                "industry_position": -0.12,
+                "business_stability": -0.18,
+                "governance_score": -0.10
+            },
+            intercept=0.0,
+            transformation="linear"
+        )
+    
+    @staticmethod
+    def get_market_module() -> ModuleConfig:
+        return ModuleConfig(
+            name="Market",
+            variables=[
+                "stock_volatility",
+                "credit_spread",
+                "market_cap_change",
+                "beta"
+            ],
+            coefficients={
+                "stock_volatility": 0.22,
+                "credit_spread": 0.35,
+                "market_cap_change": -0.18,
+                "beta": 0.12
+            },
+            intercept=0.0,
+            transformation="linear"
+        )
+    
+    @staticmethod
+    def get_macro_module() -> ModuleConfig:
+        return ModuleConfig(
+            name="Macro",
+            variables=[
+                "gdp_growth",
+                "unemployment_rate",
+                "inflation_rate",
+                "interest_rate_change"
+            ],
+            coefficients={
+                "gdp_growth": -0.15,
+                "unemployment_rate": 0.20,
+                "inflation_rate": 0.10,
+                "interest_rate_change": 0.08
+            },
+            intercept=0.0,
+            transformation="linear"
+        )
+
+
+# Application settings
+APP_CONFIG = {
+    "title": "PD Model Visualizer",
+    "page_icon": "📊",
+    "layout": "wide",
+    "pd_floor": 0.0003,    # 3 bps
+    "pd_cap": 1.0,         # 100%
+    "decimal_places": 6
+}
+```
+
+### 3. modules/base_module.py
+
+```python
+"""
+Base Module class - Parent class for all modules
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple
+import numpy as np
+import pandas as pd
+
+class BaseModule(ABC):
+    """Abstract base class for all model modules"""
+    
+    def __init__(
+        self,
+        name: str,
+        variables: List[str],
+        coefficients: Dict[str, float],
+        intercept: float = 0.0,
+        transformation: str = "linear"
+    ):
+        self.name = name
+        self.variables = variables
+        self.coefficients = coefficients
+        self.intercept = intercept
+        self.transformation = transformation
+        self._validate()
+    
+    def _validate(self):
+        """Validate module configuration"""
+        for var in self.variables:
+            if var not in self.coefficients:
+                raise ValueError(f"Missing coefficient for variable: {var}")
+    
+    def _apply_transformation(self, value: float, transform: str) -> float:
+        """Apply transformation to input value"""
+        if transform == "linear":
+            return value
+        elif transform == "log":
+            return np.log1p(max(value, 0))  # log(1+x) for safety
+        elif transform == "sqrt":
+            return np.sqrt(max(value, 0))
+        elif transform == "square":
+            return value ** 2
+        else:
+            return value
+    
+    def calculate_score(
+        self, 
+        input_values: Dict[str, float],
+        apply_intercept: bool = True
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Calculate module score from input values
         
-        blocks = []
-        for idx, cell in enumerate(cells):
-            source = cell.get('source', [])
-            text = ''.join(source) if isinstance(source, list) else source
-            
-            if text.strip():
-                blocks.append({
-                    'type': 'cell',
-                    'cell_num': idx + 1,
-                    'cell_type': cell.get('cell_type', 'code'),
-                    'content': text
-                })
-        return blocks
-    except Exception as e:
-        return []
+        Returns:
+            Tuple of (total_score, contribution_breakdown)
+        """
+        contributions = {}
+        total = 0.0
+        
+        for var in self.variables:
+            if var in input_values:
+                raw_value = input_values[var]
+                transformed_value = self._apply_transformation(
+                    raw_value, self.transformation
+                )
+                contribution = transformed_value * self.coefficients[var]
+                contributions[var] = contribution
+                total += contribution
+        
+        if apply_intercept:
+            total += self.intercept
+            contributions["_intercept"] = self.intercept
+        
+        return total, contributions
+    
+    def calculate_batch(
+        self, 
+        df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Calculate scores for batch of records"""
+        scores = []
+        for _, row in df.iterrows():
+            input_values = row.to_dict()
+            score, _ = self.calculate_score(input_values)
+            scores.append(score)
+        return pd.Series(scores, index=df.index)
+    
+    def get_variable_impact(
+        self,
+        base_values: Dict[str, float],
+        variable: str,
+        range_pct: float = 0.5,
+        steps: int = 50
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Calculate impact of changing one variable
+        
+        Returns:
+            Tuple of (variable_values, corresponding_scores)
+        """
+        if variable not in self.variables:
+            raise ValueError(f"Variable {variable} not in module")
+        
+        base_value = base_values.get(variable, 0)
+        min_val = base_value * (1 - range_pct)
+        max_val = base_value * (1 + range_pct)
+        
+        var_range = np.linspace(min_val, max_val, steps)
+        scores = []
+        
+        for val in var_range:
+            test_values = base_values.copy()
+            test_values[variable] = val
+            score, _ = self.calculate_score(test_values)
+            scores.append(score)
+        
+        return var_range, np.array(scores)
+    
+    def update_coefficient(self, variable: str, new_value: float):
+        """Update coefficient for a variable"""
+        if variable in self.coefficients:
+            self.coefficients[variable] = new_value
+    
+    def update_intercept(self, new_value: float):
+        """Update intercept"""
+        self.intercept = new_value
+    
+    def add_variable(self, variable: str, coefficient: float):
+        """Add new variable to module"""
+        self.variables.append(variable)
+        self.coefficients[variable] = coefficient
+    
+    def remove_variable(self, variable: str):
+        """Remove variable from module"""
+        if variable in self.variables:
+            self.variables.remove(variable)
+            del self.coefficients[variable]
+    
+    def to_dict(self) -> Dict:
+        """Export module configuration as dictionary"""
+        return {
+            "name": self.name,
+            "variables": self.variables,
+            "coefficients": self.coefficients,
+            "intercept": self.intercept,
+            "transformation": self.transformation
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'BaseModule':
+        """Create module from dictionary"""
+        return cls(
+            name=data["name"],
+            variables=data["variables"],
+            coefficients=data["coefficients"],
+            intercept=data.get("intercept", 0.0),
+            transformation=data.get("transformation", "linear")
+        )
+```
+
+### 4. modules/financial_module.py
+
+```python
+"""
+Financial Module - Handles financial ratio inputs
+"""
+
+from typing import Dict, List, Optional
+from .base_module import BaseModule
+
+class FinancialModule(BaseModule):
+    """Module for financial variables"""
+    
+    def __init__(
+        self,
+        variables: Optional[List[str]] = None,
+        coefficients: Optional[Dict[str, float]] = None,
+        intercept: float = -1.5,
+        transformation: str = "linear"
+    ):
+        # Default financial variables
+        default_vars = [
+            "leverage_ratio",
+            "current_ratio", 
+            "debt_service_coverage",
+            "profit_margin",
+            "asset_turnover",
+            "interest_coverage"
+        ]
+        
+        default_coeffs = {
+            "leverage_ratio": 0.35,
+            "current_ratio": -0.25,
+            "debt_service_coverage": -0.30,
+            "profit_margin": -0.20,
+            "asset_turnover": -0.15,
+            "interest_coverage": -0.28
+        }
+        
+        super().__init__(
+            name="Financial",
+            variables=variables or default_vars,
+            coefficients=coefficients or default_coeffs,
+            intercept=intercept,
+            transformation=transformation
+        )
+    
+    def get_default_values(self) -> Dict[str, float]:
+        """Return typical default values for financial variables"""
+        return {
+            "leverage_ratio": 2.5,
+            "current_ratio": 1.5,
+            "debt_service_coverage": 1.8,
+            "profit_margin": 0.08,
+            "asset_turnover": 0.75,
+            "interest_coverage": 3.0
+        }
+```
+
+### 5. modules/qualitative_module.py
+
+```python
+"""
+Qualitative Module - Handles qualitative/subjective inputs
+"""
+
+from typing import Dict, List, Optional
+from .base_module import BaseModule
+
+class QualitativeModule(BaseModule):
+    """Module for qualitative variables"""
+    
+    def __init__(
+        self,
+        variables: Optional[List[str]] = None,
+        coefficients: Optional[Dict[str, float]] = None,
+        intercept: float = 0.0,
+        transformation: str = "linear"
+    ):
+        default_vars = [
+            "management_quality",
+            "industry_position",
+            "business_stability",
+            "governance_score"
+        ]
+        
+        default_coeffs = {
+            "management_quality": -0.15,
+            "industry_position": -0.12,
+            "business_stability": -0.18,
+            "governance_score": -0.10
+        }
+        
+        super().__init__(
+            name="Qualitative",
+            variables=variables or default_vars,
+            coefficients=coefficients or default_coeffs,
+            intercept=intercept,
+            transformation=transformation
+        )
+    
+    def get_default_values(self) -> Dict[str, float]:
+        """Return typical default values (1-5 scale)"""
+        return {
+            "management_quality": 3.0,
+            "industry_position": 3.0,
+            "business_stability": 3.0,
+            "governance_score": 3.0
+        }
+```
+
+### 6. modules/market_module.py
+
+```python
+"""
+Market Module - Handles market-based inputs
+"""
+
+from typing import Dict, List, Optional
+from .base_module import BaseModule
+
+class MarketModule(BaseModule):
+    """Module for market variables"""
+    
+    def __init__(
+        self,
+        variables: Optional[List[str]] = None,
+        coefficients: Optional[Dict[str, float]] = None,
+        intercept: float = 0.0,
+        transformation: str = "linear"
+    ):
+        default_vars = [
+            "stock_volatility",
+            "credit_spread",
+            "market_cap_change",
+            "beta"
+        ]
+        
+        default_coeffs = {
+            "stock_volatility": 0.22,
+            "credit_spread": 0.35,
+            "market_cap_change": -0.18,
+            "beta": 0.12
+        }
+        
+        super().__init__(
+            name="Market",
+            variables=variables or default_vars,
+            coefficients=coefficients or default_coeffs,
+            intercept=intercept,
+            transformation=transformation
+        )
+    
+    def get_default_values(self) -> Dict[str, float]:
+        """Return typical default values"""
+        return {
+            "stock_volatility": 0.25,
+            "credit_spread": 0.02,
+            "market_cap_change": 0.05,
+            "beta": 1.0
+        }
+```
+
+### 7. modules/macro_module.py
+
+```python
+"""
+Macro Module - Handles macroeconomic inputs
+"""
+
+from typing import Dict, List, Optional
+from .base_module import BaseModule
+
+class MacroModule(BaseModule):
+    """Module for macroeconomic variables"""
+    
+    def __init__(
+        self,
+        variables: Optional[List[str]] = None,
+        coefficients: Optional[Dict[str, float]] = None,
+        intercept: float = 0.0,
+        transformation: str = "linear"
+    ):
+        default_vars = [
+            "gdp_growth",
+            "unemployment_rate",
+            "inflation_rate",
+            "interest_rate_change"
+        ]
+        
+        default_coeffs = {
+            "gdp_growth": -0.15,
+            "unemployment_rate": 0.20,
+            "inflation_rate": 0.10,
+            "interest_rate_change": 0.08
+        }
+        
+        super().__init__(
+            name="Macro",
+            variables=variables or default_vars,
+            coefficients=coefficients or default_coeffs,
+            intercept=intercept,
+            transformation=transformation
+        )
+    
+    def get_default_values(self) -> Dict[str, float]:
+        """Return typical default values"""
+        return {
+            "gdp_growth": 0.025,
+            "unemployment_rate": 0.045,
+            "inflation_rate": 0.02,
+            "interest_rate_change": 0.0
+        }
+```
+
+### 8. modules/score_engine.py
+
+```python
+"""
+Score Engine - Combines all modules and calculates final PD
+Implements: Fin + Market + Macro = Score1
+           Score1 + Qual = Score2
+           Calibration(Score2) = Score3
+           Score3 + MoC = Final Score
+           PD = Logistic(Final Score) with 2nd order
+"""
+
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+
+from .base_module import BaseModule
+from .financial_module import FinancialModule
+from .qualitative_module import QualitativeModule
+from .market_module import MarketModule
+from .macro_module import MacroModule
 
 
-def extract_py(filepath):
-    """Extract code blocks from Python file"""
-    content = read_file_safe(filepath)
-    if not content:
-        return []
+@dataclass
+class CalibrationParams:
+    """Post-calibration parameters"""
+    alpha: float = 0.0          # Intercept adjustment
+    beta: float = 1.0           # Slope adjustment
+    gamma: float = 0.0          # Quadratic coefficient for 2nd order
+    central_tendency: float = 0.02
+    cycle_adjustment: float = 0.0
     
-    blocks = []
-    lines = content.split('\n')
+    # Margin of Conservatism
+    moc_data_quality: float = 0.0
+    moc_model_uncertainty: float = 0.0
+    moc_economic_uncertainty: float = 0.0
     
-    # Split by function/class definitions
-    current_block = []
-    block_start = 1
+    @property
+    def total_moc(self) -> float:
+        return (self.moc_data_quality + 
+                self.moc_model_uncertainty + 
+                self.moc_economic_uncertainty)
+
+
+class ScoreEngine:
+    """
+    Main engine that combines all modules and calculates PD
     
-    for i, line in enumerate(lines, 1):
-        # New block on def/class/major comment
-        if re.match(r'^(def |class |#\s*={3,}|#\s*-{3,})', line) and current_block:
-            blocks.append({
-                'type': 'block',
-                'line_start': block_start,
-                'line_end': i - 1,
-                'content': '\n'.join(current_block)
+    Architecture:
+    - Score1 = Financial + Market + Macro
+    - Score2 = Score1 + Qualitative  
+    - Score3 = Calibration(Score2) = alpha + beta*Score2 + gamma*Score2^2
+    - Final Score = Score3 + Total MoC + Cycle Adjustment
+    - PD = 1 / (1 + exp(-Final Score))
+    """
+    
+    def __init__(
+        self,
+        financial_module: Optional[FinancialModule] = None,
+        qualitative_module: Optional[QualitativeModule] = None,
+        market_module: Optional[MarketModule] = None,
+        macro_module: Optional[MacroModule] = None,
+        calibration: Optional[CalibrationParams] = None,
+        pd_floor: float = 0.0003,
+        pd_cap: float = 1.0
+    ):
+        self.financial = financial_module or FinancialModule()
+        self.qualitative = qualitative_module or QualitativeModule()
+        self.market = market_module or MarketModule()
+        self.macro = macro_module or MacroModule()
+        self.calibration = calibration or CalibrationParams()
+        self.pd_floor = pd_floor
+        self.pd_cap = pd_cap
+        
+        # Module weights (can be adjusted)
+        self.weights = {
+            "financial": 1.0,
+            "market": 1.0,
+            "macro": 1.0,
+            "qualitative": 1.0
+        }
+    
+    def calculate_score1(
+        self, 
+        input_values: Dict[str, float]
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Calculate Score1 = Financial + Market + Macro
+        """
+        fin_score, fin_contrib = self.financial.calculate_score(input_values)
+        market_score, market_contrib = self.market.calculate_score(input_values)
+        macro_score, macro_contrib = self.macro.calculate_score(input_values)
+        
+        score1 = (
+            self.weights["financial"] * fin_score +
+            self.weights["market"] * market_score +
+            self.weights["macro"] * macro_score
+        )
+        
+        breakdown = {
+            "financial_score": fin_score,
+            "market_score": market_score,
+            "macro_score": macro_score,
+            "financial_contrib": fin_contrib,
+            "market_contrib": market_contrib,
+            "macro_contrib": macro_contrib
+        }
+        
+        return score1, breakdown
+    
+    def calculate_score2(
+        self, 
+        input_values: Dict[str, float]
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Calculate Score2 = Score1 + Qualitative
+        """
+        score1, score1_breakdown = self.calculate_score1(input_values)
+        qual_score, qual_contrib = self.qualitative.calculate_score(input_values)
+        
+        score2 = score1 + self.weights["qualitative"] * qual_score
+        
+        breakdown = {
+            **score1_breakdown,
+            "score1": score1,
+            "qualitative_score": qual_score,
+            "qualitative_contrib": qual_contrib
+        }
+        
+        return score2, breakdown
+    
+    def calculate_score3(
+        self, 
+        score2: float
+    ) -> float:
+        """
+        Apply calibration to Score2
+        Score3 = alpha + beta * Score2 + gamma * Score2^2 (2nd order fit)
+        """
+        score3 = (
+            self.calibration.alpha +
+            self.calibration.beta * score2 +
+            self.calibration.gamma * (score2 ** 2)
+        )
+        return score3
+    
+    def calculate_final_score(
+        self, 
+        score3: float
+    ) -> float:
+        """
+        Calculate Final Score = Score3 + MoC + Cycle Adjustment
+        """
+        final_score = (
+            score3 + 
+            self.calibration.total_moc +
+            self.calibration.cycle_adjustment
+        )
+        return final_score
+    
+    def calculate_pd(
+        self, 
+        final_score: float
+    ) -> float:
+        """
+        Calculate PD using logistic function
+        PD = 1 / (1 + exp(-final_score))
+        Apply floor and cap
+        """
+        pd = 1.0 / (1.0 + np.exp(-final_score))
+        pd = max(self.pd_floor, min(self.pd_cap, pd))
+        return pd
+    
+    def calculate_full_pipeline(
+        self, 
+        input_values: Dict[str, float]
+    ) -> Dict[str, any]:
+        """
+        Run full calculation pipeline and return all intermediate results
+        """
+        # Score1: Fin + Market + Macro
+        score1, score1_breakdown = self.calculate_score1(input_values)
+        
+        # Score2: Score1 + Qualitative
+        score2, score2_breakdown = self.calculate_score2(input_values)
+        
+        # Score3: Calibrated
+        score3 = self.calculate_score3(score2)
+        
+        # Final Score: + MoC
+        final_score = self.calculate_final_score(score3)
+        
+        # PD
+        pd = self.calculate_pd(final_score)
+        
+        return {
+            "input_values": input_values,
+            "score1": score1,
+            "score1_breakdown": score1_breakdown,
+            "score2": score2,
+            "score2_breakdown": score2_breakdown,
+            "score3": score3,
+            "final_score": final_score,
+            "pd": pd,
+            "pd_bps": pd * 10000,
+            "calibration": {
+                "alpha": self.calibration.alpha,
+                "beta": self.calibration.beta,
+                "gamma": self.calibration.gamma,
+                "total_moc": self.calibration.total_moc,
+                "cycle_adjustment": self.calibration.cycle_adjustment
+            }
+        }
+    
+    def sensitivity_analysis(
+        self,
+        base_values: Dict[str, float],
+        variable: str,
+        var_range: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Analyze how PD changes when one variable changes
+        """
+        results = []
+        
+        for val in var_range:
+            test_values = base_values.copy()
+            test_values[variable] = val
+            result = self.calculate_full_pipeline(test_values)
+            results.append({
+                "variable_value": val,
+                "score1": result["score1"],
+                "score2": result["score2"],
+                "score3": result["score3"],
+                "final_score": result["final_score"],
+                "pd": result["pd"],
+                "pd_bps": result["pd_bps"]
             })
-            current_block = []
-            block_start = i
-        current_block.append(line)
-    
-    # Last block
-    if current_block:
-        blocks.append({
-            'type': 'block',
-            'line_start': block_start,
-            'line_end': len(lines),
-            'content': '\n'.join(current_block)
-        })
-    
-    # If no blocks found, treat whole file as one block
-    if not blocks:
-        blocks = [{'type': 'file', 'line_start': 1, 'content': content}]
-    
-    return blocks
-
-
-def extract_txt(filepath):
-    """Extract content from text file"""
-    content = read_file_safe(filepath)
-    if content.strip():
-        return [{'type': 'file', 'content': content}]
-    return []
-
-
-def extract_content(filepath):
-    """Route to correct extractor based on extension"""
-    ext = Path(filepath).suffix.lower()
-    extractors = {
-        '.ipynb': extract_ipynb,
-        '.py': extract_py,
-        '.txt': extract_txt
-    }
-    extractor = extractors.get(ext, extract_txt)
-    return extractor(filepath)
-
-
-# ============== INDEXING FUNCTIONS ==============
-
-def scan_directory(root_dir):
-    """Fast directory scanning"""
-    files = []
-    root_path = Path(root_dir).resolve()
-    
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        # Filter out skip directories
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith('.')]
         
-        for fname in filenames:
-            if Path(fname).suffix.lower() in EXTENSIONS:
-                files.append(os.path.join(dirpath, fname))
+        return pd.DataFrame(results)
     
-    return files
-
-
-def tokenize(text):
-    """Fast tokenization - extract meaningful tokens"""
-    text = text.lower()
-    # Extract words, preserving underscores (for function names)
-    tokens = re.findall(r'[a-z_][a-z0-9_]*', text)
-    # Filter very short tokens
-    return [t for t in tokens if len(t) > 1]
-
-
-def get_file_hash(filepath):
-    """Quick hash for cache validation"""
-    try:
-        stat = os.stat(filepath)
-        return f"{filepath}:{stat.st_mtime}:{stat.st_size}"
-    except:
-        return None
-
-
-def process_file(filepath):
-    """Process single file - returns list of documents"""
-    docs = []
-    blocks = extract_content(filepath)
-    
-    for block in blocks:
-        content = block.get('content', '')
-        if len(content.strip()) < 5:  # Skip near-empty blocks
-            continue
+    def batch_score(
+        self, 
+        df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Score a batch of records"""
+        results = []
         
-        tokens = tokenize(content)
-        if not tokens:
-            continue
+        for idx, row in df.iterrows():
+            input_values = row.to_dict()
+            result = self.calculate_full_pipeline(input_values)
+            results.append({
+                "id": idx,
+                "score1": result["score1"],
+                "score2": result["score2"],
+                "score3": result["score3"],
+                "final_score": result["final_score"],
+                "pd": result["pd"]
+            })
         
-        # Calculate token frequencies
-        token_freq = defaultdict(int)
-        for t in tokens:
-            token_freq[t] += 1
-        
-        docs.append({
-            'filepath': filepath,
-            'block': block,
-            'content': content,
-            'tokens': dict(token_freq),
-            'length': len(tokens)
-        })
+        return pd.DataFrame(results)
     
-    return docs
+    def update_calibration(
+        self,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
+        gamma: Optional[float] = None,
+        moc_data: Optional[float] = None,
+        moc_model: Optional[float] = None,
+        moc_economic: Optional[float] = None,
+        cycle_adj: Optional[float] = None
+    ):
+        """Update calibration parameters"""
+        if alpha is not None:
+            self.calibration.alpha = alpha
+        if beta is not None:
+            self.calibration.beta = beta
+        if gamma is not None:
+            self.calibration.gamma = gamma
+        if moc_data is not None:
+            self.calibration.moc_data_quality = moc_data
+        if moc_model is not None:
+            self.calibration.moc_model_uncertainty = moc_model
+        if moc_economic is not None:
+            self.calibration.moc_economic_uncertainty = moc_economic
+        if cycle_adj is not None:
+            self.calibration.cycle_adjustment = cycle_adj
+    
+    def get_all_variables(self) -> Dict[str, List[str]]:
+        """Get all variables from all modules"""
+        return {
+            "financial": self.financial.variables,
+            "qualitative": self.qualitative.variables,
+            "market": self.market.variables,
+            "macro": self.macro.variables
+        }
+    
+    def get_all_coefficients(self) -> Dict[str, Dict[str, float]]:
+        """Get all coefficients from all modules"""
+        return {
+            "financial": self.financial.coefficients,
+            "qualitative": self.qualitative.coefficients,
+            "market": self.market.coefficients,
+            "macro": self.macro.coefficients
+        }
+    
+    def get_default_values(self) -> Dict[str, float]:
+        """Get default values for all variables"""
+        defaults = {}
+        defaults.update(self.financial.get_default_values())
+        defaults.update(self.qualitative.get_default_values())
+        defaults.update(self.market.get_default_values())
+        defaults.update(self.macro.get_default_values())
+        return defaults
+    
+    def export_config(self) -> Dict:
+        """Export full configuration"""
+        return {
+            "financial": self.financial.to_dict(),
+            "qualitative": self.qualitative.to_dict(),
+            "market": self.market.to_dict(),
+            "macro": self.macro.to_dict(),
+            "calibration": {
+                "alpha": self.calibration.alpha,
+                "beta": self.calibration.beta,
+                "gamma": self.calibration.gamma,
+                "central_tendency": self.calibration.central_tendency,
+                "cycle_adjustment": self.calibration.cycle_adjustment,
+                "moc_data_quality": self.calibration.moc_data_quality,
+                "moc_model_uncertainty": self.calibration.moc_model_uncertainty,
+                "moc_economic_uncertainty": self.calibration.moc_economic_uncertainty
+            },
+            "weights": self.weights,
+            "pd_floor": self.pd_floor,
+            "pd_cap": self.pd_cap
+        }
+```
+
+### 9. modules/__init__.py
+
+```python
+"""
+Modules package initialization
+"""
+
+from .base_module import BaseModule
+from .financial_module import FinancialModule
+from .qualitative_module import QualitativeModule
+from .market_module import MarketModule
+from .macro_module import MacroModule
+from .score_engine import ScoreEngine, CalibrationParams
+
+__all__ = [
+    'BaseModule',
+    'FinancialModule',
+    'QualitativeModule', 
+    'MarketModule',
+    'MacroModule',
+    'ScoreEngine',
+    'CalibrationParams'
+]
+```
+
+### 10. utils/data_loader.py
+
+```python
+"""
+Data Loader - Handles CSV/Excel import for coefficients and data
+"""
+
+import pandas as pd
+import numpy as np
+from typing import Dict, Tuple, Optional
+import io
 
 
-def build_index(root_dir, use_cache=True, verbose=True):
-    """Build inverted index with caching"""
-    root_dir = str(Path(root_dir).resolve())
-    cache_path = os.path.join(root_dir, INDEX_CACHE_FILE)
+def load_coefficients_from_csv(file_path_or_buffer) -> Dict[str, Dict[str, float]]:
+    """
+    Load coefficients from CSV file
     
-    # Try loading cache
-    if use_cache and os.path.exists(cache_path):
-        try:
-            with open(cache_path, 'rb') as f:
-                cache = pickle.load(f)
-            if verbose:
-                print(f"✓ Loaded cached index ({len(cache['docs'])} blocks)")
-            return cache['index'], cache['docs']
-        except:
-            pass
+    Expected format:
+    module,variable,coefficient
+    financial,leverage_ratio,0.35
+    financial,current_ratio,-0.25
+    ...
+    """
+    df = pd.read_csv(file_path_or_buffer)
     
-    if verbose:
-        print("Building index...", end=" ", flush=True)
+    coefficients = {}
+    for module in df['module'].unique():
+        module_df = df[df['module'] == module]
+        coefficients[module] = dict(
+            zip(module_df['variable'], module_df['coefficient'])
+        )
     
-    start = time.time()
-    files = scan_directory(root_dir)
-    
-    # Process files in parallel
-    all_docs = []
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        results = executor.map(process_file, files)
-        for doc_list in results:
-            all_docs.extend(doc_list)
-    
-    # Build inverted index
-    inverted_index = defaultdict(list)
-    for doc_id, doc in enumerate(all_docs):
-        doc['id'] = doc_id
-        for token, freq in doc['tokens'].items():
-            inverted_index[token].append((doc_id, freq))
-    
-    inverted_index = dict(inverted_index)
-    
-    # Save cache
-    try:
-        with open(cache_path, 'wb') as f:
-            pickle.dump({'index': inverted_index, 'docs': all_docs}, f)
-    except:
-        pass
-    
-    elapsed = time.time() - start
-    if verbose:
-        print(f"Done! {len(files)} files, {len(all_docs)} blocks in {elapsed:.2f}s")
-    
-    return inverted_index, all_docs
+    return coefficients
 
 
-# ============== SEARCH FUNCTIONS ==============
-
-def score_bm25(query_tokens, doc, inverted_index, total_docs, avg_doc_len, k1=1.5, b=0.75):
-    """BM25 scoring - fast and effective"""
-    score = 0.0
-    doc_len = doc['length']
-    doc_tokens = doc['tokens']
+def load_coefficients_from_excel(
+    file_path_or_buffer,
+    sheet_name: str = "coefficients"
+) -> Dict[str, Dict[str, float]]:
+    """
+    Load coefficients from Excel file
     
-    for qt in query_tokens:
-        if qt not in doc_tokens:
-            continue
-        
-        tf = doc_tokens[qt]
-        df = len(inverted_index.get(qt, []))
-        
-        # IDF
-        idf = max(0.1, (total_docs - df + 0.5) / (df + 0.5))
-        
-        # TF normalization
-        tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avg_doc_len))
-        
-        score += idf * tf_norm
+    Expected format same as CSV
+    """
+    df = pd.read_excel(file_path_or_buffer, sheet_name=sheet_name)
     
-    return score
+    coefficients = {}
+    for module in df['module'].unique():
+        module_df = df[df['module'] == module]
+        coefficients[module] = dict(
+            zip(module_df['variable'], module_df['coefficient'])
+        )
+    
+    return coefficients
 
 
-def fuzzy_match_score(query, content, threshold=0.6):
-    """Fast fuzzy matching for exact phrase search"""
-    query_lower = query.lower()
-    content_lower = content.lower()
+def load_calibration_from_csv(file_path_or_buffer) -> Dict[str, float]:
+    """
+    Load calibration parameters from CSV
     
-    # Exact substring match - high score
-    if query_lower in content_lower:
-        return 10.0
-    
-    # Check for partial matches
-    query_words = query_lower.split()
-    matches = sum(1 for w in query_words if w in content_lower)
-    
-    return matches * 2
+    Expected format:
+    parameter,value
+    alpha,0.0
+    beta,1.0
+    gamma,0.0
+    ...
+    """
+    df = pd.read_csv(file_path_or_buffer)
+    return dict(zip(df['parameter'], df['value']))
 
 
-def search(query, inverted_index, docs, top_k=10, fuzzy=True):
-    """Main search function"""
-    query_tokens = tokenize(query)
-    
-    if not query_tokens:
-        return []
-    
-    # Pre-compute stats
-    total_docs = len(docs)
-    avg_doc_len = sum(d['length'] for d in docs) / max(total_docs, 1)
-    
-    # Get candidate documents (docs that have at least one query token)
-    candidates = set()
-    for qt in query_tokens:
-        if qt in inverted_index:
-            for doc_id, _ in inverted_index[qt]:
-                candidates.add(doc_id)
-        
-        # Partial token matching
-        for idx_token in inverted_index:
-            if qt in idx_token or idx_token in qt:
-                for doc_id, _ in inverted_index[idx_token]:
-                    candidates.add(doc_id)
-    
-    # Score candidates
-    scored = []
-    for doc_id in candidates:
-        doc = docs[doc_id]
-        
-        # BM25 score
-        score = score_bm25(query_tokens, doc, inverted_index, total_docs, avg_doc_len)
-        
-        # Fuzzy/phrase match bonus
-        if fuzzy:
-            score += fuzzy_match_score(query, doc['content'])
-        
-        scored.append((doc, score))
-    
-    # Sort and return top results
-    scored.sort(key=lambda x: -x[1])
-    return scored[:top_k]
-
-
-# ============== DISPLAY FUNCTIONS ==============
-
-def get_context_snippet(content, query, max_lines=12):
-    """Extract relevant snippet with context"""
-    lines = content.split('\n')
-    query_tokens = set(tokenize(query))
-    
-    # Find matching lines
-    match_indices = []
-    for i, line in enumerate(lines):
-        line_tokens = set(tokenize(line))
-        if query_tokens & line_tokens:
-            match_indices.append(i)
-    
-    if not match_indices:
-        # No direct match, return beginning
-        return '\n'.join(lines[:max_lines])
-    
-    # Get context around first few matches
-    shown_lines = set()
-    for idx in match_indices[:3]:
-        start = max(0, idx - 2)
-        end = min(len(lines), idx + 3)
-        shown_lines.update(range(start, end))
-    
-    shown_lines = sorted(shown_lines)[:max_lines]
-    
-    result = []
-    prev = -2
-    for i in shown_lines:
-        if i - prev > 1:
-            result.append("    ...")
-        # Highlight matching lines
-        prefix = " >> " if i in match_indices else "    "
-        result.append(f"{i+1:4d}{prefix}{lines[i]}")
-        prev = i
-    
-    return '\n'.join(result)
-
-
-def format_result(doc, score, query, rank):
-    """Format a single result for display"""
-    filepath = doc['filepath']
-    block = doc['block']
-    content = doc['content']
-    
-    # Location info
-    ext = Path(filepath).suffix.lower()
-    location = filepath
-    
-    if ext == '.ipynb':
-        cell_num = block.get('cell_num', '?')
-        cell_type = block.get('cell_type', 'code')
-        location += f" [Cell {cell_num}, {cell_type}]"
-    elif ext == '.py':
-        line_start = block.get('line_start', 1)
-        line_end = block.get('line_end', line_start)
-        location += f" [Lines {line_start}-{line_end}]"
-    
-    snippet = get_context_snippet(content, query)
-    
-    output = f"""
-┌{'─'*60}
-│ #{rank}  Score: {score:.2f}
-│ 📁 {location}
-├{'─'*60}
-{snippet}
-└{'─'*60}"""
-    
-    return output
-
-
-def print_results(results, query):
-    """Print all results"""
-    if not results:
-        print("\n❌ No results found.\n")
-        return
-    
-    print(f"\n📊 Found {len(results)} results:\n")
-    
-    for rank, (doc, score) in enumerate(results, 1):
-        print(format_result(doc, score, query, rank))
-
-
-# ============== MAIN INTERFACE ==============
-
-def quick_search(query, root_dir='.', top_k=10, rebuild=False):
-    """One-liner search function"""
-    idx, docs = build_index(root_dir, use_cache=not rebuild)
-    results = search(query, idx, docs, top_k=top_k)
-    print_results(results, query)
-    return results
-
-
-def interactive_mode(root_dir='.'):
-    """Interactive search REPL"""
-    print("\n" + "="*60)
-    print("  🔍 FAST CODE SEARCH ENGINE")
-    print("="*60)
-    
-    idx, docs = build_index(root_dir, use_cache=True)
-    
-    print("\nCommands:")
-    print("  <query>    - Search for code")
-    print("  :r         - Rebuild index")
-    print("  :q         - Quit")
-    print("  :top N     - Set number of results (default 10)")
-    print()
-    
-    top_k = 10
-    
-    while True:
-        try:
-            query = input("🔍 > ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nBye!")
-            break
-        
-        if not query:
-            continue
-        
-        # Commands
-        if query == ':q':
-            print("Bye!")
-            break
-        elif query == ':r':
-            idx, docs = build_index(root_dir, use_cache=False)
-            continue
-        elif query.startswith(':top '):
-            try:
-                top_k = int(query.split()[1])
-                print(f"Showing top {top_k} results")
-            except:
-                print("Usage: :top N")
-            continue
-        
-        # Search
-        start = time.time()
-        results = search(query, idx, docs, top_k=top_k)
-        elapsed = (time.time() - start) * 1000
-        
-        print(f"⏱️  Search completed in {elapsed:.1f}ms")
-        print_results(results, query)
-
-
-# ============== CLI ENTRY POINT ==============
-
-if __name__ == '__main__':
-    import sys
-    
-    args = sys.argv[1:]
-    
-    if not args:
-        # Interactive mode in current directory
-        interactive_mode('.')
-    
-    elif args[0] in ['-h', '--help']:
-        print("""
-Fast Code Search Engine
-
-Usage:
-    python code_search.py                    # Interactive mode (current dir)
-    python code_search.py <directory>        # Interactive mode (specified dir)
-    python code_search.py -s "query"         # Quick search current dir
-    python code_search.py -s "query" <dir>   # Quick search specified dir
-    python code_search.py --rebuild          # Rebuild index
-
-Examples:
-    python code_search.py -s "pandas read_csv"
-    python code_search.py -s "neural network" ./projects
-    python code_search.py ~/my_notebooks
-        """)
-    
-    elif args[0] == '-s' and len(args) >= 2:
-        query = args[1]
-        root = args[2] if len(args) > 2 else '.'
-        quick_search(query, root)
-    
-    elif args[0] == '--rebuild':
-        root = args[1] if len(args) > 1 else '.'
-        build_index(root, use_cache=False)
-    
+def load_input_data(
+    file_path_or_buffer,
+    file_type: str = "csv"
+) -> pd.DataFrame:
+    """Load input data for batch scoring"""
+    if file_type == "csv":
+        return pd.read_csv(file_path_or_buffer)
+    elif file_type in ["xlsx", "xls"]:
+        return pd.read_excel(file_path_or_buffer)
     else:
-        # Treat as directory path
-        interactive_mode(args[0])
+        raise ValueError(f"Unsupported file type: {file_type}")
 
 
-# === In Jupyter Notebook or Python Script ===
-
-# Import and use
-from code_search import quick_search, build_index, search
-
-# Quick search in current directory
-quick_search("pandas dataframe")
-
-# Search in specific directory
-quick_search("neural network model", root_dir="./projects")
-
-# More control
-idx, docs = build_index("./my_notebooks")
-results = search("matplotlib plot", idx, docs, top_k=5)
-for doc, score in results:
-    print(f"{score:.2f} - {doc['filepath']}")
-
-ortrrrrrr
-
-
-"""
-Minimal Code Search - Single Function
-Just copy-paste and use!
-"""
-
-import os, re, json
-from pathlib import Path
-from collections import defaultdict
-
-def code_search(query, root_dir='.', top_k=10):
-    """
-    Search through .py, .ipynb, .txt files
-    Returns: list of (filepath, location, snippet, score)
-    """
-    query_tokens = set(re.findall(r'[a-z_][a-z0-9_]+', query.lower()))
-    results = []
+def export_coefficients_to_csv(
+    coefficients: Dict[str, Dict[str, float]]
+) -> str:
+    """Export coefficients to CSV format string"""
+    rows = []
+    for module, vars in coefficients.items():
+        for var, coef in vars.items():
+            rows.append({
+                "module": module,
+                "variable": var,
+                "coefficient": coef
+            })
     
-    for dirpath, dirs, files in os.walk(root_dir):
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'__pycache__', 'venv'}]
+    df = pd.DataFrame(rows)
+    return df.to_csv(index=False)
+
+
+def create_sample_coefficients_csv() -> str:
+    """Create sample coefficients CSV"""
+    data = """module,variable,coefficient,intercept
+financial,leverage_ratio,0.35,-1.5
+financial,current_ratio,-0.25,0
+financial,debt_service_coverage,-0.30,0
+financial,profit_margin,-0.20,0
+financial,asset_turnover,-0.15,0
+financial,interest_coverage,-0.28,0
+qualitative,management_quality,-0.15,0
+qualitative,industry_position,-0.12,0
+qualitative,business_stability,-0.18,0
+qualitative,governance_score,-0.10,0
+market,stock_volatility,0.22,0
+market,credit_spread,0.35,0
+market,market_cap_change,-0.18,0
+market,beta,0.12,0
+macro,gdp_growth,-0.15,0
+macro,unemployment_rate,0.20,0
+macro,inflation_rate,0.10,0
+macro,interest_rate_change,0.08,0"""
+    return data
+
+
+def create_sample_input_data() -> pd.DataFrame:
+    """Create sample input data for testing"""
+    np.random.seed(42)
+    n_samples = 100
+    
+    data = {
+        # Financial variables
+        "leverage_ratio": np.random.uniform(1.0, 5.0, n_samples),
+        "current_ratio": np.random.uniform(0.8, 3.0, n_samples),
+        "debt_service_coverage": np.random.uniform(0.5, 4.0, n_samples),
+        "profit_margin": np.random.uniform(-0.05, 0.20, n_samples),
+        "asset_turnover": np.random.uniform(0.3, 1.5, n_samples),
+        "interest_coverage": np.random.uniform(1.0, 8.0, n_samples),
         
-        for fname in files:
-            fpath = os.path.join(dirpath, fname)
-            ext = Path(fname).suffix.lower()
+        # Qualitative variables (1-5 scale)
+        "management_quality": np.random.uniform(1, 5, n_samples),
+        "industry_position": np.random.uniform(1, 5, n_samples),
+        "business_stability": np.random.uniform(1, 5, n_samples),
+        "governance_score": np.random.uniform(1, 5, n_samples),
+        
+        # Market variables
+        "stock_volatility": np.random.uniform(0.10, 0.50, n_samples),
+        "credit_spread": np.random.uniform(0.005, 0.05, n_samples),
+        "market_cap_change": np.random.uniform(-0.30, 0.30, n_samples),
+        "beta": np.random.uniform(0.5, 2.0, n_samples),
+        
+        # Macro variables
+        "gdp_growth": np.random.uniform(-0.02, 0.05, n_samples),
+        "unemployment_rate": np.random.uniform(0.03, 0.10, n_samples),
+        "inflation_rate": np.random.uniform(0.01, 0.05, n_samples),
+        "interest_rate_change": np.random.uniform(-0.02, 0.02, n_samples)
+    }
+    
+    return pd.DataFrame(data)
+```
+
+### 11. utils/calibration.py
+
+```python
+"""
+Calibration utilities - For fitting calibration parameters
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+from typing import Tuple, Dict, Optional
+
+
+def logistic(x: np.ndarray) -> np.ndarray:
+    """Logistic function"""
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def fit_calibration_linear(
+    scores: np.ndarray,
+    observed_defaults: np.ndarray,
+    weights: Optional[np.ndarray] = None
+) -> Tuple[float, float]:
+    """
+    Fit linear calibration: PD = logistic(alpha + beta * score)
+    
+    Args:
+        scores: Array of model scores
+        observed_defaults: Binary default indicator (0/1)
+        weights: Optional sample weights
+        
+    Returns:
+        Tuple of (alpha, beta)
+    """
+    if weights is None:
+        weights = np.ones_like(scores)
+    
+    def neg_log_likelihood(params):
+        alpha, beta = params
+        pred = logistic(alpha + beta * scores)
+        pred = np.clip(pred, 1e-10, 1 - 1e-10)
+        ll = np.sum(weights * (
+            observed_defaults * np.log(pred) + 
+            (1 - observed_defaults) * np.log(1 - pred)
+        ))
+        return -ll
+    
+    result = minimize(
+        neg_log_likelihood,
+        x0=[0.0, 1.0],
+        method='Nelder-Mead'
+    )
+    
+    return result.x[0], result.x[1]
+
+
+def fit_calibration_quadratic(
+    scores: np.ndarray,
+    observed_defaults: np.ndarray,
+    weights: Optional[np.ndarray] = None
+) -> Tuple[float, float, float]:
+    """
+    Fit quadratic (2nd order) calibration: 
+    PD = logistic(alpha + beta * score + gamma * score^2)
+    
+    Returns:
+        Tuple of (alpha, beta, gamma)
+    """
+    if weights is None:
+        weights = np.ones_like(scores)
+    
+    def neg_log_likelihood(params):
+        alpha, beta, gamma = params
+        linear_pred = alpha + beta * scores + gamma * (scores ** 2)
+        pred = logistic(linear_pred)
+        pred = np.clip(pred, 1e-10, 1 - 1e-10)
+        ll = np.sum(weights * (
+            observed_defaults * np.log(pred) + 
+            (1 - observed_defaults) * np.log(1 - pred)
+        ))
+        return -ll
+    
+    result = minimize(
+        neg_log_likelihood,
+        x0=[0.0, 1.0, 0.0],
+        method='Nelder-Mead'
+    )
+    
+    return result.x[0], result.x[1], result.x[2]
+
+
+def calculate_central_tendency_adjustment(
+    current_avg_pd: float,
+    target_central_tendency: float
+) -> float:
+    """
+    Calculate adjustment needed to match central tendency
+    """
+    # In log-odds space
+    current_logit = np.log(current_avg_pd / (1 - current_avg_pd))
+    target_logit = np.log(target_central_tendency / (1 - target_central_tendency))
+    
+    return target_logit - current_logit
+
+
+def calculate_discrimination_metrics(
+    scores: np.ndarray,
+    defaults: np.ndarray
+) -> Dict[str, float]:
+    """Calculate model discrimination metrics"""
+    from scipy.stats import mannwhitneyu
+    
+    default_scores = scores[defaults == 1]
+    non_default_scores = scores[defaults == 0]
+    
+    # AUC via Mann-Whitney U
+    if len(default_scores) > 0 and len(non_default_scores) > 0:
+        u_stat, _ = mannwhitneyu(non_default_scores, default_scores)
+        auc = u_stat / (len(default_scores) * len(non_default_scores))
+    else:
+        auc = 0.5
+    
+    # Gini
+    gini = 2 * auc - 1
+    
+    # KS statistic
+    from scipy.stats import ks_2samp
+    if len(default_scores) > 0 and len(non_default_scores) > 0:
+        ks_stat, _ = ks_2samp(default_scores, non_default_scores)
+    else:
+        ks_stat = 0
+    
+    return {
+        "auc": auc,
+        "gini": gini,
+        "ks_statistic": ks_stat
+    }
+```
+
+### 12. utils/visualization.py
+
+```python
+"""
+Visualization utilities using Plotly
+"""
+
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional
+
+
+def create_sensitivity_chart(
+    df: pd.DataFrame,
+    variable_name: str,
+    y_column: str = "pd_bps"
+) -> go.Figure:
+    """Create sensitivity analysis chart"""
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df["variable_value"],
+        y=df[y_column],
+        mode='lines+markers',
+        name='PD (bps)',
+        line=dict(color='#1f77b4', width=2),
+        marker=dict(size=6)
+    ))
+    
+    fig.update_layout(
+        title=f"PD Sensitivity to {variable_name}",
+        xaxis_title=variable_name,
+        yaxis_title="PD (basis points)",
+        template="plotly_white",
+        hovermode='x unified'
+    )
+    
+    return fig
+
+
+def create_score_breakdown_chart(
+    breakdown: Dict[str, float]
+) -> go.Figure:
+    """Create waterfall chart showing score breakdown"""
+    categories = []
+    values = []
+    
+    for key, val in breakdown.items():
+        if not key.endswith("_contrib") and not key.startswith("_"):
+            categories.append(key.replace("_", " ").title())
+            values.append(val)
+    
+    fig = go.Figure(go.Waterfall(
+        orientation="v",
+        x=categories,
+        y=values,
+        connector={"line": {"color": "rgb(63, 63, 63)"}},
+        increasing={"marker": {"color": "#ef553b"}},
+        decreasing={"marker": {"color": "#00cc96"}},
+        totals={"marker": {"color": "#636efa"}}
+    ))
+    
+    fig.update_layout(
+        title="Score Component Breakdown",
+        showlegend=False,
+        template="plotly_white"
+    )
+    
+    return fig
+
+
+def create_coefficient_bar_chart(
+    coefficients: Dict[str, float],
+    module_name: str
+) -> go.Figure:
+    """Create horizontal bar chart of coefficients"""
+    vars = list(coefficients.keys())
+    coefs = list(coefficients.values())
+    
+    colors = ['#ef553b' if c > 0 else '#00cc96' for c in coefs]
+    
+    fig = go.Figure(go.Bar(
+        y=vars,
+        x=coefs,
+        orientation='h',
+        marker_color=colors
+    ))
+    
+    fig.update_layout(
+        title=f"{module_name} Module Coefficients",
+        xaxis_title="Coefficient Value",
+        yaxis_title="Variable",
+        template="plotly_white"
+    )
+    
+    return fig
+
+
+def create_pd_distribution_chart(
+    pds: np.ndarray
+) -> go.Figure:
+    """Create PD distribution histogram"""
+    fig = go.Figure()
+    
+    fig.add_trace(go.Histogram(
+        x=pds * 10000,  # Convert to bps
+        nbinsx=50,
+        marker_color='#1f77b4',
+        opacity=0.7
+    ))
+    
+    fig.update_layout(
+        title="PD Distribution",
+        xaxis_title="PD (basis points)",
+        yaxis_title="Count",
+        template="plotly_white"
+    )
+    
+    return fig
+
+
+def create_score_flow_diagram(
+    results: Dict
+) -> go.Figure:
+    """Create sankey diagram showing score flow"""
+    fig = go.Figure(go.Sankey(
+        node=dict(
+            pad=15,
+            thickness=20,
+            line=dict(color="black", width=0.5),
+            label=[
+                "Financial", "Market", "Macro",  # 0, 1, 2
+                "Score 1",  # 3
+                "Qualitative",  # 4
+                "Score 2",  # 5
+                "Calibration",  # 6
+                "Score 3",  # 7
+                "MoC",  # 8
+                "Final Score",  # 9
+                "PD"  # 10
+            ],
+            color=[
+                "#1f77b4", "#ff7f0e", "#2ca02c",
+                "#d62728",
+                "#9467bd",
+                "#8c564b",
+                "#e377c2",
+                "#7f7f7f",
+                "#bcbd22",
+                "#17becf",
+                "#1f77b4"
+            ]
+        ),
+        link=dict(
+            source=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            target=[3, 3, 3, 5, 5, 6, 7, 9, 9, 10],
+            value=[abs(results.get("score1_breakdown", {}).get("financial_score", 1)),
+                   abs(results.get("score1_breakdown", {}).get("market_score", 1)),
+                   abs(results.get("score1_breakdown", {}).get("macro_score", 1)),
+                   abs(results.get("score1", 1)),
+                   abs(results.get("score2_breakdown", {}).get("qualitative_score", 0.5)),
+                   abs(results.get("score2", 1)),
+                   1,
+                   abs(results.get("score3", 1)),
+                   abs(results.get("calibration", {}).get("total_moc", 0.1)) + 0.1,
+                   1]
+        )
+    ))
+    
+    fig.update_layout(
+        title="Score Flow Architecture",
+        template="plotly_white",
+        height=500
+    )
+    
+    return fig
+
+
+def create_multi_sensitivity_chart(
+    engine,
+    base_values: Dict[str, float],
+    variables: List[str],
+    range_pct: float = 0.5,
+    steps: int = 30
+) -> go.Figure:
+    """Create multi-variable sensitivity chart"""
+    fig = go.Figure()
+    
+    colors = px.colors.qualitative.Set1
+    
+    for i, var in enumerate(variables):
+        base_val = base_values.get(var, 1)
+        var_range = np.linspace(
+            base_val * (1 - range_pct),
+            base_val * (1 + range_pct),
+            steps
+        )
+        
+        df = engine.sensitivity_analysis(base_values, var, var_range)
+        
+        # Normalize to show % change from base
+        base_pd = df.iloc[len(df)//2]["pd_bps"]
+        pct_change = (df["pd_bps"] - base_pd) / base_pd * 100
+        
+        fig.add_trace(go.Scatter(
+            x=np.linspace(-range_pct*100, range_pct*100, steps),
+            y=pct_change,
+            mode='lines',
+            name=var.replace("_", " ").title(),
+            line=dict(color=colors[i % len(colors)], width=2)
+        ))
+    
+    fig.update_layout(
+        title="Multi-Variable Sensitivity Analysis",
+        xaxis_title="Variable Change (%)",
+        yaxis_title="PD Change (%)",
+        template="plotly_white",
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    return fig
+
+
+def create_calibration_impact_chart(
+    engine,
+    base_values: Dict[str, float],
+    param_name: str,
+    param_range: np.ndarray
+) -> go.Figure:
+    """Show impact of calibration parameter on PD"""
+    pds = []
+    
+    original_calib = engine.calibration.__dict__.copy()
+    
+    for val in param_range:
+        setattr(engine.calibration, param_name, val)
+        result = engine.calculate_full_pipeline(base_values)
+        pds.append(result["pd_bps"])
+    
+    # Restore original
+    for k, v in original_calib.items():
+        setattr(engine.calibration, k, v)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=param_range,
+        y=pds,
+        mode='lines+markers',
+        name='PD',
+        line=dict(color='#1f77b4', width=2)
+    ))
+    
+    fig.update_layout(
+        title=f"PD Impact of {param_name}",
+        xaxis_title=param_name,
+        yaxis_title="PD (basis points)",
+        template="plotly_white"
+    )
+    
+    return fig
+```
+
+### 13. utils/__init__.py
+
+```python
+"""
+Utils package initialization
+"""
+
+from .data_loader import (
+    load_coefficients_from_csv,
+    load_coefficients_from_excel,
+    load_calibration_from_csv,
+    load_input_data,
+    export_coefficients_to_csv,
+    create_sample_coefficients_csv,
+    create_sample_input_data
+)
+
+from .calibration import (
+    fit_calibration_linear,
+    fit_calibration_quadratic,
+    calculate_central_tendency_adjustment,
+    calculate_discrimination_metrics
+)
+
+from .visualization import (
+    create_sensitivity_chart,
+    create_score_breakdown_chart,
+    create_coefficient_bar_chart,
+    create_pd_distribution_chart,
+    create_score_flow_diagram,
+    create_multi_sensitivity_chart,
+    create_calibration_impact_chart
+)
+
+__all__ = [
+    'load_coefficients_from_csv',
+    'load_coefficients_from_excel',
+    'load_calibration_from_csv',
+    'load_input_data',
+    'export_coefficients_to_csv',
+    'create_sample_coefficients_csv',
+    'create_sample_input_data',
+    'fit_calibration_linear',
+    'fit_calibration_quadratic',
+    'calculate_central_tendency_adjustment',
+    'calculate_discrimination_metrics',
+    'create_sensitivity_chart',
+    'create_score_breakdown_chart',
+    'create_coefficient_bar_chart',
+    'create_pd_distribution_chart',
+    'create_score_flow_diagram',
+    'create_multi_sensitivity_chart',
+    'create_calibration_impact_chart'
+]
+```
+
+### 14. app.py - Main Streamlit Application
+
+```python
+"""
+PD Model Visualizer - Main Streamlit Application
+A comprehensive tool for visualizing and analyzing PD models
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import json
+from io import StringIO, BytesIO
+
+# Import modules
+from modules import (
+    ScoreEngine, CalibrationParams,
+    FinancialModule, QualitativeModule,
+    MarketModule, MacroModule
+)
+
+from utils import (
+    load_coefficients_from_csv,
+    load_coefficients_from_excel,
+    export_coefficients_to_csv,
+    create_sample_coefficients_csv,
+    create_sample_input_data,
+    fit_calibration_linear,
+    fit_calibration_quadratic,
+    create_sensitivity_chart,
+    create_score_breakdown_chart,
+    create_coefficient_bar_chart,
+    create_pd_distribution_chart,
+    create_score_flow_diagram,
+    create_multi_sensitivity_chart,
+    create_calibration_impact_chart
+)
+
+# Page configuration
+st.set_page_config(
+    page_title="PD Model Visualizer",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        padding: 1rem;
+        border-bottom: 3px solid #1f77b4;
+        margin-bottom: 2rem;
+    }
+    .score-card {
+        background-color: #f0f2f6;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 5px solid #1f77b4;
+        margin: 0.5rem 0;
+    }
+    .pd-display {
+        font-size: 3rem;
+        font-weight: bold;
+        color: #d62728;
+        text-align: center;
+    }
+    .module-header {
+        background-color: #e8eaf6;
+        padding: 0.5rem 1rem;
+        border-radius: 5px;
+        font-weight: bold;
+        margin: 1rem 0 0.5rem 0;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 1rem 2rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'engine' not in st.session_state:
+        st.session_state.engine = ScoreEngine()
+    
+    if 'input_values' not in st.session_state:
+        st.session_state.input_values = st.session_state.engine.get_default_values()
+    
+    if 'results' not in st.session_state:
+        st.session_state.results = None
+    
+    if 'batch_data' not in st.session_state:
+        st.session_state.batch_data = None
+    
+    if 'batch_results' not in st.session_state:
+        st.session_state.batch_results = None
+
+
+def create_sidebar():
+    """Create sidebar with configuration options"""
+    st.sidebar.markdown("## ⚙️ Configuration")
+    
+    # File upload section
+    st.sidebar.markdown("### 📁 Import/Export")
+    
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload Coefficients (CSV/Excel)",
+        type=['csv', 'xlsx', 'xls'],
+        help="Upload a file with columns: module, variable, coefficient"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                coefficients = load_coefficients_from_csv(uploaded_file)
+            else:
+                coefficients = load_coefficients_from_excel(uploaded_file)
             
-            if ext not in {'.py', '.ipynb', '.txt'}:
-                continue
+            # Update engine with new coefficients
+            if 'financial' in coefficients:
+                st.session_state.engine.financial.coefficients = coefficients['financial']
+            if 'qualitative' in coefficients:
+                st.session_state.engine.qualitative.coefficients = coefficients['qualitative']
+            if 'market' in coefficients:
+                st.session_state.engine.market.coefficients = coefficients['market']
+            if 'macro' in coefficients:
+                st.session_state.engine.macro.coefficients = coefficients['macro']
             
-            try:
-                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
+            st.sidebar.success("✅ Coefficients loaded successfully!")
+        except Exception as e:
+            st.sidebar.error(f"Error loading file: {e}")
+    
+    # Download sample file
+    sample_csv = create_sample_coefficients_csv()
+    st.sidebar.download_button(
+        label="📥 Download Sample CSV",
+        data=sample_csv,
+        file_name="sample_coefficients.csv",
+        mime="text/csv"
+    )
+    
+    # Export current config
+    config_json = json.dumps(st.session_state.engine.export_config(), indent=2)
+    st.sidebar.download_button(
+        label="📤 Export Configuration",
+        data=config_json,
+        file_name="model_config.json",
+        mime="application/json"
+    )
+    
+    st.sidebar.markdown("---")
+    
+    # Calibration parameters
+    st.sidebar.markdown("### 🎯 Calibration Parameters")
+    
+    with st.sidebar.expander("Post-Calibration Settings", expanded=False):
+        alpha = st.number_input(
+            "Alpha (Intercept)", 
+            value=st.session_state.engine.calibration.alpha,
+            step=0.1,
+            format="%.4f"
+        )
+        beta = st.number_input(
+            "Beta (Slope)", 
+            value=st.session_state.engine.calibration.beta,
+            step=0.1,
+            format="%.4f"
+        )
+        gamma = st.number_input(
+            "Gamma (Quadratic)", 
+            value=st.session_state.engine.calibration.gamma,
+            step=0.01,
+            format="%.4f",
+            help="2nd order fit coefficient"
+        )
+        
+        st.session_state.engine.update_calibration(alpha=alpha, beta=beta, gamma=gamma)
+    
+    with st.sidebar.expander("Margin of Conservatism", expanded=False):
+        moc_data = st.number_input(
+            "MoC - Data Quality",
+            value=st.session_state.engine.calibration.moc_data_quality,
+            step=0.01,
+            format="%.4f"
+        )
+        moc_model = st.number_input(
+            "MoC - Model Uncertainty",
+            value=st.session_state.engine.calibration.moc_model_uncertainty,
+            step=0.01,
+            format="%.4f"
+        )
+        moc_econ = st.number_input(
+            "MoC - Economic",
+            value=st.session_state.engine.calibration.moc_economic_uncertainty,
+            step=0.01,
+            format="%.4f"
+        )
+        cycle_adj = st.number_input(
+            "Cycle Adjustment",
+            value=st.session_state.engine.calibration.cycle_adjustment,
+            step=0.01,
+            format="%.4f"
+        )
+        
+        st.session_state.engine.update_calibration(
+            moc_data=moc_data, 
+            moc_model=moc_model, 
+            moc_economic=moc_econ,
+            cycle_adj=cycle_adj
+        )
+        
+        st.info(f"Total MoC: {st.session_state.engine.calibration.total_moc:.4f}")
+    
+    st.sidebar.markdown("---")
+    
+    # PD constraints
+    st.sidebar.markdown("### 📏 PD Constraints")
+    st.session_state.engine.pd_floor = st.sidebar.number_input(
+        "PD Floor (bps)",
+        value=st.session_state.engine.pd_floor * 10000,
+        min_value=0.0,
+        max_value=100.0,
+        step=1.0
+    ) / 10000
+    
+    st.session_state.engine.pd_cap = st.sidebar.number_input(
+        "PD Cap (%)",
+        value=st.session_state.engine.pd_cap * 100,
+        min_value=0.0,
+        max_value=100.0,
+        step=1.0
+    ) / 100
+
+
+def create_input_section():
+    """Create input section with variable sliders organized by module"""
+    st.markdown("### 📝 Input Variables")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Financial Module
+        st.markdown('<div class="module-header">💰 Financial Module</div>', unsafe_allow_html=True)
+        for var in st.session_state.engine.financial.variables:
+            default = st.session_state.engine.financial.get_default_values().get(var, 1.0)
+            min_val = default * 0.1
+            max_val = default * 3.0
+            
+            st.session_state.input_values[var] = st.slider(
+                var.replace("_", " ").title(),
+                min_value=float(min_val),
+                max_value=float(max_val),
+                value=float(st.session_state.input_values.get(var, default)),
+                key=f"fin_{var}"
+            )
+        
+        # Market Module
+        st.markdown('<div class="module-header">📈 Market Module</div>', unsafe_allow_html=True)
+        for var in st.session_state.engine.market.variables:
+            default = st.session_state.engine.market.get_default_values().get(var, 0.1)
+            min_val = default * 0.1
+            max_val = default * 3.0
+            
+            st.session_state.input_values[var] = st.slider(
+                var.replace("_", " ").title(),
+                min_value=float(min_val),
+                max_value=float(max_val),
+                value=float(st.session_state.input_values.get(var, default)),
+                key=f"mkt_{var}"
+            )
+    
+    with col2:
+        # Qualitative Module
+        st.markdown('<div class="module-header">📋 Qualitative Module</div>', unsafe_allow_html=True)
+        for var in st.session_state.engine.qualitative.variables:
+            st.session_state.input_values[var] = st.slider(
+                var.replace("_", " ").title(),
+                min_value=1.0,
+                max_value=5.0,
+                value=float(st.session_state.input_values.get(var, 3.0)),
+                step=0.5,
+                key=f"qual_{var}"
+            )
+        
+        # Macro Module
+        st.markdown('<div class="module-header">🌍 Macro Module</div>', unsafe_allow_html=True)
+        for var in st.session_state.engine.macro.variables:
+            default = st.session_state.engine.macro.get_default_values().get(var, 0.02)
+            min_val = -0.1
+            max_val = 0.2
+            
+            st.session_state.input_values[var] = st.slider(
+                var.replace("_", " ").title(),
+                min_value=float(min_val),
+                max_value=float(max_val),
+                value=float(st.session_state.input_values.get(var, default)),
+                format="%.3f",
+                key=f"macro_{var}"
+            )
+
+
+def create_results_section():
+    """Display calculation results"""
+    # Calculate
+    results = st.session_state.engine.calculate_full_pipeline(
+        st.session_state.input_values
+    )
+    st.session_state.results = results
+    
+    st.markdown("### 📊 Results")
+    
+    # Main PD display
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Score 1 (Fin+Mkt+Macro)", f"{results['score1']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Score 2 (+ Qualitative)", f"{results['score2']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Score 3 (Calibrated)", f"{results['score3']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    col4, col5, col6 = st.columns(3)
+    
+    with col4:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Final Score (+ MoC)", f"{results['final_score']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.markdown(f'<p class="pd-display">{results["pd"]*100:.4f}%</p>', unsafe_allow_html=True)
+        st.caption("Probability of Default")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col6:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("PD (Basis Points)", f"{results['pd_bps']:.2f} bps")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Score flow diagram
+    st.plotly_chart(
+        create_score_flow_diagram(results),
+        use_container_width=True
+    )
+
+
+def create_coefficient_editor():
+    """Drag-drop style coefficient editor"""
+    st.markdown("### ⚙️ Coefficient Editor")
+    
+    tabs = st.tabs(["Financial", "Qualitative", "Market", "Macro"])
+    
+    modules = [
+        ("Financial", st.session_state.engine.financial),
+        ("Qualitative", st.session_state.engine.qualitative),
+        ("Market", st.session_state.engine.market),
+        ("Macro", st.session_state.engine.macro)
+    ]
+    
+    for tab, (name, module) in zip(tabs, modules):
+        with tab:
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.markdown(f"**{name} Variables**")
                 
-                # Handle notebooks
-                if ext == '.ipynb':
-                    nb = json.loads(content)
-                    for i, cell in enumerate(nb.get('cells', [])):
-                        src = ''.join(cell.get('source', []))
-                        score = len(query_tokens & set(re.findall(r'[a-z_][a-z0-9_]+', src.lower())))
-                        if query.lower() in src.lower():
-                            score += 5
-                        if score > 0:
-                            snippet = src[:200].replace('\n', ' ')
-                            results.append((fpath, f"Cell {i+1}", snippet, score))
-                else:
-                    # .py or .txt
-                    lines = content.split('\n')
-                    for i, line in enumerate(lines):
-                        score = len(query_tokens & set(re.findall(r'[a-z_][a-z0-9_]+', line.lower())))
-                        if query.lower() in line.lower():
-                            score += 5
-                        if score > 0:
-                            ctx = '\n'.join(lines[max(0,i-1):i+2])
-                            results.append((fpath, f"Line {i+1}", ctx[:200], score))
-            except:
-                continue
+                # Edit coefficients
+                new_coeffs = {}
+                for var in module.variables:
+                    new_coeffs[var] = st.number_input(
+                        var.replace("_", " ").title(),
+                        value=float(module.coefficients[var]),
+                        step=0.01,
+                        format="%.4f",
+                        key=f"coef_{name}_{var}"
+                    )
+                
+                module.coefficients = new_coeffs
+                
+                # Intercept
+                module.intercept = st.number_input(
+                    "Intercept",
+                    value=float(module.intercept),
+                    step=0.1,
+                    format="%.4f",
+                    key=f"intercept_{name}"
+                )
+                
+                # Add new variable
+                st.markdown("---")
+                st.markdown("**Add New Variable**")
+                new_var = st.text_input("Variable Name", key=f"new_var_{name}")
+                new_coef = st.number_input("Coefficient", value=0.0, key=f"new_coef_{name}")
+                
+                if st.button(f"Add to {name}", key=f"add_{name}"):
+                    if new_var and new_var not in module.variables:
+                        module.add_variable(new_var, new_coef)
+                        st.session_state.input_values[new_var] = 0.0
+                        st.success(f"Added {new_var}")
+                        st.rerun()
+            
+            with col2:
+                # Coefficient visualization
+                st.plotly_chart(
+                    create_coefficient_bar_chart(module.coefficients, name),
+                    use_container_width=True
+                )
+
+
+def create_sensitivity_tab():
+    """Sensitivity analysis tab"""
+    st.markdown("### 📈 Sensitivity Analysis")
     
-    # Sort by score, deduplicate nearby results
-    results.sort(key=lambda x: -x[3])
+    col1, col2 = st.columns([1, 2])
     
-    # Print results
-    seen_files = defaultdict(int)
-    printed = 0
-    
-    print(f"\n🔍 Results for '{query}':\n")
-    for fpath, loc, snippet, score in results:
-        if seen_files[fpath] >= 2:  # Max 2 results per file
-            continue
-        seen_files[fpath] += 1
+    with col1:
+        # Variable selection
+        all_vars = []
+        all_vars.extend(st.session_state.engine.financial.variables)
+        all_vars.extend(st.session_state.engine.qualitative.variables)
+        all_vars.extend(st.session_state.engine.market.variables)
+        all_vars.extend(st.session_state.engine.macro.variables)
         
-        print(f"📁 {fpath} [{loc}] (score: {score})")
-        print(f"   {snippet[:150]}...")
-        print()
+        selected_var = st.selectbox(
+            "Select Variable",
+            options=all_vars,
+            format_func=lambda x: x.replace("_", " ").title()
+        )
         
-        printed += 1
-        if printed >= top_k:
-            break
+        range_pct = st.slider(
+            "Range (%)",
+            min_value=10,
+            max_value=100,
+            value=50
+        )
+        
+        steps = st.slider(
+            "Number of Steps",
+            min_value=10,
+            max_value=100,
+            value=30
+        )
+        
+        # Multi-variable analysis
+        st.markdown("---")
+        st.markdown("**Multi-Variable Analysis**")
+        multi_vars = st.multiselect(
+            "Select Variables",
+            options=all_vars,
+            default=all_vars[:4],
+            format_func=lambda x: x.replace("_", " ").title()
+        )
     
-    return results[:top_k]
+    with col2:
+        # Single variable sensitivity
+        base_val = st.session_state.input_values.get(selected_var, 1)
+        var_range = np.linspace(
+            base_val * (1 - range_pct/100),
+            base_val * (1 + range_pct/100),
+            steps
+        )
+        
+        sensitivity_df = st.session_state.engine.sensitivity_analysis(
+            st.session_state.input_values,
+            selected_var,
+            var_range
+        )
+        
+        st.plotly_chart(
+            create_sensitivity_chart(sensitivity_df, selected_var),
+            use_container_width=True
+        )
+        
+        # Multi-variable sensitivity
+        if multi_vars:
+            st.plotly_chart(
+                create_multi_sensitivity_chart(
+                    st.session_state.engine,
+                    st.session_state.input_values,
+                    multi_vars,
+                    range_pct/100,
+                    steps
+                ),
+                use_container_width=True
+            )
 
 
-# === USAGE ===
-if __name__ == '__main__':
-    import sys
-    query = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else input("Search: ")
-    code_search(query)
+def create_batch_scoring_tab():
+    """Batch scoring tab"""
+    st.markdown("### 📋 Batch Scoring")
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("**Upload Data**")
+        
+        # Upload input data
+        uploaded_data = st.file_uploader(
+            "Upload scoring data (CSV/Excel)",
+            type=['csv', 'xlsx', 'xls'],
+            key="batch_upload"
+        )
+        
+        if uploaded_data:
+            if uploaded_data.name.endswith('.csv'):
+                st.session_state.batch_data = pd.read_csv(uploaded_data)
+            else:
+                st.session_state.batch_data = pd.read_excel(uploaded_data)
+            
+            st.success(f"Loaded {len(st.session_state.batch_data)} records")
+        
+        # Or generate sample data
+        if st.button("Generate Sample Data"):
+            st.session_state.batch_data = create_sample_input_data()
+            st.success("Generated 100 sample records")
+        
+        if st.session_state.batch_data is not None:
+            st.markdown(f"**Records:** {len(st.session_state.batch_data)}")
+            
+            if st.button("🚀 Run Batch Scoring"):
+                with st.spinner("Scoring..."):
+                    st.session_state.batch_results = st.session_state.engine.batch_score(
+                        st.session_state.batch_data
+                    )
+                st.success("Scoring complete!")
+    
+    with col2:
+        if st.session_state.batch_data is not None:
+            st.markdown("**Input Data Preview**")
+            st.dataframe(
+                st.session_state.batch_data.head(10),
+                use_container_width=True
+            )
+        
+        if st.session_state.batch_results is not None:
+            st.markdown("**Scoring Results**")
+            st.dataframe(
+                st.session_state.batch_results.head(20),
+                use_container_width=True
+            )
+            
+            # PD distribution
+            st.plotly_chart(
+                create_pd_distribution_chart(
+                    st.session_state.batch_results['pd'].values
+                ),
+                use_container_width=True
+            )
+            
+            # Download results
+            csv_buffer = StringIO()
+            st.session_state.batch_results.to_csv(csv_buffer, index=False)
+            st.download_button(
+                "📥 Download Results",
+                csv_buffer.getvalue(),
+                "scoring_results.csv",
+                "text/csv"
+            )
 
 
+def create_calibration_tab():
+    """Calibration fitting tab"""
+    st.markdown("### 🎯 Calibration Fitting")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.markdown("**Upload Calibration Data**")
+        st.info("Upload data with 'score' and 'default' columns")
+        
+        calib_file = st.file_uploader(
+            "Calibration data",
+            type=['csv', 'xlsx'],
+            key="calib_upload"
+        )
+        
+        if calib_file:
+            if calib_file.name.endswith('.csv'):
+                calib_data = pd.read_csv(calib_file)
+            else:
+                calib_data = pd.read_excel(calib_file)
+            
+            if 'score' in calib_data.columns and 'default' in calib_data.columns:
+                st.success(f"Loaded {len(calib_data)} records")
+                
+                fit_type = st.radio(
+                    "Calibration Type",
+                    ["Linear (1st Order)", "Quadratic (2nd Order)"]
+                )
+                
+                if st.button("Fit Calibration"):
+                    scores = calib_data['score'].values
+                    defaults = calib_data['default'].values
+                    
+                    if fit_type == "Linear (1st Order)":
+                        alpha, beta = fit_calibration_linear(scores, defaults)
+                        st.session_state.engine.calibration.alpha = alpha
+                        st.session_state.engine.calibration.beta = beta
+                        st.session_state.engine.calibration.gamma = 0
+                        
+                        st.success(f"Fitted: α={alpha:.4f}, β={beta:.4f}")
+                    else:
+                        alpha, beta, gamma = fit_calibration_quadratic(scores, defaults)
+                        st.session_state.engine.calibration.alpha = alpha
+                        st.session_state.engine.calibration.beta = beta
+                        st.session_state.engine.calibration.gamma = gamma
+                        
+                        st.success(f"Fitted: α={alpha:.4f}, β={beta:.4f}, γ={gamma:.4f}")
+            else:
+                st.error("File must have 'score' and 'default' columns")
+    
+    with col2:
+        st.markdown("**Calibration Parameter Impact**")
+        
+        param = st.selectbox(
+            "Parameter to analyze",
+            ["alpha", "beta", "gamma"]
+        )
+        
+        current_val = getattr(st.session_state.engine.calibration, param)
+        param_range = np.linspace(current_val - 1, current_val + 1, 50)
+        
+        st.plotly_chart(
+            create_calibration_impact_chart(
+                st.session_state.engine,
+                st.session_state.input_values,
+                param,
+                param_range
+            ),
+            use_container_width=True
+        )
 
+
+def main():
+    """Main application"""
+    # Header
+    st.markdown(
+        '<div class="main-header">📊 PD Model Visualizer</div>',
+        unsafe_allow_html=True
+    )
+    
+    # Initialize
+    initialize_session_state()
+    
+    # Sidebar
+    create_sidebar()
+    
+    # Main tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🎛️ Model Calculator",
+        "⚙️ Coefficients",
+        "📈 Sensitivity",
+        "📋 Batch Scoring",
+        "🎯 Calibration"
+    ])
+    
+    with tab1:
+        create_input_section()
+        st.markdown("---")
+        create_results_section()
+    
+    with tab2:
+        create_coefficient_editor()
+    
+    with tab3:
+        create_sensitivity_tab()
+    
+    with tab4:
+        create_batch_scoring_tab()
+    
+    with tab5:
+        create_calibration_tab()
+    
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; color: gray; font-size: 0.8rem;'>
+        PD Model Visualizer | 
+        Architecture: Financial + Market + Macro → Score1 | 
+        Score1 + Qualitative → Score2 | 
+        Calibration → Score3 | 
+        +MoC → Final Score → PD
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## How to Run
+
+1. **Create the project structure** with all files above
+
+2. **Install dependencies:**
+```bash
+pip install -r requirements.txt
+```
+
+3. **Run the application:**
+```bash
+streamlit run app.py
+```
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        INPUT VARIABLES                               │
+├───────────────┬───────────────┬───────────────┬────────────────────┤
+│   FINANCIAL   │    MARKET     │     MACRO     │    QUALITATIVE     │
+│               │               │               │                    │
+│ • Leverage    │ • Volatility  │ • GDP Growth  │ • Mgmt Quality     │
+│ • Current R.  │ • Credit Spr. │ • Unemploy.   │ • Industry Pos.    │
+│ • DSCR        │ • Mkt Cap Chg │ • Inflation   │ • Business Stab.   │
+│ • Profit Mrg  │ • Beta        │ • Int. Rate   │ • Governance       │
+│ • Asset Turn  │               │               │                    │
+│ • Int. Cover  │               │               │                    │
+└───────┬───────┴───────┬───────┴───────┬───────┴─────────┬──────────┘
+        │               │               │                 │
+        v               v               v                 │
+┌───────────────────────────────────────┐                 │
+│              SCORE 1                   │                 │
+│   Financial + Market + Macro           │                 │
+│   (with module weights)                │                 │
+└───────────────────┬───────────────────┘                 │
+                    │                                     │
+                    v                                     v
+        ┌───────────────────────────────────────────────────┐
+        │                    SCORE 2                         │
+        │            Score1 + Qualitative                    │
+        └───────────────────────┬───────────────────────────┘
+                                │
+                                v
+        ┌───────────────────────────────────────────────────┐
+        │              CALIBRATION (2nd Order)               │
+        │      Score3 = α + β×Score2 + γ×Score2²            │
+        └───────────────────────┬───────────────────────────┘
+                                │
+                                v
+        ┌───────────────────────────────────────────────────┐
+        │              MARGIN OF CONSERVATISM                │
+        │   • Data Quality MoC                               │
+        │   • Model Uncertainty MoC                          │
+        │   • Economic Uncertainty MoC                       │
+        │   • Cycle Adjustment                               │
+        └───────────────────────┬───────────────────────────┘
+                                │
+                                v
+        ┌───────────────────────────────────────────────────┐
+        │                 FINAL SCORE                        │
+        │       Score3 + Total MoC + Cycle Adj               │
+        └───────────────────────┬───────────────────────────┘
+                                │
+                                v
+        ┌───────────────────────────────────────────────────┐
+        │             PROBABILITY OF DEFAULT                 │
+        │          PD = 1 / (1 + exp(-FinalScore))          │
+        │             with Floor and Cap                     │
+        └───────────────────────────────────────────────────┘
+```
+
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Modular Architecture** | Separate modules for Financial, Qualitative, Market, Macro |
+| **2nd Order Calibration** | Support for quadratic calibration fit |
+| **Interactive Sliders** | Real-time PD updates as you change variables |
+| **Coefficient Editor** | Modify coefficients directly in the UI |
+| **Sensitivity Analysis** | Single and multi-variable sensitivity charts |
+| **Batch Scoring** | Upload CSV/Excel for bulk scoring |
+| **Calibration Fitting** | Fit calibration from default data |
+| **Import/Export** | Load coefficients from files, export configuration |
+| **Score Flow Visualization** | Sankey diagram showing score flow |
+| **Extensible** | Easy to add new modules and variables |
+
+This solution is designed to be easily modifiable and extensible for your specific needs!
