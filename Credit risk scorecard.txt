@@ -1,4 +1,50 @@
 
+def create_results_section():
+    """Display calculation results"""
+    # Calculate
+    results = st.session_state.engine.calculate_full_pipeline(
+        st.session_state.input_values
+    )
+    st.session_state.results = results
+    
+    st.markdown("### 📊 Results")
+    
+    # Main PD display
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Score 1 (Fin+Mkt+Macro)", f"{results['score1']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Score 2 (+ Qualitative)", f"{results['score2']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Score 3 (Calibrated)", f"{results['score3']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    col4, col5, col6 = st.columns(3)
+    
+    with col4:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("Final Score (+ MoC)", f"{results['final_score']:.4f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.markdown(f'<p class="pd-display">{results["pd"]*100:.4f}%</p>', unsafe_allow_html=True)
+        st.caption("Probability of Default")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col6:
+        st.markdown('<div class="score-card">', unsafe_allow_html=True)
+        st.metric("PD (Basis Points)", f"{results['pd_bps']:.2f} bps")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
 
 # PD Model Visualizer - Complete Solution
 
