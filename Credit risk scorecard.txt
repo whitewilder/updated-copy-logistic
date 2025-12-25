@@ -1,751 +1,87 @@
-import streamlit as st
-import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import plotly.express as px
+import pandas as pd
 
-# Set page configuration
-st.set_page_config(
-    page_title="3-Stage Scoring Model Analysis",
-    page_icon="📊",
-    layout="wide"
-)
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
-# Title and description
-st.title("📊 3-Stage Scoring Model Impact Analysis")
-st.markdown("""
-This dashboard analyzes the impact of input variables through a 3-stage scoring model:
-1. **Stage 1**: Four component scores (Finscore, Qualscore, Indscore, Marketscore)
-2. **Stage 2**: Finalscore from Finscore, Indscore, Marketscore
-3. **Stage 3**: MFAScore from Finalscore and Qualscore
-""")
 
-# Sidebar for model parameters
-st.sidebar.header("🎛️ Model Parameters")
+class PDContributionAnalyzer:
+    """
+    Variable-level PD explainability for logistic models
+    """
 
-# Stage 1: Finscore (6 variables)
-st.sidebar.subheader("Stage 1 - Finscore Coefficients")
-finscore_coeffs = []
-finscore_names = ['FinVar1', 'FinVar2', 'FinVar3', 'FinVar4', 'FinVar5', 'FinVar6']
-for i, name in enumerate(finscore_names):
-    coeff = st.sidebar.slider(
-        f"{name} Coefficient",
-        min_value=-2.0,
-        max_value=2.0,
-        value=0.5 if i < 3 else 0.3,
-        step=0.1
-    )
-    finscore_coeffs.append(coeff)
+    def __init__(self, params):
+        self.p = params
 
-# Stage 1: Qualscore (4 variables)
-st.sidebar.subheader("Stage 1 - Qualscore Coefficients")
-qualscore_coeffs = []
-qualscore_names = ['QualVar1', 'QualVar2', 'QualVar3', 'QualVar4']
-for i, name in enumerate(qualscore_names):
-    coeff = st.sidebar.slider(
-        f"{name} Coefficient",
-        min_value=-2.0,
-        max_value=2.0,
-        value=0.6 if i < 2 else 0.4,
-        step=0.1
-    )
-    qualscore_coeffs.append(coeff)
-
-# Stage 1: Indscore (1 variable)
-st.sidebar.subheader("Stage 1 - Indscore Coefficient")
-indscore_coeff = st.sidebar.slider(
-    "IndVar Coefficient",
-    min_value=-2.0,
-    max_value=2.0,
-    value=0.8,
-    step=0.1
-)
-
-# Stage 1: Marketscore (1 variable)
-st.sidebar.subheader("Stage 1 - Marketscore Coefficient")
-marketscore_coeff = st.sidebar.slider(
-    "MarketVar Coefficient",
-    min_value=-2.0,
-    max_value=2.0,
-    value=0.7,
-    step=0.1
-)
-
-# Stage 2: Finalscore coefficients
-st.sidebar.subheader("Stage 2 - Finalscore Coefficients")
-final_finscore_coeff = st.sidebar.slider(
-    "Finscore → Finalscore Coefficient",
-    min_value=0.0,
-    max_value=2.0,
-    value=0.5,
-    step=0.1
-)
-final_indscore_coeff = st.sidebar.slider(
-    "Indscore → Finalscore Coefficient",
-    min_value=0.0,
-    max_value=2.0,
-    value=0.3,
-    step=0.1
-)
-final_marketscore_coeff = st.sidebar.slider(
-    "Marketscore → Finalscore Coefficient",
-    min_value=0.0,
-    max_value=2.0,
-    value=0.2,
-    step=0.1
-)
-
-# Stage 3: MFAScore coefficients
-st.sidebar.subheader("Stage 3 - MFAScore Coefficients")
-mfa_finalscore_coeff = st.sidebar.slider(
-    "Finalscore → MFAScore Coefficient",
-    min_value=0.0,
-    max_value=2.0,
-    value=0.6,
-    step=0.1
-)
-mfa_qualscore_coeff = st.sidebar.slider(
-    "Qualscore → MFAScore Coefficient",
-    min_value=0.0,
-    max_value=2.0,
-    value=0.4,
-    step=0.1
-)
-
-# Main content - Input variables
-st.header("📝 Input Variables")
-
-# Create columns for input variables
-col1, col2, col3, col4 = st.columns(4)
-
-# Finscore variables
-with col1:
-    st.subheader("Finscore Variables")
-    finscore_inputs = []
-    for i, name in enumerate(finscore_names):
-        value = st.number_input(
-            f"{name}",
-            min_value=0.0,
-            max_value=10.0,
-            value=5.0,
-            step=0.1,
-            key=f"fin_{i}"
+    def _baseline_logit(self):
+        return (
+            self.p['cons3']
+            + self.p['beta111'] * (self.p['cons1'] * self.p['beta11'] + self.p['beta33'] * self.p['cons2'])
+            + self.p['beta222'] * self.p['cons4']
         )
-        finscore_inputs.append(value)
 
-# Qualscore variables
-with col2:
-    st.subheader("Qualscore Variables")
-    qualscore_inputs = []
-    for i, name in enumerate(qualscore_names):
-        value = st.number_input(
-            f"{name}",
-            min_value=0.0,
-            max_value=10.0,
-            value=5.0,
-            step=0.1,
-            key=f"qual_{i}"
-        )
-        qualscore_inputs.append(value)
-
-# Indscore and Marketscore variables
-with col3:
-    st.subheader("Indscore Variable")
-    indscore_input = st.number_input(
-        "IndVar",
-        min_value=0.0,
-        max_value=10.0,
-        value=5.0,
-        step=0.1
-    )
-    
-with col4:
-    st.subheader("Marketscore Variable")
-    marketscore_input = st.number_input(
-        "MarketVar",
-        min_value=0.0,
-        max_value=10.0,
-        value=5.0,
-        step=0.1
-    )
-
-# Calculate scores
-def calculate_scores():
-    # Normalize inputs to 0-1 range
-    def normalize(values):
-        return [v/10.0 for v in values]
-    
-    # Stage 1 calculations
-    finscore = sum([c * v for c, v in zip(finscore_coeffs, normalize(finscore_inputs))])
-    qualscore = sum([c * v for c, v in zip(qualscore_coeffs, normalize(qualscore_inputs))])
-    indscore = indscore_coeff * (indscore_input / 10.0)
-    marketscore = marketscore_coeff * (marketscore_input / 10.0)
-    
-    # Normalize intermediate scores
-    def normalize_score(score, max_possible):
-        return max(0, min(1, score / max_possible)) if max_possible > 0 else 0
-    
-    max_finscore = sum([abs(c) for c in finscore_coeffs])
-    max_qualscore = sum([abs(c) for c in qualscore_coeffs])
-    max_indscore = abs(indscore_coeff)
-    max_marketscore = abs(marketscore_coeff)
-    
-    finscore_norm = normalize_score(finscore, max_finscore)
-    qualscore_norm = normalize_score(qualscore, max_qualscore)
-    indscore_norm = normalize_score(indscore, max_indscore)
-    marketscore_norm = normalize_score(marketscore, max_marketscore)
-    
-    # Stage 2 calculation
-    finalscore = (
-        final_finscore_coeff * finscore_norm +
-        final_indscore_coeff * indscore_norm +
-        final_marketscore_coeff * marketscore_norm
-    )
-    max_finalscore = final_finscore_coeff + final_indscore_coeff + final_marketscore_coeff
-    finalscore_norm = normalize_score(finalscore, max_finalscore)
-    
-    # Stage 3 calculation
-    mfascore = (
-        mfa_finalscore_coeff * finalscore_norm +
-        mfa_qualscore_coeff * qualscore_norm
-    )
-    max_mfascore = mfa_finalscore_coeff + mfa_qualscore_coeff
-    mfascore_norm = normalize_score(mfascore, max_mfascore)
-    
-    return {
-        'stage1': {
-            'finscore': finscore_norm,
-            'qualscore': qualscore_norm,
-            'indscore': indscore_norm,
-            'marketscore': marketscore_norm
-        },
-        'stage2': {'finalscore': finalscore_norm},
-        'stage3': {'mfascore': mfascore_norm},
-        'details': {
-            'finscore_raw': finscore,
-            'qualscore_raw': qualscore,
-            'indscore_raw': indscore,
-            'marketscore_raw': marketscore,
-            'finalscore_raw': finalscore,
-            'mfascore_raw': mfascore
+    def _variable_terms(self, df):
+        return {
+            'x1': self.p['beta111'] * self.p['beta11'] * self.p['beta1'] * df['x1'],
+            'x2': self.p['beta111'] * self.p['beta11'] * self.p['beta2'] * df['x2'],
+            'X3': self.p['beta111'] * self.p['beta22'] * df['X3'],
+            'X4': self.p['beta111'] * self.p['beta33'] * self.p['beta4'] * df['X4'],
+            'z1': self.p['beta222'] * self.p['beta5'] * df['z1'],
+            'z2': self.p['beta222'] * self.p['beta6'] * df['z2'],
         }
-    }
 
-# Calculate and display results
-results = calculate_scores()
+    def explain(self, df, threshold=0.9):
+        baseline = self._baseline_logit()
+        terms = self._variable_terms(df)
 
-# Display results in columns
-st.header("📈 Results")
+        # ---- full logit ----
+        y_full = baseline
+        for t in terms.values():
+            y_full += t
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Finscore", f"{results['stage1']['finscore']:.3f}")
-    st.metric("Qualscore", f"{results['stage1']['qualscore']:.3f}")
-with col2:
-    st.metric("Indscore", f"{results['stage1']['indscore']:.3f}")
-    st.metric("Marketscore", f"{results['stage1']['marketscore']:.3f}")
-with col3:
-    st.metric("Finalscore", f"{results['stage2']['finalscore']:.3f}")
-    st.metric("**MFAScore**", f"{results['stage3']['mfascore']:.3f}", 
-              delta=f"{results['stage3']['mfascore'] - 0.5:.3f}")
+        pd_full = sigmoid(y_full)
+        baseline_pd = sigmoid(baseline)
 
-# Impact Analysis Section
-st.header("🔍 Variable Impact Analysis")
+        # ---- variable PD contributions ----
+        contrib = {}
+        for v, t in terms.items():
+            pd_without = sigmoid(y_full - t)
+            contrib[v] = pd_full - pd_without
 
-# Calculate individual variable impacts
-def calculate_impacts():
-    # Store impact data
-    impacts = []
+        contrib_df = pd.DataFrame(contrib)
+        contrib_df['PD_full'] = pd_full
+        contrib_df['baseline_PD'] = baseline_pd
+
+        # ---- % contribution ----
+        abs_sum = contrib_df[list(terms.keys())].abs().sum(axis=1)
+
+        pct_df = contrib_df[list(terms.keys())].abs().div(abs_sum, axis=0).fillna(0)
+
+        # ---- dominance analysis ----
+        dominance = []
+        top_n = []
+
+        for i in range(len(df)):
+            sorted_vars = pct_df.iloc[i].sort_values(ascending=False)
+            cum = sorted_vars.cumsum()
+
+            dominant = list(cum[cum <= threshold].index)
+            dominant.append(cum.index[len(dominant)])
+
+            dominance.append(dominant)
+            top_n.append(len(dominant))
+
+        contrib_df['top_vars'] = dominance
+        contrib_df['num_driving_vars'] = top_n
+
+        # ---- attach pct columns ----
+        for v in pct_df.columns:
+            contrib_df[f'{v}_pct'] = pct_df[v]
+
+        return contrib_df
     
-    # Finscore variables impact
-    base_result = results['stage3']['mfascore']
-    
-    for i, (name, coeff, value) in enumerate(zip(finscore_names, finscore_coeffs, finscore_inputs)):
-        # Create modified inputs
-        mod_inputs = finscore_inputs.copy()
-        mod_inputs[i] = value + 1.0  # +1 unit change
-        
-        # Recalculate with modified input
-        mod_finscore = sum([c * (v/10.0) for c, v in zip(finscore_coeffs, mod_inputs)])
-        max_finscore = sum([abs(c) for c in finscore_coeffs])
-        mod_finscore_norm = max(0, min(1, mod_finscore / max_finscore))
-        
-        # Recalculate finalscore
-        mod_finalscore = (
-            final_finscore_coeff * mod_finscore_norm +
-            final_indscore_coeff * results['stage1']['indscore'] +
-            final_marketscore_coeff * results['stage1']['marketscore']
-        )
-        max_finalscore = final_finscore_coeff + final_indscore_coeff + final_marketscore_coeff
-        mod_finalscore_norm = max(0, min(1, mod_finalscore / max_finalscore))
-        
-        # Recalculate MFAScore
-        mod_mfascore = (
-            mfa_finalscore_coeff * mod_finalscore_norm +
-            mfa_qualscore_coeff * results['stage1']['qualscore']
-        )
-        max_mfascore = mfa_finalscore_coeff + mfa_qualscore_coeff
-        mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-        
-        impact = mod_mfascore_norm - base_result
-        impacts.append({
-            'Variable': name,
-            'Module': 'Finscore',
-            'Coefficient': coeff,
-            'Impact': impact,
-            'Type': 'Direct'
-        })
-    
-    # Qualscore variables impact
-    for i, (name, coeff, value) in enumerate(zip(qualscore_names, qualscore_coeffs, qualscore_inputs)):
-        mod_inputs = qualscore_inputs.copy()
-        mod_inputs[i] = value + 1.0
-        
-        mod_qualscore = sum([c * (v/10.0) for c, v in zip(qualscore_coeffs, mod_inputs)])
-        max_qualscore = sum([abs(c) for c in qualscore_coeffs])
-        mod_qualscore_norm = max(0, min(1, mod_qualscore / max_qualscore))
-        
-        mod_mfascore = (
-            mfa_finalscore_coeff * results['stage2']['finalscore'] +
-            mfa_qualscore_coeff * mod_qualscore_norm
-        )
-        max_mfascore = mfa_finalscore_coeff + mfa_qualscore_coeff
-        mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-        
-        impact = mod_mfascore_norm - base_result
-        impacts.append({
-            'Variable': name,
-            'Module': 'Qualscore',
-            'Coefficient': coeff,
-            'Impact': impact,
-            'Type': 'Direct'
-        })
-    
-    # Indscore variable impact
-    mod_indscore = indscore_coeff * ((indscore_input + 1.0) / 10.0)
-    max_indscore = abs(indscore_coeff)
-    mod_indscore_norm = max(0, min(1, mod_indscore / max_indscore))
-    
-    mod_finalscore = (
-        final_finscore_coeff * results['stage1']['finscore'] +
-        final_indscore_coeff * mod_indscore_norm +
-        final_marketscore_coeff * results['stage1']['marketscore']
-    )
-    mod_finalscore_norm = max(0, min(1, mod_finalscore / max_finalscore))
-    
-    mod_mfascore = (
-        mfa_finalscore_coeff * mod_finalscore_norm +
-        mfa_qualscore_coeff * results['stage1']['qualscore']
-    )
-    mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-    
-    impact = mod_mfascore_norm - base_result
-    impacts.append({
-        'Variable': 'IndVar',
-        'Module': 'Indscore',
-        'Coefficient': indscore_coeff,
-        'Impact': impact,
-        'Type': 'Direct'
-    })
-    
-    # Marketscore variable impact
-    mod_marketscore = marketscore_coeff * ((marketscore_input + 1.0) / 10.0)
-    max_marketscore = abs(marketscore_coeff)
-    mod_marketscore_norm = max(0, min(1, mod_marketscore / max_marketscore))
-    
-    mod_finalscore = (
-        final_finscore_coeff * results['stage1']['finscore'] +
-        final_indscore_coeff * results['stage1']['indscore'] +
-        final_marketscore_coeff * mod_marketscore_norm
-    )
-    mod_finalscore_norm = max(0, min(1, mod_finalscore / max_finalscore))
-    
-    mod_mfascore = (
-        mfa_finalscore_coeff * mod_finalscore_norm +
-        mfa_qualscore_coeff * results['stage1']['qualscore']
-    )
-    mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-    
-    impact = mod_mfascore_norm - base_result
-    impacts.append({
-        'Variable': 'MarketVar',
-        'Module': 'Marketscore',
-        'Coefficient': marketscore_coeff,
-        'Impact': impact,
-        'Type': 'Direct'
-    })
-    
-    return pd.DataFrame(impacts)
+analyzer = PDContributionAnalyzer(params)
 
-# Calculate and display impacts
-impact_df = calculate_impacts()
+result = analyzer.explain(df, threshold=0.8)
 
-# Display impact table
-st.subheader("Variable-Level Impact on MFAScore")
-st.dataframe(
-    impact_df.style.format({
-        'Coefficient': '{:.3f}',
-        'Impact': '{:.4f}'
-    }).background_gradient(subset=['Impact'], cmap='RdYlGn'),
-    use_container_width=True
-)
-
-# Module-wise impact
-st.subheader("Module-Wise Impact Analysis")
-
-# Calculate module contributions
-module_contributions = {
-    'Finscore': {
-        'contribution': results['stage1']['finscore'] * final_finscore_coeff * mfa_finalscore_coeff,
-        'weight': final_finscore_coeff
-    },
-    'Indscore': {
-        'contribution': results['stage1']['indscore'] * final_indscore_coeff * mfa_finalscore_coeff,
-        'weight': final_indscore_coeff
-    },
-    'Marketscore': {
-        'contribution': results['stage1']['marketscore'] * final_marketscore_coeff * mfa_finalscore_coeff,
-        'weight': final_marketscore_coeff
-    },
-    'Qualscore': {
-        'contribution': results['stage1']['qualscore'] * mfa_qualscore_coeff,
-        'weight': mfa_qualscore_coeff
-    }
-}
-
-# Create module impact DataFrame
-module_df = pd.DataFrame([
-    {
-        'Module': module,
-        'Contribution': data['contribution'],
-        'Weight': data['weight'],
-        'Normalized Contribution': data['contribution'] / results['stage3']['mfascore'] if results['stage3']['mfascore'] > 0 else 0
-    }
-    for module, data in module_contributions.items()
-])
-
-# Display module impact
-col1, col2 = st.columns(2)
-
-with col1:
-    st.dataframe(
-        module_df.style.format({
-            'Contribution': '{:.4f}',
-            'Weight': '{:.3f}',
-            'Normalized Contribution': '{:.2%}'
-        }),
-        use_container_width=True
-    )
-
-with col2:
-    # Create pie chart for module contributions
-    fig = px.pie(
-        module_df,
-        values='Contribution',
-        names='Module',
-        title='Module Contribution to MFAScore',
-        hole=0.3
-    )
-    fig.update_traces(textposition='inside', textinfo='percent+label')
-    st.plotly_chart(fig, use_container_width=True)
-
-# Visualization Section
-st.header("📊 Visualization Dashboard")
-
-# Create subplots
-fig = make_subplots(
-    rows=2, cols=2,
-    subplot_titles=('Variable Impact Analysis', 'Module Contribution',
-                   'Score Progression', 'Coefficient Distribution'),
-    specs=[[{'type': 'bar'}, {'type': 'pie'}],
-           [{'type': 'scatter'}, {'type': 'bar'}]]
-)
-
-# 1. Variable Impact Bar Chart
-fig.add_trace(
-    go.Bar(
-        x=impact_df['Variable'],
-        y=impact_df['Impact'],
-        marker_color=px.colors.qualitative.Set3,
-        name='Variable Impact'
-    ),
-    row=1, col=1
-)
-
-# 2. Module Contribution Pie Chart
-fig.add_trace(
-    go.Pie(
-        labels=module_df['Module'],
-        values=module_df['Contribution'],
-        name='Module Contribution'
-    ),
-    row=1, col=2
-)
-
-# 3. Score Progression Line Chart
-stages = ['Stage 1\nFinscore', 'Stage 1\nQualscore', 'Stage 1\nIndscore', 
-          'Stage 1\nMarketscore', 'Stage 2\nFinalscore', 'Stage 3\nMFAScore']
-stage_scores = [
-    results['stage1']['finscore'],
-    results['stage1']['qualscore'],
-    results['stage1']['indscore'],
-    results['stage1']['marketscore'],
-    results['stage2']['finalscore'],
-    results['stage3']['mfascore']
-]
-
-fig.add_trace(
-    go.Scatter(
-        x=stages,
-        y=stage_scores,
-        mode='lines+markers',
-        name='Score Progression',
-        line=dict(color='royalblue', width=3),
-        marker=dict(size=10)
-    ),
-    row=2, col=1
-)
-
-# 4. Coefficient Distribution Bar Chart
-coeff_data = {
-    'Stage': ['Finscore'] * 6 + ['Qualscore'] * 4 + ['Indscore', 'Marketscore', 
-                                                     'Finalscore\n(F->F)', 'Finalscore\n(I->F)', 'Finalscore\n(M->F)',
-                                                     'MFAScore\n(F->M)', 'MFAScore\n(Q->M)'],
-    'Coefficient': finscore_coeffs + qualscore_coeffs + [indscore_coeff, marketscore_coeff,
-                                                         final_finscore_coeff, final_indscore_coeff, final_marketscore_coeff,
-                                                         mfa_finalscore_coeff, mfa_qualscore_coeff]
-}
-coeff_df = pd.DataFrame(coeff_data)
-
-fig.add_trace(
-    go.Bar(
-        x=coeff_df['Stage'],
-        y=coeff_df['Coefficient'],
-        marker_color=px.colors.sequential.Viridis,
-        name='Coefficients'
-    ),
-    row=2, col=2
-)
-
-# Update layout
-fig.update_layout(
-    height=800,
-    showlegend=False,
-    title_text="Comprehensive Model Analysis Dashboard"
-)
-
-# Update axes labels
-fig.update_xaxes(title_text="Variables", row=1, col=1)
-fig.update_yaxes(title_text="Impact on MFAScore", row=1, col=1)
-fig.update_xaxes(title_text="Stages", row=2, col=1)
-fig.update_yaxes(title_text="Score", row=2, col=1)
-fig.update_xaxes(title_text="Stage/Module", row=2, col=2)
-fig.update_yaxes(title_text="Coefficient Value", row=2, col=2)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# Sensitivity Analysis Section
-st.header("🎯 Sensitivity Analysis")
-
-# Create sensitivity analysis for each variable
-sensitivity_results = []
-
-for var_name, base_value in zip(finscore_names + qualscore_names + ['IndVar', 'MarketVar'], 
-                                finscore_inputs + qualscore_inputs + [indscore_input, marketscore_input]):
-    
-    sensitivities = []
-    for change in [-2, -1, 0, 1, 2]:
-        # Calculate modified MFAScore
-        if var_name in finscore_names:
-            idx = finscore_names.index(var_name)
-            mod_inputs = finscore_inputs.copy()
-            mod_inputs[idx] = max(0, min(10, base_value + change))
-            
-            # Recalculate all scores with modified input
-            # (Simplified calculation for demonstration)
-            mod_finscore = sum([c * (v/10.0) for c, v in zip(finscore_coeffs, mod_inputs)])
-            max_finscore = sum([abs(c) for c in finscore_coeffs])
-            mod_finscore_norm = max(0, min(1, mod_finscore / max_finscore))
-            
-            mod_finalscore = (
-                final_finscore_coeff * mod_finscore_norm +
-                final_indscore_coeff * results['stage1']['indscore'] +
-                final_marketscore_coeff * results['stage1']['marketscore']
-            )
-            max_finalscore = final_finscore_coeff + final_indscore_coeff + final_marketscore_coeff
-            mod_finalscore_norm = max(0, min(1, mod_finalscore / max_finalscore))
-            
-            mod_mfascore = (
-                mfa_finalscore_coeff * mod_finalscore_norm +
-                mfa_qualscore_coeff * results['stage1']['qualscore']
-            )
-            max_mfascore = mfa_finalscore_coeff + mfa_qualscore_coeff
-            mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-            
-        elif var_name in qualscore_names:
-            idx = qualscore_names.index(var_name)
-            mod_inputs = qualscore_inputs.copy()
-            mod_inputs[idx] = max(0, min(10, base_value + change))
-            
-            mod_qualscore = sum([c * (v/10.0) for c, v in zip(qualscore_coeffs, mod_inputs)])
-            max_qualscore = sum([abs(c) for c in qualscore_coeffs])
-            mod_qualscore_norm = max(0, min(1, mod_qualscore / max_qualscore))
-            
-            mod_mfascore = (
-                mfa_finalscore_coeff * results['stage2']['finalscore'] +
-                mfa_qualscore_coeff * mod_qualscore_norm
-            )
-            mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-            
-        else:
-            # Indscore or Marketscore
-            if var_name == 'IndVar':
-                mod_value = max(0, min(10, indscore_input + change))
-                mod_indscore = indscore_coeff * (mod_value / 10.0)
-                max_indscore = abs(indscore_coeff)
-                mod_indscore_norm = max(0, min(1, mod_indscore / max_indscore))
-                
-                mod_finalscore = (
-                    final_finscore_coeff * results['stage1']['finscore'] +
-                    final_indscore_coeff * mod_indscore_norm +
-                    final_marketscore_coeff * results['stage1']['marketscore']
-                )
-                mod_finalscore_norm = max(0, min(1, mod_finalscore / max_finalscore))
-                
-                mod_mfascore = (
-                    mfa_finalscore_coeff * mod_finalscore_norm +
-                    mfa_qualscore_coeff * results['stage1']['qualscore']
-                )
-                mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-                
-            else:  # MarketVar
-                mod_value = max(0, min(10, marketscore_input + change))
-                mod_marketscore = marketscore_coeff * (mod_value / 10.0)
-                max_marketscore = abs(marketscore_coeff)
-                mod_marketscore_norm = max(0, min(1, mod_marketscore / max_marketscore))
-                
-                mod_finalscore = (
-                    final_finscore_coeff * results['stage1']['finscore'] +
-                    final_indscore_coeff * results['stage1']['indscore'] +
-                    final_marketscore_coeff * mod_marketscore_norm
-                )
-                mod_finalscore_norm = max(0, min(1, mod_finalscore / max_finalscore))
-                
-                mod_mfascore = (
-                    mfa_finalscore_coeff * mod_finalscore_norm +
-                    mfa_qualscore_coeff * results['stage1']['qualscore']
-                )
-                mod_mfascore_norm = max(0, min(1, mod_mfascore / max_mfascore))
-        
-        sensitivities.append(mod_mfascore_norm)
-    
-    sensitivity_results.append({
-        'Variable': var_name,
-        '-2 Units': sensitivities[0],
-        '-1 Unit': sensitivities[1],
-        'Base': sensitivities[2],
-        '+1 Unit': sensitivities[3],
-        '+2 Units': sensitivities[4]
-    })
-
-sensitivity_df = pd.DataFrame(sensitivity_results)
-st.dataframe(
-    sensitivity_df.style.format({
-        '-2 Units': '{:.3f}',
-        '-1 Unit': '{:.3f}',
-        'Base': '{:.3f}',
-        '+1 Unit': '{:.3f}',
-        '+2 Units': '{:.3f}'
-    }).background_gradient(axis=1, cmap='RdYlGn'),
-    use_container_width=True
-)
-
-# Download Section
-st.header("💾 Export Results")
-
-# Create downloadable data
-download_data = pd.DataFrame({
-    'Variable': finscore_names + qualscore_names + ['IndVar', 'MarketVar'],
-    'Value': finscore_inputs + qualscore_inputs + [indscore_input, marketscore_input],
-    'Coefficient': finscore_coeffs + qualscore_coeffs + [indscore_coeff, marketscore_coeff],
-    'Module': ['Finscore'] * 6 + ['Qualscore'] * 4 + ['Indscore', 'Marketscore']
-})
-
-# Add stage results
-stage_results_df = pd.DataFrame([
-    {'Stage': 'Stage 1 - Finscore', 'Score': results['stage1']['finscore']},
-    {'Stage': 'Stage 1 - Qualscore', 'Score': results['stage1']['qualscore']},
-    {'Stage': 'Stage 1 - Indscore', 'Score': results['stage1']['indscore']},
-    {'Stage': 'Stage 1 - Marketscore', 'Score': results['stage1']['marketscore']},
-    {'Stage': 'Stage 2 - Finalscore', 'Score': results['stage2']['finalscore']},
-    {'Stage': 'Stage 3 - MFAScore', 'Score': results['stage3']['mfascore']}
-])
-
-# Convert to CSV
-csv1 = download_data.to_csv(index=False)
-csv2 = stage_results_df.to_csv(index=False)
-csv3 = impact_df.to_csv(index=False)
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.download_button(
-        label="📥 Download Input Data",
-        data=csv1,
-        file_name="model_input_data.csv",
-        mime="text/csv"
-    )
-with col2:
-    st.download_button(
-        label="📥 Download Stage Results",
-        data=csv2,
-        file_name="stage_results.csv",
-        mime="text/csv"
-    )
-with col3:
-    st.download_button(
-        label="📥 Download Impact Analysis",
-        data=csv3,
-        file_name="impact_analysis.csv",
-        mime="text/csv"
-    )
-
-# Information section
-with st.expander("ℹ️ How to use this dashboard"):
-    st.markdown("""
-    ### Dashboard Guide
-    
-    1. **Model Parameters (Sidebar)**:
-       - Adjust coefficients for each stage using sliders
-       - Set weights for each variable and module
-    
-    2. **Input Variables (Main Panel)**:
-       - Enter values for all variables (0-10 scale)
-       - Variables are automatically normalized
-    
-    3. **Results Section**:
-       - View calculated scores for each stage
-       - See the final MFAScore
-    
-    4. **Impact Analysis**:
-       - **Variable-Level Impact**: Shows how each variable affects the final MFAScore
-       - **Module-Wise Impact**: Shows contribution of each module to final score
-    
-    5. **Visualizations**:
-       - Interactive charts showing variable impacts and score progression
-    
-    6. **Sensitivity Analysis**:
-       - See how changes in each variable affect the final score
-    
-    7. **Export Results**:
-       - Download all data as CSV files for further analysis
-    
-    ### Model Structure:
-    - **Stage 1**: 4 independent scores calculated from input variables
-    - **Stage 2**: Finalscore calculated from Finscore, Indscore, and Marketscore
-    - **Stage 3**: MFAScore calculated from Finalscore and Qualscore
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown("**Dashboard Features:** Interactive 3-Stage Scoring Model Analysis | Variable Impact Tracking | Sensitivity Testing")
+result
