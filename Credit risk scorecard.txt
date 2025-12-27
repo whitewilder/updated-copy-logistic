@@ -1,87 +1,503 @@
-import numpy as np
 import pandas as pd
+import numpy as np
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import (
+    Font, PatternFill, Alignment, Border, Side, 
+    NamedStyle, numbers
+)
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.utils import get_column_letter
+from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
+import os
+import warnings
 
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+warnings.filterwarnings('ignore')
 
 
-class PDContributionAnalyzer:
+class ExcelFormatter:
     """
-    Variable-level PD explainability for logistic models
+    A comprehensive Excel/CSV formatter with data cleaning and styling capabilities.
     """
-
-    def __init__(self, params):
-        self.p = params
-
-    def _baseline_logit(self):
-        return (
-            self.p['cons3']
-            + self.p['beta111'] * (self.p['cons1'] * self.p['beta11'] + self.p['beta33'] * self.p['cons2'])
-            + self.p['beta222'] * self.p['cons4']
-        )
-
-    def _variable_terms(self, df):
-        return {
-            'x1': self.p['beta111'] * self.p['beta11'] * self.p['beta1'] * df['x1'],
-            'x2': self.p['beta111'] * self.p['beta11'] * self.p['beta2'] * df['x2'],
-            'X3': self.p['beta111'] * self.p['beta22'] * df['X3'],
-            'X4': self.p['beta111'] * self.p['beta33'] * self.p['beta4'] * df['X4'],
-            'z1': self.p['beta222'] * self.p['beta5'] * df['z1'],
-            'z2': self.p['beta222'] * self.p['beta6'] * df['z2'],
-        }
-
-    def explain(self, df, threshold=0.9):
-        baseline = self._baseline_logit()
-        terms = self._variable_terms(df)
-
-        # ---- full logit ----
-        y_full = baseline
-        for t in terms.values():
-            y_full += t
-
-        pd_full = sigmoid(y_full)
-        baseline_pd = sigmoid(baseline)
-
-        # ---- variable PD contributions ----
-        contrib = {}
-        for v, t in terms.items():
-            pd_without = sigmoid(y_full - t)
-            contrib[v] = pd_full - pd_without
-
-        contrib_df = pd.DataFrame(contrib)
-        contrib_df['PD_full'] = pd_full
-        contrib_df['baseline_PD'] = baseline_pd
-
-        # ---- % contribution ----
-        abs_sum = contrib_df[list(terms.keys())].abs().sum(axis=1)
-
-        pct_df = contrib_df[list(terms.keys())].abs().div(abs_sum, axis=0).fillna(0)
-
-        # ---- dominance analysis ----
-        dominance = []
-        top_n = []
-
-        for i in range(len(df)):
-            sorted_vars = pct_df.iloc[i].sort_values(ascending=False)
-            cum = sorted_vars.cumsum()
-
-            dominant = list(cum[cum <= threshold].index)
-            dominant.append(cum.index[len(dominant)])
-
-            dominance.append(dominant)
-            top_n.append(len(dominant))
-
-        contrib_df['top_vars'] = dominance
-        contrib_df['num_driving_vars'] = top_n
-
-        # ---- attach pct columns ----
-        for v in pct_df.columns:
-            contrib_df[f'{v}_pct'] = pct_df[v]
-
-        return contrib_df
     
-analyzer = PDContributionAnalyzer(params)
+    def __init__(self):
+        # Define color schemes
+        self.header_fill = PatternFill(
+            start_color="C00000",  # Dark Red
+            end_color="C00000",
+            fill_type="solid"
+        )
+        self.header_font = Font(
+            name='Calibri',
+            size=10,
+            bold=True,
+            color="FFFFFF"  # White text
+        )
+        self.data_font = Font(
+            name='Calibri',
+            size=9,
+            bold=False,
+            color="333333"  # Dark grey
+        )
+        self.alternate_fill = PatternFill(
+            start_color="F2F2F2",  # Light grey
+            end_color="F2F2F2",
+            fill_type="solid"
+        )
+        self.border = Border(
+            left=Side(style='thin', color='CCCCCC'),
+            right=Side(style='thin', color='CCCCCC'),
+            top=Side(style='thin', color='CCCCCC'),
+            bottom=Side(style='thin', color='CCCCCC')
+        )
+        self.center_alignment = Alignment(
+            horizontal='center',
+            vertical='center',
+            wrap_text=True
+        )
+        self.left_alignment = Alignment(
+            horizontal='left',
+            vertical='center',
+            wrap_text=True
+        )
+    
+    def read_file(self, file_path):
+        """
+        Read CSV or Excel file and return dictionary of DataFrames.
+        """
+        file_extension = os.path.splitext(file_path)[1].lower()
+        
+        if file_extension == '.csv':
+            df = pd.read_csv(file_path)
+            return {'Sheet1': df}
+        elif file_extension in ['.xlsx', '.xls']:
+            excel_file = pd.ExcelFile(file_path)
+            sheets_dict = {}
+            for sheet_name in excel_file.sheet_names:
+                sheets_dict[sheet_name] = pd.read_excel(
+                    excel_file, 
+                    sheet_name=sheet_name
+                )
+            return sheets_dict
+        else:
+            raise ValueError(f"Unsupported file format: {file_extension}")
+    
+    def convert_to_numeric(self, df):
+        """
+        Detect and convert columns to numeric where possible.
+        """
+        df_copy = df.copy()
+        
+        for col in df_copy.columns:
+            # Try to convert to numeric
+            if df_copy[col].dtype == 'object':
+                # Remove common formatting characters
+                try:
+                    cleaned = df_copy[col].astype(str).str.replace(
+                        r'[\$,€£%\s]', '', regex=True
+                    )
+                    numeric_col = pd.to_numeric(cleaned, errors='coerce')
+                    
+                    # If more than 50% are valid numbers, convert
+                    if numeric_col.notna().sum() / len(numeric_col) > 0.5:
+                        df_copy[col] = numeric_col
+                except:
+                    pass
+        
+        return df_copy
+    
+    def detect_percentage_rows(self, df):
+        """
+        Detect rows where all numeric values are between 0 and 1.
+        Returns set of column indices that should be formatted as percentage.
+        """
+        percentage_columns = set()
+        
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                non_null_values = df[col].dropna()
+                if len(non_null_values) > 0:
+                    # Check if all values are between 0 and 1
+                    if (non_null_values >= 0).all() and (non_null_values <= 1).all():
+                        # Additional check: if max value is very small, likely percentage
+                        if non_null_values.max() <= 1:
+                            percentage_columns.add(col)
+        
+        return percentage_columns
+    
+    def remove_high_missing_columns(self, df, threshold=0.5):
+        """
+        Remove columns with missing values greater than threshold.
+        """
+        missing_pct = df.isnull().sum() / len(df)
+        cols_to_keep = missing_pct[missing_pct <= threshold].index.tolist()
+        removed_cols = [col for col in df.columns if col not in cols_to_keep]
+        
+        if removed_cols:
+            print(f"  Removed columns with >{threshold*100}% missing: {removed_cols}")
+        
+        return df[cols_to_keep]
+    
+    def remove_high_duplicate_columns(self, df, threshold=0.9):
+        """
+        Remove columns where duplicate values exceed threshold.
+        """
+        cols_to_remove = []
+        
+        for col in df.columns:
+            # Calculate duplicate percentage
+            value_counts = df[col].value_counts(normalize=True, dropna=False)
+            if len(value_counts) > 0:
+                max_duplicate_pct = value_counts.iloc[0]
+                if max_duplicate_pct > threshold:
+                    cols_to_remove.append(col)
+        
+        if cols_to_remove:
+            print(f"  Removed columns with >{threshold*100}% duplicates: {cols_to_remove}")
+        
+        return df.drop(columns=cols_to_remove)
+    
+    def clean_dataframe(self, df):
+        """
+        Apply all cleaning operations to DataFrame.
+        """
+        print("  Converting to numeric...")
+        df = self.convert_to_numeric(df)
+        
+        print("  Removing high missing columns...")
+        df = self.remove_high_missing_columns(df, threshold=0.5)
+        
+        print("  Removing high duplicate columns...")
+        df = self.remove_high_duplicate_columns(df, threshold=0.9)
+        
+        return df
+    
+    def auto_fit_column_width(self, ws):
+        """
+        Auto-fit column widths based on content.
+        """
+        for column_cells in ws.columns:
+            max_length = 0
+            column_letter = get_column_letter(column_cells[0].column)
+            
+            for cell in column_cells:
+                try:
+                    if cell.value:
+                        cell_length = len(str(cell.value))
+                        if cell_length > max_length:
+                            max_length = cell_length
+                except:
+                    pass
+            
+            # Set width with some padding, max 50, min 8
+            adjusted_width = min(max(max_length + 2, 8), 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+    
+    def apply_formatting(self, ws, df, percentage_columns):
+        """
+        Apply all formatting to worksheet.
+        """
+        # Format header row
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font = self.header_font
+            cell.fill = self.header_fill
+            cell.alignment = self.center_alignment
+            cell.border = self.border
+        
+        # Format data rows
+        for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
+            for col_idx, cell in enumerate(row, 1):
+                # Apply base formatting
+                cell.font = self.data_font
+                cell.border = self.border
+                
+                # Alternate row coloring
+                if row_idx % 2 == 0:
+                    cell.fill = self.alternate_fill
+                
+                # Apply alignment based on data type
+                if isinstance(cell.value, (int, float)):
+                    cell.alignment = Alignment(horizontal='right', vertical='center')
+                else:
+                    cell.alignment = self.left_alignment
+                
+                # Apply percentage format
+                col_name = df.columns[col_idx - 1] if col_idx <= len(df.columns) else None
+                if col_name in percentage_columns and isinstance(cell.value, (int, float)):
+                    cell.number_format = '0.00%'
+                elif isinstance(cell.value, float):
+                    # Format other numbers
+                    if cell.value == int(cell.value):
+                        cell.number_format = '#,##0'
+                    else:
+                        cell.number_format = '#,##0.00'
+        
+        # Freeze top row
+        ws.freeze_panes = 'A2'
+        
+        # Auto-fit columns
+        self.auto_fit_column_width(ws)
+        
+        # Set row height
+        ws.row_dimensions[1].height = 25  # Header row
+        for row_idx in range(2, ws.max_row + 1):
+            ws.row_dimensions[row_idx].height = 18
+    
+    def add_conditional_formatting(self, ws, df):
+        """
+        Add conditional formatting rules.
+        """
+        from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
+        
+        for col_idx, col in enumerate(df.columns, 1):
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_letter = get_column_letter(col_idx)
+                cell_range = f"{col_letter}2:{col_letter}{ws.max_row}"
+                
+                # Add color scale for numeric columns
+                rule = ColorScaleRule(
+                    start_type='min',
+                    start_color='FFFFFF',
+                    mid_type='percentile',
+                    mid_value=50,
+                    mid_color='FFEB9C',
+                    end_type='max',
+                    end_color='63BE7B'
+                )
+                ws.conditional_formatting.add(cell_range, rule)
+    
+    def add_summary_stats(self, ws, df, start_row):
+        """
+        Add summary statistics at the bottom of the sheet.
+        """
+        stats_row = start_row + 2
+        
+        # Add separator
+        ws.cell(row=stats_row, column=1, value="--- SUMMARY STATISTICS ---")
+        ws.cell(row=stats_row, column=1).font = Font(bold=True, size=10, color="C00000")
+        ws.merge_cells(start_row=stats_row, start_column=1, 
+                       end_row=stats_row, end_column=min(5, ws.max_column))
+        
+        # Add statistics for numeric columns
+        stats_row += 1
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        
+        if len(numeric_cols) > 0:
+            # Headers
+            stat_names = ['Column', 'Count', 'Mean', 'Std', 'Min', 'Max']
+            for idx, name in enumerate(stat_names, 1):
+                cell = ws.cell(row=stats_row, column=idx, value=name)
+                cell.font = Font(bold=True, size=9)
+                cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+            
+            stats_row += 1
+            
+            for col in numeric_cols[:10]:  # Limit to first 10 numeric columns
+                stats = df[col].describe()
+                ws.cell(row=stats_row, column=1, value=str(col))
+                ws.cell(row=stats_row, column=2, value=int(stats['count']))
+                ws.cell(row=stats_row, column=3, value=round(stats['mean'], 2))
+                ws.cell(row=stats_row, column=4, value=round(stats['std'], 2))
+                ws.cell(row=stats_row, column=5, value=round(stats['min'], 2))
+                ws.cell(row=stats_row, column=6, value=round(stats['max'], 2))
+                
+                for col_idx in range(1, 7):
+                    ws.cell(row=stats_row, column=col_idx).font = self.data_font
+                
+                stats_row += 1
+    
+    def process_and_format(self, input_file, output_file=None, 
+                           add_stats=True, add_conditional=True):
+        """
+        Main function to process and format the file.
+        
+        Parameters:
+        -----------
+        input_file : str
+            Path to input CSV or Excel file
+        output_file : str, optional
+            Path for output file. If None, creates formatted_<input_file>.xlsx
+        add_stats : bool
+            Whether to add summary statistics
+        add_conditional : bool
+            Whether to add conditional formatting
+            
+        Returns:
+        --------
+        str : Path to the output file
+        """
+        print(f"\n{'='*60}")
+        print(f"Processing: {input_file}")
+        print(f"{'='*60}")
+        
+        # Generate output filename if not provided
+        if output_file is None:
+            base_name = os.path.splitext(os.path.basename(input_file))[0]
+            output_file = f"formatted_{base_name}.xlsx"
+        
+        # Read the file
+        print("\n[1/5] Reading file...")
+        sheets_dict = self.read_file(input_file)
+        print(f"  Found {len(sheets_dict)} sheet(s): {list(sheets_dict.keys())}")
+        
+        # Create workbook
+        wb = Workbook()
+        wb.remove(wb.active)  # Remove default sheet
+        
+        # Process each sheet
+        for sheet_idx, (sheet_name, df) in enumerate(sheets_dict.items()):
+            print(f"\n[2/5] Processing sheet: '{sheet_name}' ({len(df)} rows, {len(df.columns)} columns)")
+            
+            # Clean the dataframe
+            print("\n[3/5] Cleaning data...")
+            df_cleaned = self.clean_dataframe(df)
+            print(f"  After cleaning: {len(df_cleaned)} rows, {len(df_cleaned.columns)} columns")
+            
+            # Detect percentage columns
+            percentage_columns = self.detect_percentage_rows(df_cleaned)
+            if percentage_columns:
+                print(f"  Percentage columns detected: {percentage_columns}")
+            
+            # Create worksheet
+            ws = wb.create_sheet(title=sheet_name[:31])  # Excel sheet name limit
+            
+            # Write data to worksheet
+            print("\n[4/5] Writing data to worksheet...")
+            for r_idx, row in enumerate(dataframe_to_rows(df_cleaned, index=False, header=True), 1):
+                for c_idx, value in enumerate(row, 1):
+                    cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            
+            # Apply formatting
+            print("\n[5/5] Applying formatting...")
+            self.apply_formatting(ws, df_cleaned, percentage_columns)
+            
+            # Add conditional formatting
+            if add_conditional:
+                self.add_conditional_formatting(ws, df_cleaned)
+            
+            # Add summary statistics
+            if add_stats:
+                self.add_summary_stats(ws, df_cleaned, ws.max_row)
+        
+        # Save workbook
+        wb.save(output_file)
+        print(f"\n{'='*60}")
+        print(f"✓ File saved successfully: {output_file}")
+        print(f"{'='*60}\n")
+        
+        return output_file
 
-result = analyzer.explain(df, threshold=0.8)
 
-result
+def format_excel(input_file, output_file=None, **kwargs):
+    """
+    Convenience function to format Excel/CSV files.
+    
+    Parameters:
+    -----------
+    input_file : str
+        Path to input CSV or Excel file
+    output_file : str, optional
+        Path for output file
+    **kwargs : 
+        Additional arguments passed to process_and_format()
+        - add_stats (bool): Add summary statistics (default: True)
+        - add_conditional (bool): Add conditional formatting (default: True)
+    
+    Returns:
+    --------
+    str : Path to the output file
+    
+    Example:
+    --------
+    >>> format_excel('data.csv', 'formatted_data.xlsx')
+    >>> format_excel('report.xlsx', add_stats=False)
+    """
+    formatter = ExcelFormatter()
+    return formatter.process_and_format(input_file, output_file, **kwargs)
+
+
+# ============================================================================
+# Additional utility functions
+# ============================================================================
+
+def batch_format_files(input_folder, output_folder=None, file_pattern='*.csv'):
+    """
+    Format multiple files in a folder.
+    
+    Parameters:
+    -----------
+    input_folder : str
+        Path to folder containing files
+    output_folder : str, optional
+        Path to output folder. If None, saves in same folder
+    file_pattern : str
+        Pattern to match files (e.g., '*.csv', '*.xlsx', '*')
+    """
+    import glob
+    
+    if output_folder is None:
+        output_folder = input_folder
+    
+    os.makedirs(output_folder, exist_ok=True)
+    
+    files = glob.glob(os.path.join(input_folder, file_pattern))
+    
+    print(f"Found {len(files)} files to process")
+    
+    for file_path in files:
+        try:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            output_path = os.path.join(output_folder, f"formatted_{base_name}.xlsx")
+            format_excel(file_path, output_path)
+        except Exception as e:
+            print(f"Error processing {file_path}: {str(e)}")
+
+
+def create_sample_data():
+    """
+    Create sample data for testing.
+    """
+    np.random.seed(42)
+    
+    df = pd.DataFrame({
+        'ID': range(1, 101),
+        'Name': [f'Product_{i}' for i in range(1, 101)],
+        'Category': np.random.choice(['A', 'B', 'C'], 100),
+        'Price': np.random.uniform(10, 1000, 100).round(2),
+        'Quantity': np.random.randint(1, 100, 100),
+        'Discount_Rate': np.random.uniform(0, 0.5, 100).round(4),  # Will be detected as percentage
+        'Profit_Margin': np.random.uniform(0.1, 0.4, 100).round(4),  # Will be detected as percentage
+        'High_Missing': [np.nan if np.random.random() > 0.4 else i for i in range(100)],  # >50% missing
+        'Constant_Col': ['Same Value'] * 100,  # >90% duplicate
+        'Sales_Date': pd.date_range('2024-01-01', periods=100).astype(str),
+        'Revenue': np.random.uniform(1000, 50000, 100).round(2),
+    })
+    
+    # Add some missing values randomly
+    for col in ['Price', 'Revenue']:
+        mask = np.random.random(100) > 0.9
+        df.loc[mask, col] = np.nan
+    
+    df.to_csv('sample_data.csv', index=False)
+    print("Sample data created: sample_data.csv")
+    return df
+
+
+# ============================================================================
+# Main execution
+# ============================================================================
+
+if __name__ == "__main__":
+    # Create sample data
+    print("Creating sample data...")
+    create_sample_data()
+    
+    # Format the sample file
+    print("\nFormatting sample data...")
+    output_path = format_excel(
+        'sample_data.csv', 
+        'formatted_sample_data.xlsx',
+        add_stats=True,
+        add_conditional=True
+    )
+    
+    print(f"\nDone! Check '{output_path}' for the formatted output.")
