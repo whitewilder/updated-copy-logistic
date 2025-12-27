@@ -225,11 +225,20 @@ class ExcelFormatter:
                 if col_name in percentage_columns and isinstance(cell.value, (int, float)):
                     cell.number_format = '0.00%'
                 elif isinstance(cell.value, float):
-                    # Format other numbers
-                    if cell.value == int(cell.value):
-                        cell.number_format = '#,##0'
+                    # Format other numbers - handle NaN values
+                    import math
+                    if not math.isnan(cell.value):
+                        # Check if float is actually an integer value
+                        if cell.value == int(cell.value):
+                            cell.number_format = '#,##0'
+                        else:
+                            cell.number_format = '#,##0.00'
                     else:
-                        cell.number_format = '#,##0.00'
+                        # NaN value - you might want to format it differently
+                        cell.number_format = 'General'
+                elif isinstance(cell.value, int):
+                    # Handle integer values
+                    cell.number_format = '#,##0'
         
         # Freeze top row
         ws.freeze_panes = 'A2'
@@ -265,48 +274,10 @@ class ExcelFormatter:
                 )
                 ws.conditional_formatting.add(cell_range, rule)
     
-    def add_summary_stats(self, ws, df, start_row):
-        """
-        Add summary statistics at the bottom of the sheet.
-        """
-        stats_row = start_row + 2
-        
-        # Add separator
-        ws.cell(row=stats_row, column=1, value="--- SUMMARY STATISTICS ---")
-        ws.cell(row=stats_row, column=1).font = Font(bold=True, size=10, color="C00000")
-        ws.merge_cells(start_row=stats_row, start_column=1, 
-                       end_row=stats_row, end_column=min(5, ws.max_column))
-        
-        # Add statistics for numeric columns
-        stats_row += 1
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        
-        if len(numeric_cols) > 0:
-            # Headers
-            stat_names = ['Column', 'Count', 'Mean', 'Std', 'Min', 'Max']
-            for idx, name in enumerate(stat_names, 1):
-                cell = ws.cell(row=stats_row, column=idx, value=name)
-                cell.font = Font(bold=True, size=9)
-                cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-            
-            stats_row += 1
-            
-            for col in numeric_cols[:10]:  # Limit to first 10 numeric columns
-                stats = df[col].describe()
-                ws.cell(row=stats_row, column=1, value=str(col))
-                ws.cell(row=stats_row, column=2, value=int(stats['count']))
-                ws.cell(row=stats_row, column=3, value=round(stats['mean'], 2))
-                ws.cell(row=stats_row, column=4, value=round(stats['std'], 2))
-                ws.cell(row=stats_row, column=5, value=round(stats['min'], 2))
-                ws.cell(row=stats_row, column=6, value=round(stats['max'], 2))
-                
-                for col_idx in range(1, 7):
-                    ws.cell(row=stats_row, column=col_idx).font = self.data_font
-                
-                stats_row += 1
+
     
     def process_and_format(self, input_file, output_file=None, 
-                           add_stats=True, add_conditional=True):
+                            add_conditional=False):
         """
         Main function to process and format the file.
         
@@ -316,8 +287,7 @@ class ExcelFormatter:
             Path to input CSV or Excel file
         output_file : str, optional
             Path for output file. If None, creates formatted_<input_file>.xlsx
-        add_stats : bool
-            Whether to add summary statistics
+  
         add_conditional : bool
             Whether to add conditional formatting
             
@@ -374,10 +344,7 @@ class ExcelFormatter:
             if add_conditional:
                 self.add_conditional_formatting(ws, df_cleaned)
             
-            # Add summary statistics
-            if add_stats:
-                self.add_summary_stats(ws, df_cleaned, ws.max_row)
-        
+
         # Save workbook
         wb.save(output_file)
         print(f"\n{'='*60}")
@@ -399,7 +366,7 @@ def format_excel(input_file, output_file=None, **kwargs):
         Path for output file
     **kwargs : 
         Additional arguments passed to process_and_format()
-        - add_stats (bool): Add summary statistics (default: True)
+ 
         - add_conditional (bool): Add conditional formatting (default: True)
     
     Returns:
@@ -409,7 +376,7 @@ def format_excel(input_file, output_file=None, **kwargs):
     Example:
     --------
     >>> format_excel('data.csv', 'formatted_data.xlsx')
-    >>> format_excel('report.xlsx', add_stats=False)
+    >>> format_excel('report.xlsx')
     """
     formatter = ExcelFormatter()
     return formatter.process_and_format(input_file, output_file, **kwargs)
@@ -496,8 +463,8 @@ if __name__ == "__main__":
     output_path = format_excel(
         'sample_data.csv', 
         'formatted_sample_data.xlsx',
-        add_stats=True,
-        add_conditional=True
+
+        add_conditional=False
     )
     
     print(f"\nDone! Check '{output_path}' for the formatted output.")
