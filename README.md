@@ -4,3 +4,10 @@ Use list comprehensions instead of for loops.
 • Cache function results using lru_cache.
 Convert the for loop to a list comprehension.
 
+
+CONTEXT: ...
+TASK: ...
+SUPPORTING_DATA: {{{
+}}}
+COMPLETION:
+
