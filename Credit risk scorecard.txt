@@ -1,52 +1,23 @@
-"""Configuration settings for the vector store."""
-
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal
-
-
-@dataclass
-class Config:
-    # Embedding model settings
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"  # Fast & efficient
-    # Alternative models:
-    # "sentence-transformers/all-mpnet-base-v2"  # More accurate, slower
-    # "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"  # Optimized for Q&A
-    
-    # Chunking settings
-    CHUNK_SIZE: int = 512
-    CHUNK_OVERLAP: int = 50
-    
-    # FAISS settings
-    FAISS_INDEX_TYPE: Literal["flat", "ivf", "hnsw"] = "flat"
-    NLIST: int = 100  # For IVF index
-    NPROBE: int = 10  # For IVF search
-    
-    # Paths
-    VECTOR_DB_PATH: Path = Path("./data/vector_db")
-    
-    # Search settings
-    DEFAULT_TOP_K: int = 5
-    SIMILARITY_THRESHOLD: float = 0.3  # Minimum similarity score
-
-
 """
-End-to-End Vector Store with FAISS for PDF and DOCX files.
-Supports efficient similarity search with local storage.
+Enhanced Vector Store with FAISS - Table Extraction & Multi-Datatype Support
+Supports PDF/DOCX text and table extraction with DataFrame storage.
 """
 
 import os
 import re
+import json
 import pickle
 import hashlib
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union
-from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Tuple, Union, Literal
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
+import io
 
 import numpy as np
+import pandas as pd
 import faiss
 from tqdm import tqdm
 
@@ -54,6 +25,7 @@ from tqdm import tqdm
 import pdfplumber
 from PyPDF2 import PdfReader
 from docx import Document as DocxDocument
+from docx.table import Table as DocxTable
 
 # Embeddings
 from sentence_transformers import SentenceTransformer
@@ -64,8 +36,37 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# DATA CLASSES
+# CONFIGURATION
 # ============================================================================
+
+@dataclass
+class Config:
+    """Configuration settings for the vector store."""
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    CHUNK_SIZE: int = 512
+    CHUNK_OVERLAP: int = 50
+    FAISS_INDEX_TYPE: Literal["flat", "ivf", "hnsw"] = "flat"
+    NLIST: int = 100
+    NPROBE: int = 10
+    VECTOR_DB_PATH: Path = Path("./data/vector_db")
+    DEFAULT_TOP_K: int = 5
+    SIMILARITY_THRESHOLD: float = 0.3
+    STORAGE_FORMAT: Literal["json", "pkl", "both"] = "both"
+
+
+config = Config()
+
+
+# ============================================================================
+# ENUMS AND DATA CLASSES
+# ============================================================================
+
+class ContentType(Enum):
+    """Type of content stored in the vector store."""
+    TEXT = "text"
+    TABLE = "table"
+    MIXED = "mixed"
+
 
 @dataclass
 class TextChunk:
@@ -74,34 +75,371 @@ class TextChunk:
     chunk_id: str
     document_id: str
     document_name: str
+    content_type: str = "text"
     page_number: Optional[int] = None
     chunk_index: int = 0
     start_char: int = 0
     end_char: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "text": self.text,
+            "chunk_id": self.chunk_id,
+            "document_id": self.document_id,
+            "document_name": self.document_name,
+            "content_type": self.content_type,
+            "page_number": self.page_number,
+            "chunk_index": self.chunk_index,
+            "start_char": self.start_char,
+            "end_char": self.end_char,
+            "metadata": self.metadata
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TextChunk':
+        """Create from dictionary."""
+        return cls(**data)
+
+
+@dataclass
+class TableChunk:
+    """Represents a table with metadata and DataFrame storage."""
+    table_id: str
+    document_id: str
+    document_name: str
+    page_number: Optional[int] = None
+    table_index: int = 0
+    
+    # DataFrame storage
+    dataframe_json: str = ""  # JSON representation for storage
+    dataframe_csv: str = ""   # CSV representation for display
+    
+    # Text representation for embedding
+    text_representation: str = ""
+    
+    # Table metadata
+    num_rows: int = 0
+    num_cols: int = 0
+    column_names: List[str] = field(default_factory=list)
+    
+    # Additional metadata
+    caption: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    content_type: str = "table"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "table_id": self.table_id,
+            "document_id": self.document_id,
+            "document_name": self.document_name,
+            "page_number": self.page_number,
+            "table_index": self.table_index,
+            "dataframe_json": self.dataframe_json,
+            "dataframe_csv": self.dataframe_csv,
+            "text_representation": self.text_representation,
+            "num_rows": self.num_rows,
+            "num_cols": self.num_cols,
+            "column_names": self.column_names,
+            "caption": self.caption,
+            "metadata": self.metadata,
+            "content_type": self.content_type
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TableChunk':
+        """Create from dictionary."""
+        return cls(**data)
+    
+    def get_dataframe(self) -> pd.DataFrame:
+        """Reconstruct DataFrame from JSON storage."""
+        if self.dataframe_json:
+            return pd.read_json(io.StringIO(self.dataframe_json), orient='split')
+        return pd.DataFrame()
+    
+    @classmethod
+    def from_dataframe(
+        cls,
+        df: pd.DataFrame,
+        table_id: str,
+        document_id: str,
+        document_name: str,
+        page_number: Optional[int] = None,
+        table_index: int = 0,
+        caption: Optional[str] = None,
+        metadata: Dict[str, Any] = None
+    ) -> 'TableChunk':
+        """Create TableChunk from a pandas DataFrame."""
+        # Generate text representation for embedding
+        text_repr = cls._dataframe_to_text(df, caption)
+        
+        return cls(
+            table_id=table_id,
+            document_id=document_id,
+            document_name=document_name,
+            page_number=page_number,
+            table_index=table_index,
+            dataframe_json=df.to_json(orient='split', date_format='iso'),
+            dataframe_csv=df.to_csv(index=False),
+            text_representation=text_repr,
+            num_rows=len(df),
+            num_cols=len(df.columns),
+            column_names=list(df.columns),
+            caption=caption,
+            metadata=metadata or {},
+            content_type="table"
+        )
+    
+    @staticmethod
+    def _dataframe_to_text(df: pd.DataFrame, caption: Optional[str] = None) -> str:
+        """Convert DataFrame to searchable text representation."""
+        text_parts = []
+        
+        if caption:
+            text_parts.append(f"Table: {caption}")
+        
+        # Add column names
+        text_parts.append(f"Columns: {', '.join(df.columns.astype(str))}")
+        
+        # Add row data (limit to avoid too long text)
+        max_rows = min(20, len(df))
+        for idx, row in df.head(max_rows).iterrows():
+            row_text = " | ".join([f"{col}: {val}" for col, val in row.items()])
+            text_parts.append(row_text)
+        
+        if len(df) > max_rows:
+            text_parts.append(f"... and {len(df) - max_rows} more rows")
+        
+        return "\n".join(text_parts)
 
 
 @dataclass
 class SearchResult:
-    """Represents a search result."""
-    text: str
+    """Represents a search result (text or table)."""
+    content: str  # Text content or table text representation
     score: float
     document_name: str
     page_number: Optional[int]
     chunk_id: str
+    content_type: str  # "text" or "table"
     metadata: Dict[str, Any]
+    
+    # Table-specific fields
+    dataframe: Optional[pd.DataFrame] = None
+    table_csv: Optional[str] = None
+    column_names: Optional[List[str]] = None
+    num_rows: Optional[int] = None
+    num_cols: Optional[int] = None
+    
+    def get_formatted_table(self, max_rows: int = 10) -> str:
+        """Get formatted table string for display."""
+        if self.dataframe is not None:
+            return self.dataframe.head(max_rows).to_string()
+        elif self.table_csv:
+            df = pd.read_csv(io.StringIO(self.table_csv))
+            return df.head(max_rows).to_string()
+        return ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        result = {
+            "content": self.content,
+            "score": self.score,
+            "document_name": self.document_name,
+            "page_number": self.page_number,
+            "chunk_id": self.chunk_id,
+            "content_type": self.content_type,
+            "metadata": self.metadata,
+            "column_names": self.column_names,
+            "num_rows": self.num_rows,
+            "num_cols": self.num_cols
+        }
+        if self.dataframe is not None:
+            result["dataframe_json"] = self.dataframe.to_json(orient='split')
+        return result
 
 
 # ============================================================================
-# DOCUMENT LOADERS
+# TABLE EXTRACTORS
+# ============================================================================
+
+class PDFTableExtractor:
+    """Extract tables from PDF files using pdfplumber."""
+    
+    @staticmethod
+    def extract_tables(file_path: str) -> List[Tuple[int, int, pd.DataFrame, Optional[str]]]:
+        """
+        Extract all tables from a PDF file.
+        
+        Returns:
+            List of (page_number, table_index, dataframe, caption) tuples
+        """
+        tables = []
+        
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    page_tables = page.extract_tables()
+                    
+                    for table_idx, table_data in enumerate(page_tables):
+                        if table_data and len(table_data) > 0:
+                            # Convert to DataFrame
+                            df = PDFTableExtractor._table_to_dataframe(table_data)
+                            
+                            if df is not None and not df.empty:
+                                # Try to extract caption (text near table)
+                                caption = PDFTableExtractor._extract_table_caption(
+                                    page, table_idx
+                                )
+                                tables.append((page_num, table_idx, df, caption))
+        
+        except Exception as e:
+            logger.error(f"Error extracting tables from PDF: {e}")
+        
+        return tables
+    
+    @staticmethod
+    def _table_to_dataframe(table_data: List[List]) -> Optional[pd.DataFrame]:
+        """Convert raw table data to DataFrame."""
+        try:
+            if len(table_data) < 2:
+                return None
+            
+            # Clean the data
+            cleaned_data = []
+            for row in table_data:
+                cleaned_row = [
+                    str(cell).strip() if cell is not None else ""
+                    for cell in row
+                ]
+                cleaned_data.append(cleaned_row)
+            
+            # Use first row as header if it looks like headers
+            headers = cleaned_data[0]
+            data_rows = cleaned_data[1:]
+            
+            # Create DataFrame
+            df = pd.DataFrame(data_rows, columns=headers)
+            
+            # Clean column names
+            df.columns = [
+                re.sub(r'\s+', ' ', str(col)).strip() or f"Column_{i}"
+                for i, col in enumerate(df.columns)
+            ]
+            
+            return df
+        
+        except Exception as e:
+            logger.warning(f"Failed to convert table to DataFrame: {e}")
+            return None
+    
+    @staticmethod
+    def _extract_table_caption(page, table_idx: int) -> Optional[str]:
+        """Try to extract table caption from nearby text."""
+        try:
+            text = page.extract_text() or ""
+            # Look for common caption patterns
+            patterns = [
+                rf"Table\s*{table_idx + 1}[:\.\s]+([^\n]+)",
+                rf"Table\s+\d+[:\.\s]+([^\n]+)",
+                r"(?:Caption|Title)[:\s]+([^\n]+)"
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    return match.group(1).strip()
+            
+            return None
+        except:
+            return None
+
+
+class DOCXTableExtractor:
+    """Extract tables from DOCX files."""
+    
+    @staticmethod
+    def extract_tables(file_path: str) -> List[Tuple[int, int, pd.DataFrame, Optional[str]]]:
+        """
+        Extract all tables from a DOCX file.
+        
+        Returns:
+            List of (page_number, table_index, dataframe, caption) tuples
+        """
+        tables = []
+        
+        try:
+            doc = DocxDocument(file_path)
+            
+            for table_idx, table in enumerate(doc.tables):
+                df = DOCXTableExtractor._table_to_dataframe(table)
+                
+                if df is not None and not df.empty:
+                    # DOCX doesn't have page numbers, use 1
+                    caption = DOCXTableExtractor._extract_table_caption(doc, table_idx)
+                    tables.append((1, table_idx, df, caption))
+        
+        except Exception as e:
+            logger.error(f"Error extracting tables from DOCX: {e}")
+        
+        return tables
+    
+    @staticmethod
+    def _table_to_dataframe(table: DocxTable) -> Optional[pd.DataFrame]:
+        """Convert DOCX table to DataFrame."""
+        try:
+            data = []
+            for row in table.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                data.append(row_data)
+            
+            if len(data) < 2:
+                return None
+            
+            # Use first row as header
+            headers = data[0]
+            data_rows = data[1:]
+            
+            df = pd.DataFrame(data_rows, columns=headers)
+            
+            # Clean column names
+            df.columns = [
+                re.sub(r'\s+', ' ', str(col)).strip() or f"Column_{i}"
+                for i, col in enumerate(df.columns)
+            ]
+            
+            return df
+        
+        except Exception as e:
+            logger.warning(f"Failed to convert DOCX table to DataFrame: {e}")
+            return None
+    
+    @staticmethod
+    def _extract_table_caption(doc: DocxDocument, table_idx: int) -> Optional[str]:
+        """Try to extract table caption."""
+        try:
+            # Look for caption in paragraphs before the table
+            for para in doc.paragraphs:
+                text = para.text.strip()
+                if re.match(rf"Table\s*{table_idx + 1}", text, re.IGNORECASE):
+                    return text
+            return None
+        except:
+            return None
+
+
+# ============================================================================
+# DOCUMENT LOADERS (Enhanced with Table Support)
 # ============================================================================
 
 class PDFLoader:
-    """Efficient PDF text extraction with multiple fallback methods."""
+    """Enhanced PDF loader with text and table extraction."""
     
     @staticmethod
-    def extract_with_pdfplumber(file_path: str) -> List[Tuple[int, str]]:
-        """Extract text using pdfplumber (better for complex PDFs)."""
+    def extract_text_with_pdfplumber(file_path: str) -> List[Tuple[int, str]]:
+        """Extract text using pdfplumber."""
         pages = []
         try:
             with pdfplumber.open(file_path) as pdf:
@@ -110,12 +448,12 @@ class PDFLoader:
                     if text.strip():
                         pages.append((i + 1, text))
         except Exception as e:
-            logger.warning(f"pdfplumber failed: {e}")
+            logger.warning(f"pdfplumber text extraction failed: {e}")
         return pages
     
     @staticmethod
-    def extract_with_pypdf2(file_path: str) -> List[Tuple[int, str]]:
-        """Extract text using PyPDF2 (faster, less accurate)."""
+    def extract_text_with_pypdf2(file_path: str) -> List[Tuple[int, str]]:
+        """Extract text using PyPDF2 as fallback."""
         pages = []
         try:
             reader = PdfReader(file_path)
@@ -124,52 +462,78 @@ class PDFLoader:
                 if text.strip():
                     pages.append((i + 1, text))
         except Exception as e:
-            logger.warning(f"PyPDF2 failed: {e}")
+            logger.warning(f"PyPDF2 text extraction failed: {e}")
         return pages
     
     @classmethod
-    def load(cls, file_path: str) -> List[Tuple[int, str]]:
-        """Load PDF with fallback methods."""
-        # Try pdfplumber first (better quality)
-        pages = cls.extract_with_pdfplumber(file_path)
-        if not pages:
-            # Fallback to PyPDF2
-            pages = cls.extract_with_pypdf2(file_path)
-        return pages
+    def load(cls, file_path: str) -> Dict[str, Any]:
+        """
+        Load PDF with text and tables.
+        
+        Returns:
+            Dictionary with 'text_pages' and 'tables'
+        """
+        # Extract text
+        text_pages = cls.extract_text_with_pdfplumber(file_path)
+        if not text_pages:
+            text_pages = cls.extract_text_with_pypdf2(file_path)
+        
+        # Extract tables
+        tables = PDFTableExtractor.extract_tables(file_path)
+        
+        return {
+            "text_pages": text_pages,
+            "tables": tables
+        }
 
 
 class DOCXLoader:
-    """Efficient DOCX text extraction."""
+    """Enhanced DOCX loader with text and table extraction."""
     
     @staticmethod
-    def load(file_path: str) -> List[Tuple[int, str]]:
-        """Extract text from DOCX file."""
+    def load(file_path: str) -> Dict[str, Any]:
+        """
+        Load DOCX with text and tables.
+        
+        Returns:
+            Dictionary with 'text_pages' and 'tables'
+        """
+        text_pages = []
+        tables = []
+        
         try:
             doc = DocxDocument(file_path)
-            full_text = []
-            current_page = 1
             
+            # Extract text from paragraphs
+            full_text = []
             for para in doc.paragraphs:
                 text = para.text.strip()
                 if text:
                     full_text.append(text)
             
-            # DOCX doesn't have pages, treat as single page
-            combined_text = "\n\n".join(full_text)
-            return [(1, combined_text)] if combined_text else []
+            if full_text:
+                combined_text = "\n\n".join(full_text)
+                text_pages = [(1, combined_text)]
+            
+            # Extract tables
+            tables = DOCXTableExtractor.extract_tables(file_path)
             
         except Exception as e:
             logger.error(f"Failed to load DOCX {file_path}: {e}")
-            return []
+        
+        return {
+            "text_pages": text_pages,
+            "tables": tables
+        }
 
 
 class DocumentLoader:
-    """Unified document loader supporting multiple formats."""
+    """Unified document loader with multi-format support."""
     
     SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc'}
     
     @classmethod
-    def load(cls, file_path: Union[str, Path]) -> List[Tuple[int, str]]:
+    def load(cls, file_path: Union[str, Path]) -> Dict[str, Any]:
         """Load document based on file extension."""
         file_path = Path(file_path)
         
@@ -191,10 +555,7 @@ class DocumentLoader:
 # ============================================================================
 
 class TextChunker:
-    """
-    Intelligent text chunking with multiple strategies.
-    Supports semantic-aware chunking for better retrieval.
-    """
+    """Intelligent text chunking with semantic awareness."""
     
     def __init__(
         self,
@@ -208,10 +569,8 @@ class TextChunker:
     
     def _clean_text(self, text: str) -> str:
         """Clean and normalize text."""
-        # Remove excessive whitespace
         text = re.sub(r'\s+', ' ', text)
-        # Remove special characters but keep punctuation
-        text = re.sub(r'[^\w\s.,!?;:\'"()-]', '', text)
+        text = re.sub(r'[^\w\s.,!?;:\'"()\-\[\]{}]', '', text)
         return text.strip()
     
     def _split_by_separator(self, text: str, separator: str) -> List[str]:
@@ -245,7 +604,6 @@ class TextChunker:
             elif remaining_separators:
                 result.extend(self._recursive_split(split, remaining_separators))
             else:
-                # Force split at chunk_size
                 for i in range(0, len(split), self.chunk_size - self.chunk_overlap):
                     result.append(split[i:i + self.chunk_size])
         
@@ -277,7 +635,6 @@ class TextChunker:
         overlapped = []
         for i, chunk in enumerate(chunks):
             if i > 0:
-                # Get overlap from previous chunk
                 prev_chunk = chunks[i - 1]
                 overlap_text = prev_chunk[-self.chunk_overlap:] if len(prev_chunk) > self.chunk_overlap else prev_chunk
                 chunk = overlap_text + " " + chunk
@@ -292,13 +649,8 @@ class TextChunker:
         if len(text) <= self.chunk_size:
             return [text] if text else []
         
-        # Recursive split
         splits = self._recursive_split(text, self.separators)
-        
-        # Merge small chunks
         merged = self._merge_small_chunks(splits)
-        
-        # Add overlap
         final_chunks = self._add_overlap(merged)
         
         return [c for c in final_chunks if c.strip()]
@@ -309,10 +661,7 @@ class TextChunker:
 # ============================================================================
 
 class EmbeddingEngine:
-    """
-    Efficient embedding generation using Sentence Transformers.
-    Supports batching and caching for performance.
-    """
+    """Efficient embedding generation using Sentence Transformers."""
     
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         self.model_name = model_name
@@ -340,17 +689,7 @@ class EmbeddingEngine:
         batch_size: int = 32,
         show_progress: bool = True
     ) -> np.ndarray:
-        """
-        Generate embeddings for texts.
-        
-        Args:
-            texts: Single text or list of texts
-            batch_size: Batch size for encoding
-            show_progress: Show progress bar
-            
-        Returns:
-            Numpy array of embeddings
-        """
+        """Generate embeddings for texts."""
         if isinstance(texts, str):
             texts = [texts]
         
@@ -359,24 +698,64 @@ class EmbeddingEngine:
             batch_size=batch_size,
             show_progress_bar=show_progress,
             convert_to_numpy=True,
-            normalize_embeddings=True  # For cosine similarity
+            normalize_embeddings=True
         )
         
         return embeddings.astype(np.float32)
     
     def embed_query(self, query: str) -> np.ndarray:
-        """Embed a single query (no progress bar)."""
+        """Embed a single query."""
         return self.embed([query], show_progress=False)[0]
 
 
 # ============================================================================
-# FAISS VECTOR STORE
+# JSON SERIALIZATION HELPERS
+# ============================================================================
+
+class DataFrameJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles DataFrames and numpy types."""
+    
+    def default(self, obj):
+        if isinstance(obj, pd.DataFrame):
+            return {
+                "__type__": "DataFrame",
+                "data": obj.to_json(orient='split', date_format='iso')
+            }
+        elif isinstance(obj, np.ndarray):
+            return {
+                "__type__": "ndarray",
+                "data": obj.tolist(),
+                "dtype": str(obj.dtype)
+            }
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, Path):
+            return str(obj)
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
+def json_decoder_hook(obj: Dict) -> Any:
+    """Custom JSON decoder hook for DataFrames."""
+    if "__type__" in obj:
+        if obj["__type__"] == "DataFrame":
+            return pd.read_json(io.StringIO(obj["data"]), orient='split')
+        elif obj["__type__"] == "ndarray":
+            return np.array(obj["data"], dtype=obj["dtype"])
+    return obj
+
+
+# ============================================================================
+# FAISS VECTOR STORE (Enhanced)
 # ============================================================================
 
 class FAISSVectorStore:
     """
-    FAISS-based vector store with support for multiple index types.
-    Optimized for fast similarity search.
+    Enhanced FAISS vector store with multi-datatype support.
+    Supports text chunks, tables, and JSON/PKL storage.
     """
     
     def __init__(
@@ -392,19 +771,19 @@ class FAISSVectorStore:
         self.use_gpu = use_gpu
         
         self.index = None
-        self.chunks: List[TextChunk] = []
+        self.text_chunks: List[TextChunk] = []
+        self.table_chunks: List[TableChunk] = []
+        self.chunk_mapping: List[Tuple[str, int]] = []  # (type, index) mapping
         self.document_hashes: Dict[str, str] = {}
+        self.embeddings_store: Optional[np.ndarray] = None  # Store embeddings for rebuild
         
         self._create_index()
     
     def _create_index(self):
         """Create FAISS index based on type."""
         if self.index_type == "flat":
-            # Exact search - best for small datasets (<100k vectors)
             self.index = faiss.IndexFlatIP(self.embedding_dim)
-        
         elif self.index_type == "ivf":
-            # IVF - faster for larger datasets
             quantizer = faiss.IndexFlatIP(self.embedding_dim)
             self.index = faiss.IndexIVFFlat(
                 quantizer,
@@ -412,17 +791,13 @@ class FAISSVectorStore:
                 self.nlist,
                 faiss.METRIC_INNER_PRODUCT
             )
-        
         elif self.index_type == "hnsw":
-            # HNSW - very fast, good recall
             self.index = faiss.IndexHNSWFlat(self.embedding_dim, 32)
             self.index.hnsw.efConstruction = 200
             self.index.hnsw.efSearch = 50
-        
         else:
             raise ValueError(f"Unknown index type: {self.index_type}")
         
-        # GPU support
         if self.use_gpu and faiss.get_num_gpus() > 0:
             self.index = faiss.index_cpu_to_gpu(
                 faiss.StandardGpuResources(),
@@ -432,20 +807,29 @@ class FAISSVectorStore:
         
         logger.info(f"Created FAISS index: {self.index_type}")
     
-    def _compute_document_hash(self, file_path: str) -> str:
-        """Compute hash of document for deduplication."""
-        hasher = hashlib.md5()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-    
-    def add_embeddings(
+    def add_text_embeddings(
         self,
         embeddings: np.ndarray,
         chunks: List[TextChunk]
     ):
-        """Add embeddings and chunks to the index."""
+        """Add text chunk embeddings to the index."""
+        self._add_embeddings(embeddings, chunks, "text")
+    
+    def add_table_embeddings(
+        self,
+        embeddings: np.ndarray,
+        chunks: List[TableChunk]
+    ):
+        """Add table chunk embeddings to the index."""
+        self._add_embeddings(embeddings, chunks, "table")
+    
+    def _add_embeddings(
+        self,
+        embeddings: np.ndarray,
+        chunks: List[Union[TextChunk, TableChunk]],
+        chunk_type: str
+    ):
+        """Generic method to add embeddings to the index."""
         if embeddings.shape[0] != len(chunks):
             raise ValueError("Embeddings and chunks must have same length")
         
@@ -454,65 +838,90 @@ class FAISSVectorStore:
             if embeddings.shape[0] >= self.nlist:
                 self.index.train(embeddings)
             else:
-                # Fall back to flat index if not enough data
                 logger.warning("Not enough data for IVF, using flat index")
                 self.index = faiss.IndexFlatIP(self.embedding_dim)
         
         # Add to index
-        start_idx = len(self.chunks)
         self.index.add(embeddings)
         
-        # Store chunks
-        self.chunks.extend(chunks)
+        # Store embeddings for potential rebuild
+        if self.embeddings_store is None:
+            self.embeddings_store = embeddings
+        else:
+            self.embeddings_store = np.vstack([self.embeddings_store, embeddings])
         
-        logger.info(f"Added {len(chunks)} chunks to index (total: {len(self.chunks)})")
+        # Store chunks and mapping
+        for chunk in chunks:
+            if chunk_type == "text":
+                self.chunk_mapping.append(("text", len(self.text_chunks)))
+                self.text_chunks.append(chunk)
+            else:
+                self.chunk_mapping.append(("table", len(self.table_chunks)))
+                self.table_chunks.append(chunk)
+        
+        logger.info(f"Added {len(chunks)} {chunk_type} chunks to index")
     
     def search(
         self,
         query_embedding: np.ndarray,
         top_k: int = 5,
         threshold: float = 0.0,
+        content_type_filter: Optional[str] = None,
         nprobe: int = 10
-    ) -> List[Tuple[int, float]]:
+    ) -> List[Tuple[int, float, str]]:
         """
         Search for similar vectors.
         
-        Args:
-            query_embedding: Query vector
-            top_k: Number of results
-            threshold: Minimum similarity threshold
-            nprobe: Number of clusters to search (for IVF)
-            
         Returns:
-            List of (index, score) tuples
+            List of (index, score, content_type) tuples
         """
         if self.index.ntotal == 0:
             return []
         
-        # Set nprobe for IVF
         if self.index_type == "ivf":
             self.index.nprobe = nprobe
         
-        # Reshape query
         query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
         
-        # Search
-        scores, indices = self.index.search(query_embedding, min(top_k, self.index.ntotal))
+        # Get more results if filtering
+        search_k = top_k * 3 if content_type_filter else top_k
+        scores, indices = self.index.search(query_embedding, min(search_k, self.index.ntotal))
         
-        # Filter by threshold and return
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx != -1 and score >= threshold:
-                results.append((int(idx), float(score)))
+                chunk_type, _ = self.chunk_mapping[idx]
+                
+                if content_type_filter and chunk_type != content_type_filter:
+                    continue
+                
+                results.append((int(idx), float(score), chunk_type))
+                
+                if len(results) >= top_k:
+                    break
         
         return results
     
-    def get_chunks(self, indices: List[int]) -> List[TextChunk]:
-        """Get chunks by indices."""
-        return [self.chunks[i] for i in indices if i < len(self.chunks)]
+    def get_chunk(self, global_index: int) -> Union[TextChunk, TableChunk, None]:
+        """Get chunk by global index."""
+        if global_index >= len(self.chunk_mapping):
+            return None
+        
+        chunk_type, local_index = self.chunk_mapping[global_index]
+        
+        if chunk_type == "text":
+            return self.text_chunks[local_index]
+        else:
+            return self.table_chunks[local_index]
     
-    def save(self, directory: Union[str, Path]):
-        """Save index and metadata to disk."""
+    def save(self, directory: Union[str, Path], format: str = "both"):
+        """
+        Save index and metadata to disk.
+        
+        Args:
+            directory: Save directory
+            format: "json", "pkl", or "both"
+        """
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         
@@ -524,32 +933,70 @@ class FAISSVectorStore:
         else:
             faiss.write_index(self.index, str(index_path))
         
-        # Save chunks and metadata
+        # Save embeddings
+        np.save(directory / "embeddings.npy", self.embeddings_store)
+        
+        # Prepare metadata
         metadata = {
-            "chunks": self.chunks,
+            "text_chunks": [c.to_dict() for c in self.text_chunks],
+            "table_chunks": [c.to_dict() for c in self.table_chunks],
+            "chunk_mapping": self.chunk_mapping,
             "document_hashes": self.document_hashes,
             "embedding_dim": self.embedding_dim,
             "index_type": self.index_type,
             "nlist": self.nlist,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "total_text_chunks": len(self.text_chunks),
+            "total_table_chunks": len(self.table_chunks)
         }
         
-        with open(directory / "metadata.pkl", 'wb') as f:
-            pickle.dump(metadata, f)
+        # Save in requested format(s)
+        if format in ["pkl", "both"]:
+            with open(directory / "metadata.pkl", 'wb') as f:
+                pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(f"Saved PKL metadata to {directory}")
+        
+        if format in ["json", "both"]:
+            with open(directory / "metadata.json", 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, cls=DataFrameJSONEncoder, indent=2)
+            logger.info(f"Saved JSON metadata to {directory}")
         
         logger.info(f"Saved vector store to {directory}")
     
     @classmethod
-    def load(cls, directory: Union[str, Path], use_gpu: bool = False) -> 'FAISSVectorStore':
-        """Load index and metadata from disk."""
+    def load(
+        cls,
+        directory: Union[str, Path],
+        use_gpu: bool = False,
+        prefer_format: str = "pkl"
+    ) -> 'FAISSVectorStore':
+        """
+        Load index and metadata from disk.
+        
+        Args:
+            directory: Load directory
+            use_gpu: Use GPU for FAISS
+            prefer_format: Preferred format ("pkl" or "json")
+        """
         directory = Path(directory)
         
         if not directory.exists():
             raise FileNotFoundError(f"Directory not found: {directory}")
         
-        # Load metadata
-        with open(directory / "metadata.pkl", 'rb') as f:
-            metadata = pickle.load(f)
+        # Load metadata (try preferred format first)
+        metadata = None
+        
+        if prefer_format == "pkl" and (directory / "metadata.pkl").exists():
+            with open(directory / "metadata.pkl", 'rb') as f:
+                metadata = pickle.load(f)
+        elif (directory / "metadata.json").exists():
+            with open(directory / "metadata.json", 'r', encoding='utf-8') as f:
+                metadata = json.load(f, object_hook=json_decoder_hook)
+        elif (directory / "metadata.pkl").exists():
+            with open(directory / "metadata.pkl", 'rb') as f:
+                metadata = pickle.load(f)
+        else:
+            raise FileNotFoundError("No metadata file found")
         
         # Create instance
         store = cls(
@@ -569,40 +1016,85 @@ class FAISSVectorStore:
                 store.index
             )
         
-        store.chunks = metadata["chunks"]
+        # Load embeddings
+        embeddings_path = directory / "embeddings.npy"
+        if embeddings_path.exists():
+            store.embeddings_store = np.load(embeddings_path)
+        
+        # Reconstruct chunks
+        store.text_chunks = [TextChunk.from_dict(c) for c in metadata["text_chunks"]]
+        store.table_chunks = [TableChunk.from_dict(c) for c in metadata["table_chunks"]]
+        store.chunk_mapping = [tuple(m) for m in metadata["chunk_mapping"]]
         store.document_hashes = metadata["document_hashes"]
         
-        logger.info(f"Loaded vector store with {len(store.chunks)} chunks")
+        logger.info(
+            f"Loaded vector store with {len(store.text_chunks)} text chunks "
+            f"and {len(store.table_chunks)} table chunks"
+        )
         return store
     
-    def delete_document(self, document_name: str):
-        """
-        Delete all chunks from a specific document.
-        Note: FAISS doesn't support deletion, so we rebuild the index.
-        """
+    def delete_document(self, document_name: str) -> bool:
+        """Delete all content from a specific document and rebuild index."""
         # Find indices to keep
-        keep_indices = [
-            i for i, chunk in enumerate(self.chunks)
-            if chunk.document_name != document_name
-        ]
+        keep_indices = []
+        new_text_chunks = []
+        new_table_chunks = []
+        new_mapping = []
+        new_embeddings = []
         
-        if len(keep_indices) == len(self.chunks):
+        for global_idx, (chunk_type, local_idx) in enumerate(self.chunk_mapping):
+            if chunk_type == "text":
+                chunk = self.text_chunks[local_idx]
+            else:
+                chunk = self.table_chunks[local_idx]
+            
+            if chunk.document_name != document_name:
+                keep_indices.append(global_idx)
+                
+                if chunk_type == "text":
+                    new_mapping.append(("text", len(new_text_chunks)))
+                    new_text_chunks.append(chunk)
+                else:
+                    new_mapping.append(("table", len(new_table_chunks)))
+                    new_table_chunks.append(chunk)
+                
+                if self.embeddings_store is not None:
+                    new_embeddings.append(self.embeddings_store[global_idx])
+        
+        if len(keep_indices) == len(self.chunk_mapping):
             logger.warning(f"Document not found: {document_name}")
-            return
+            return False
         
-        # We need embeddings to rebuild - this is a limitation
-        # In production, you'd store embeddings separately
-        logger.warning("Document deletion requires index rebuild with original embeddings")
+        # Rebuild
+        self.text_chunks = new_text_chunks
+        self.table_chunks = new_table_chunks
+        self.chunk_mapping = new_mapping
+        
+        # Rebuild index
+        self._create_index()
+        if new_embeddings:
+            new_embeddings = np.vstack(new_embeddings)
+            self.embeddings_store = new_embeddings
+            
+            if self.index_type == "ivf" and len(new_embeddings) >= self.nlist:
+                self.index.train(new_embeddings)
+            
+            self.index.add(new_embeddings)
+        else:
+            self.embeddings_store = None
+        
+        logger.info(f"Deleted document: {document_name}")
+        return True
 
 
 # ============================================================================
-# MAIN SEMANTIC SEARCH ENGINE
+# SEMANTIC SEARCH ENGINE (Enhanced)
 # ============================================================================
 
 class SemanticSearchEngine:
     """
-    Main engine for semantic search over documents.
-    Handles document processing, indexing, and retrieval.
+    Enhanced semantic search engine with table support.
+    Handles text and table extraction, indexing, and retrieval.
     """
     
     def __init__(
@@ -611,12 +1103,14 @@ class SemanticSearchEngine:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         index_type: str = "flat",
-        storage_path: Union[str, Path] = "./data/vector_db"
+        storage_path: Union[str, Path] = "./data/vector_db",
+        storage_format: str = "both"
     ):
         self.embedding_engine = EmbeddingEngine(embedding_model)
         self.chunker = TextChunker(chunk_size, chunk_overlap)
         self.storage_path = Path(storage_path)
         self.index_type = index_type
+        self.storage_format = storage_format
         
         self.vector_store: Optional[FAISSVectorStore] = None
         self._load_or_create_store()
@@ -640,39 +1134,38 @@ class SemanticSearchEngine:
             index_type=self.index_type
         )
     
-    def _generate_document_id(self, file_path: str) -> str:
-        """Generate unique document ID."""
-        return hashlib.md5(file_path.encode()).hexdigest()[:12]
+    def _generate_id(self, file_path: str, suffix: str = "") -> str:
+        """Generate unique ID."""
+        base = hashlib.md5(file_path.encode()).hexdigest()[:12]
+        return f"{base}{suffix}"
     
     def _process_document(
         self,
         file_path: Union[str, Path]
-    ) -> List[TextChunk]:
-        """Process a single document into chunks."""
+    ) -> Tuple[List[TextChunk], List[TableChunk]]:
+        """Process a document into text and table chunks."""
         file_path = Path(file_path)
         document_name = file_path.name
-        document_id = self._generate_document_id(str(file_path))
+        document_id = self._generate_id(str(file_path))
         
         # Load document
-        pages = DocumentLoader.load(file_path)
+        doc_data = DocumentLoader.load(file_path)
         
-        if not pages:
-            logger.warning(f"No content extracted from: {file_path}")
-            return []
+        text_chunks = []
+        table_chunks = []
         
-        # Create chunks
-        all_chunks = []
+        # Process text
         chunk_index = 0
-        
-        for page_number, page_text in pages:
-            text_chunks = self.chunker.chunk(page_text)
+        for page_number, page_text in doc_data.get("text_pages", []):
+            chunks = self.chunker.chunk(page_text)
             
-            for chunk_text in text_chunks:
+            for chunk_text in chunks:
                 chunk = TextChunk(
                     text=chunk_text,
-                    chunk_id=f"{document_id}_{chunk_index}",
+                    chunk_id=f"{document_id}_t{chunk_index}",
                     document_id=document_id,
                     document_name=document_name,
+                    content_type="text",
                     page_number=page_number,
                     chunk_index=chunk_index,
                     metadata={
@@ -680,50 +1173,70 @@ class SemanticSearchEngine:
                         "file_type": file_path.suffix.lower()
                     }
                 )
-                all_chunks.append(chunk)
+                text_chunks.append(chunk)
                 chunk_index += 1
         
-        return all_chunks
+        # Process tables
+        for page_num, table_idx, df, caption in doc_data.get("tables", []):
+            table_chunk = TableChunk.from_dataframe(
+                df=df,
+                table_id=f"{document_id}_tbl{table_idx}",
+                document_id=document_id,
+                document_name=document_name,
+                page_number=page_num,
+                table_index=table_idx,
+                caption=caption,
+                metadata={
+                    "source": str(file_path),
+                    "file_type": file_path.suffix.lower()
+                }
+            )
+            table_chunks.append(table_chunk)
+        
+        return text_chunks, table_chunks
     
     def add_document(
         self,
         file_path: Union[str, Path],
         skip_if_exists: bool = True
-    ) -> int:
+    ) -> Dict[str, int]:
         """
         Add a single document to the vector store.
         
-        Args:
-            file_path: Path to document
-            skip_if_exists: Skip if document already indexed
-            
         Returns:
-            Number of chunks added
+            Dictionary with 'text_chunks' and 'table_chunks' counts
         """
         file_path = Path(file_path)
         document_name = file_path.name
         
         # Check if already indexed
         if skip_if_exists:
-            existing_docs = set(c.document_name for c in self.vector_store.chunks)
-            if document_name in existing_docs:
+            existing_text = set(c.document_name for c in self.vector_store.text_chunks)
+            existing_tables = set(c.document_name for c in self.vector_store.table_chunks)
+            if document_name in existing_text or document_name in existing_tables:
                 logger.info(f"Document already indexed: {document_name}")
-                return 0
+                return {"text_chunks": 0, "table_chunks": 0}
         
         # Process document
-        chunks = self._process_document(file_path)
+        text_chunks, table_chunks = self._process_document(file_path)
         
-        if not chunks:
-            return 0
+        result = {"text_chunks": 0, "table_chunks": 0}
         
-        # Generate embeddings
-        texts = [c.text for c in chunks]
-        embeddings = self.embedding_engine.embed(texts, show_progress=False)
+        # Add text chunks
+        if text_chunks:
+            texts = [c.text for c in text_chunks]
+            embeddings = self.embedding_engine.embed(texts, show_progress=False)
+            self.vector_store.add_text_embeddings(embeddings, text_chunks)
+            result["text_chunks"] = len(text_chunks)
         
-        # Add to store
-        self.vector_store.add_embeddings(embeddings, chunks)
+        # Add table chunks
+        if table_chunks:
+            table_texts = [c.text_representation for c in table_chunks]
+            embeddings = self.embedding_engine.embed(table_texts, show_progress=False)
+            self.vector_store.add_table_embeddings(embeddings, table_chunks)
+            result["table_chunks"] = len(table_chunks)
         
-        return len(chunks)
+        return result
     
     def add_documents(
         self,
@@ -731,23 +1244,16 @@ class SemanticSearchEngine:
         extensions: List[str] = None,
         recursive: bool = True,
         skip_if_exists: bool = True
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Dict[str, int]]:
         """
         Add all documents from a directory.
         
-        Args:
-            directory: Path to directory
-            extensions: File extensions to process (default: .pdf, .docx)
-            recursive: Search subdirectories
-            skip_if_exists: Skip already indexed documents
-            
         Returns:
-            Dictionary of {filename: chunks_added}
+            Dictionary of {filename: {text_chunks, table_chunks}}
         """
         directory = Path(directory)
         extensions = extensions or ['.pdf', '.docx', '.doc']
         
-        # Find all files
         files = []
         for ext in extensions:
             pattern = f"**/*{ext}" if recursive else f"*{ext}"
@@ -756,33 +1262,43 @@ class SemanticSearchEngine:
         logger.info(f"Found {len(files)} documents to process")
         
         results = {}
-        all_chunks = []
+        all_text_chunks = []
+        all_table_chunks = []
         
-        # Process all documents
         for file_path in tqdm(files, desc="Processing documents"):
             document_name = file_path.name
             
-            # Check if already indexed
             if skip_if_exists:
-                existing_docs = set(c.document_name for c in self.vector_store.chunks)
-                if document_name in existing_docs:
-                    results[document_name] = 0
+                existing_text = set(c.document_name for c in self.vector_store.text_chunks)
+                existing_tables = set(c.document_name for c in self.vector_store.table_chunks)
+                if document_name in existing_text or document_name in existing_tables:
+                    results[document_name] = {"text_chunks": 0, "table_chunks": 0, "skipped": True}
                     continue
             
             try:
-                chunks = self._process_document(file_path)
-                all_chunks.extend(chunks)
-                results[document_name] = len(chunks)
+                text_chunks, table_chunks = self._process_document(file_path)
+                all_text_chunks.extend(text_chunks)
+                all_table_chunks.extend(table_chunks)
+                results[document_name] = {
+                    "text_chunks": len(text_chunks),
+                    "table_chunks": len(table_chunks)
+                }
             except Exception as e:
                 logger.error(f"Failed to process {file_path}: {e}")
-                results[document_name] = -1
+                results[document_name] = {"error": str(e)}
         
         # Batch embed and add
-        if all_chunks:
-            logger.info(f"Generating embeddings for {len(all_chunks)} chunks")
-            texts = [c.text for c in all_chunks]
+        if all_text_chunks:
+            logger.info(f"Generating embeddings for {len(all_text_chunks)} text chunks")
+            texts = [c.text for c in all_text_chunks]
             embeddings = self.embedding_engine.embed(texts)
-            self.vector_store.add_embeddings(embeddings, all_chunks)
+            self.vector_store.add_text_embeddings(embeddings, all_text_chunks)
+        
+        if all_table_chunks:
+            logger.info(f"Generating embeddings for {len(all_table_chunks)} table chunks")
+            table_texts = [c.text_representation for c in all_table_chunks]
+            embeddings = self.embedding_engine.embed(table_texts)
+            self.vector_store.add_table_embeddings(embeddings, all_table_chunks)
         
         return results
     
@@ -791,59 +1307,106 @@ class SemanticSearchEngine:
         query: str,
         top_k: int = 5,
         threshold: float = 0.3,
+        content_type: Optional[str] = None,
         filter_documents: List[str] = None,
-        return_context: bool = True
+        include_tables: bool = True
     ) -> List[SearchResult]:
         """
-        Search for relevant text chunks.
+        Search for relevant content (text and/or tables).
         
         Args:
             query: Search query
-            top_k: Number of results to return
-            threshold: Minimum similarity threshold (0-1)
+            top_k: Number of results
+            threshold: Minimum similarity threshold
+            content_type: Filter by "text" or "table" (None for both)
             filter_documents: Only search in these documents
-            return_context: Include surrounding context
-            
-        Returns:
-            List of SearchResult objects
+            include_tables: Include table results (with DataFrames)
         """
         if self.vector_store.index.ntotal == 0:
             logger.warning("Vector store is empty")
             return []
         
-        # Embed query
         query_embedding = self.embedding_engine.embed_query(query)
         
-        # Search
         results = self.vector_store.search(
             query_embedding,
-            top_k=top_k * 2 if filter_documents else top_k,  # Get more for filtering
-            threshold=threshold
+            top_k=top_k * 2 if filter_documents else top_k,
+            threshold=threshold,
+            content_type_filter=content_type
         )
         
-        # Get chunks and create results
         search_results = []
-        for idx, score in results:
-            chunk = self.vector_store.chunks[idx]
+        for idx, score, chunk_type in results:
+            chunk = self.vector_store.get_chunk(idx)
+            
+            if chunk is None:
+                continue
             
             # Apply document filter
             if filter_documents and chunk.document_name not in filter_documents:
                 continue
             
-            result = SearchResult(
-                text=chunk.text,
-                score=score,
-                document_name=chunk.document_name,
-                page_number=chunk.page_number,
-                chunk_id=chunk.chunk_id,
-                metadata=chunk.metadata
-            )
+            if chunk_type == "text":
+                result = SearchResult(
+                    content=chunk.text,
+                    score=score,
+                    document_name=chunk.document_name,
+                    page_number=chunk.page_number,
+                    chunk_id=chunk.chunk_id,
+                    content_type="text",
+                    metadata=chunk.metadata
+                )
+            else:  # table
+                df = chunk.get_dataframe() if include_tables else None
+                result = SearchResult(
+                    content=chunk.text_representation,
+                    score=score,
+                    document_name=chunk.document_name,
+                    page_number=chunk.page_number,
+                    chunk_id=chunk.table_id,
+                    content_type="table",
+                    metadata=chunk.metadata,
+                    dataframe=df,
+                    table_csv=chunk.dataframe_csv,
+                    column_names=chunk.column_names,
+                    num_rows=chunk.num_rows,
+                    num_cols=chunk.num_cols
+                )
+            
             search_results.append(result)
             
             if len(search_results) >= top_k:
                 break
         
         return search_results
+    
+    def search_tables_only(
+        self,
+        query: str,
+        top_k: int = 5,
+        threshold: float = 0.3
+    ) -> List[SearchResult]:
+        """Search only for tables."""
+        return self.search(
+            query=query,
+            top_k=top_k,
+            threshold=threshold,
+            content_type="table"
+        )
+    
+    def search_text_only(
+        self,
+        query: str,
+        top_k: int = 5,
+        threshold: float = 0.3
+    ) -> List[SearchResult]:
+        """Search only for text."""
+        return self.search(
+            query=query,
+            top_k=top_k,
+            threshold=threshold,
+            content_type="text"
+        )
     
     def search_with_reranking(
         self,
@@ -852,16 +1415,12 @@ class SemanticSearchEngine:
         initial_k: int = 20,
         threshold: float = 0.3
     ) -> List[SearchResult]:
-        """
-        Search with keyword-based reranking for better precision.
-        """
-        # Get initial results
+        """Search with keyword-based reranking."""
         initial_results = self.search(query, top_k=initial_k, threshold=threshold)
         
         if not initial_results:
             return []
         
-        # Keyword-based reranking
         query_words = set(query.lower().split())
         
         def compute_keyword_score(text: str) -> float:
@@ -869,41 +1428,42 @@ class SemanticSearchEngine:
             matches = sum(1 for word in query_words if word in text_lower)
             return matches / len(query_words) if query_words else 0
         
-        # Combine semantic and keyword scores
-        reranked = []
         for result in initial_results:
-            keyword_score = compute_keyword_score(result.text)
-            combined_score = 0.7 * result.score + 0.3 * keyword_score
-            result.score = combined_score
-            reranked.append(result)
+            keyword_score = compute_keyword_score(result.content)
+            result.score = 0.7 * result.score + 0.3 * keyword_score
         
-        # Sort by combined score
-        reranked.sort(key=lambda x: x.score, reverse=True)
-        
-        return reranked[:top_k]
+        initial_results.sort(key=lambda x: x.score, reverse=True)
+        return initial_results[:top_k]
     
     def get_answer_context(
         self,
         query: str,
         top_k: int = 3,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        include_tables: bool = True
     ) -> str:
-        """
-        Get formatted context for question answering.
-        Useful for feeding to LLMs.
-        """
-        results = self.search(query, top_k=top_k)
+        """Get formatted context for LLM question answering."""
+        results = self.search(query, top_k=top_k, include_tables=include_tables)
         
         context_parts = []
         total_length = 0
         
-        for i, result in enumerate(results, 1):
-            chunk_text = f"[Source: {result.document_name}"
-            if result.page_number:
-                chunk_text += f", Page {result.page_number}"
-            chunk_text += f"]\n{result.text}\n"
+        for result in results:
+            if result.content_type == "text":
+                chunk_text = f"[Source: {result.document_name}"
+                if result.page_number:
+                    chunk_text += f", Page {result.page_number}"
+                chunk_text += f", Type: Text]\n{result.content}\n"
+            else:
+                chunk_text = f"[Source: {result.document_name}"
+                if result.page_number:
+                    chunk_text += f", Page {result.page_number}"
+                chunk_text += f", Type: Table ({result.num_rows}x{result.num_cols})]\n"
+                chunk_text += f"Columns: {', '.join(result.column_names or [])}\n"
+                if result.dataframe is not None:
+                    chunk_text += result.dataframe.head(10).to_string() + "\n"
             
-            if total_length + len(chunk_text) > max_tokens * 4:  # Approximate token count
+            if total_length + len(chunk_text) > max_tokens * 4:
                 break
             
             context_parts.append(chunk_text)
@@ -911,352 +1471,360 @@ class SemanticSearchEngine:
         
         return "\n---\n".join(context_parts)
     
+    def get_all_tables(self, document_name: Optional[str] = None) -> List[Tuple[str, pd.DataFrame]]:
+        """Get all tables, optionally filtered by document."""
+        tables = []
+        for table_chunk in self.vector_store.table_chunks:
+            if document_name is None or table_chunk.document_name == document_name:
+                df = table_chunk.get_dataframe()
+                tables.append((table_chunk.table_id, df))
+        return tables
+    
+    def export_tables_to_excel(
+        self,
+        output_path: Union[str, Path],
+        document_name: Optional[str] = None
+    ):
+        """Export all tables to an Excel file."""
+        output_path = Path(output_path)
+        tables = self.get_all_tables(document_name)
+        
+        if not tables:
+            logger.warning("No tables to export")
+            return
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            for i, (table_id, df) in enumerate(tables):
+                sheet_name = f"Table_{i+1}"[:31]  # Excel sheet name limit
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        logger.info(f"Exported {len(tables)} tables to {output_path}")
+    
     def save(self):
         """Save the vector store to disk."""
-        self.vector_store.save(self.storage_path)
+        self.vector_store.save(self.storage_path, format=self.storage_format)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the vector store."""
-        documents = set(c.document_name for c in self.vector_store.chunks)
+        text_documents = set(c.document_name for c in self.vector_store.text_chunks)
+        table_documents = set(c.document_name for c in self.vector_store.table_chunks)
+        all_documents = text_documents | table_documents
         
         return {
-            "total_chunks": len(self.vector_store.chunks),
-            "total_documents": len(documents),
-            "documents": list(documents),
+            "total_text_chunks": len(self.vector_store.text_chunks),
+            "total_table_chunks": len(self.vector_store.table_chunks),
+            "total_chunks": len(self.vector_store.chunk_mapping),
+            "total_documents": len(all_documents),
+            "documents_with_text": list(text_documents),
+            "documents_with_tables": list(table_documents),
             "index_type": self.vector_store.index_type,
             "embedding_dim": self.vector_store.embedding_dim,
-            "storage_path": str(self.storage_path)
+            "storage_path": str(self.storage_path),
+            "storage_format": self.storage_format
         }
     
     def clear(self):
         """Clear the vector store."""
         self._create_new_store()
         logger.info("Vector store cleared")
+    
+    def delete_document(self, document_name: str) -> bool:
+        """Delete a document from the vector store."""
+        return self.vector_store.delete_document(document_name)
 
 
 # ============================================================================
-# HYBRID SEARCH (Optional Enhancement)
+# HYBRID SEARCH ENGINE
 # ============================================================================
 
 class HybridSearchEngine(SemanticSearchEngine):
-    """
-    Enhanced search engine with hybrid (semantic + keyword) search.
-    """
+    """Enhanced search engine with hybrid (semantic + keyword) search."""
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.keyword_index: Dict[str, List[int]] = {}  # word -> chunk indices
+        self.keyword_index: Dict[str, List[int]] = {}
     
     def _build_keyword_index(self):
         """Build inverted index for keyword search."""
         self.keyword_index.clear()
         
-        for idx, chunk in enumerate(self.vector_store.chunks):
-            words = set(re.findall(r'\b\w+\b', chunk.text.lower()))
+        for idx, (chunk_type, local_idx) in enumerate(self.vector_store.chunk_mapping):
+            if chunk_type == "text":
+                text = self.vector_store.text_chunks[local_idx].text
+            else:
+                text = self.vector_store.table_chunks[local_idx].text_representation
+            
+            words = set(re.findall(r'\b\w+\b', text.lower()))
             for word in words:
                 if word not in self.keyword_index:
                     self.keyword_index[word] = []
                 self.keyword_index[word].append(idx)
-    
-    def keyword_search(self, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
-        """Perform keyword-based search using BM25-like scoring."""
-        query_words = set(re.findall(r'\b\w+\b', query.lower()))
-        
-        # Score chunks
-        chunk_scores = {}
-        for word in query_words:
-            if word in self.keyword_index:
-                for idx in self.keyword_index[word]:
-                    chunk_scores[idx] = chunk_scores.get(idx, 0) + 1
-        
-        # Normalize scores
-        max_score = max(chunk_scores.values()) if chunk_scores else 1
-        results = [(idx, score/max_score) for idx, score in chunk_scores.items()]
-        results.sort(key=lambda x: x[1], reverse=True)
-        
-        return results[:top_k]
     
     def hybrid_search(
         self,
         query: str,
         top_k: int = 5,
         semantic_weight: float = 0.7,
-        threshold: float = 0.3
+        threshold: float = 0.3,
+        content_type: Optional[str] = None
     ) -> List[SearchResult]:
-        """
-        Combine semantic and keyword search results.
-        
-        Args:
-            query: Search query
-            top_k: Number of results
-            semantic_weight: Weight for semantic search (0-1)
-            threshold: Minimum score threshold
-        """
-        # Ensure keyword index is built
+        """Combine semantic and keyword search."""
         if not self.keyword_index:
             self._build_keyword_index()
         
-        # Get semantic results
+        # Semantic search
         query_embedding = self.embedding_engine.embed_query(query)
-        semantic_results = self.vector_store.search(query_embedding, top_k=top_k * 2)
+        semantic_results = self.vector_store.search(
+            query_embedding,
+            top_k=top_k * 3,
+            content_type_filter=content_type
+        )
         
-        # Get keyword results
-        keyword_results = self.keyword_search(query, top_k=top_k * 2)
+        # Keyword search
+        query_words = set(re.findall(r'\b\w+\b', query.lower()))
+        keyword_scores = {}
+        for word in query_words:
+            if word in self.keyword_index:
+                for idx in self.keyword_index[word]:
+                    keyword_scores[idx] = keyword_scores.get(idx, 0) + 1
+        
+        max_keyword = max(keyword_scores.values()) if keyword_scores else 1
         
         # Combine scores
         combined_scores = {}
-        
-        for idx, score in semantic_results:
+        for idx, score, _ in semantic_results:
             combined_scores[idx] = semantic_weight * score
         
         keyword_weight = 1 - semantic_weight
-        for idx, score in keyword_results:
-            combined_scores[idx] = combined_scores.get(idx, 0) + keyword_weight * score
+        for idx, score in keyword_scores.items():
+            normalized = score / max_keyword
+            combined_scores[idx] = combined_scores.get(idx, 0) + keyword_weight * normalized
         
-        # Sort and filter
-        sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+        # Sort and create results
+        sorted_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
         
         search_results = []
-        for idx, score in sorted_results[:top_k]:
+        for idx, score in sorted_indices[:top_k]:
             if score < threshold:
                 continue
             
-            chunk = self.vector_store.chunks[idx]
-            result = SearchResult(
-                text=chunk.text,
-                score=score,
-                document_name=chunk.document_name,
-                page_number=chunk.page_number,
-                chunk_id=chunk.chunk_id,
-                metadata=chunk.metadata
-            )
+            chunk = self.vector_store.get_chunk(idx)
+            if chunk is None:
+                continue
+            
+            chunk_type, _ = self.vector_store.chunk_mapping[idx]
+            
+            if chunk_type == "text":
+                result = SearchResult(
+                    content=chunk.text,
+                    score=score,
+                    document_name=chunk.document_name,
+                    page_number=chunk.page_number,
+                    chunk_id=chunk.chunk_id,
+                    content_type="text",
+                    metadata=chunk.metadata
+                )
+            else:
+                result = SearchResult(
+                    content=chunk.text_representation,
+                    score=score,
+                    document_name=chunk.document_name,
+                    page_number=chunk.page_number,
+                    chunk_id=chunk.table_id,
+                    content_type="table",
+                    metadata=chunk.metadata,
+                    dataframe=chunk.get_dataframe(),
+                    table_csv=chunk.dataframe_csv,
+                    column_names=chunk.column_names,
+                    num_rows=chunk.num_rows,
+                    num_cols=chunk.num_cols
+                )
+            
             search_results.append(result)
         
         return search_results
 
-"""
-Example usage of the Vector Store and Semantic Search Engine.
-"""
 
-# from pathlib import Path
-# from vector_store import SemanticSearchEngine, HybridSearchEngine
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
-
-def main():
-    # =========================================================================
-    # BASIC USAGE
-    # =========================================================================
-    
-    print("=" * 60)
-    print("VECTOR STORE - SEMANTIC SEARCH ENGINE")
-    print("=" * 60)
-    
-    # Initialize the search engine
-    engine = SemanticSearchEngine(
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",  # Fast model
-        chunk_size=512,
-        chunk_overlap=50,
-        index_type="flat",  # Use "ivf" for large datasets
-        storage_path="./data/vector_db"
-    )
-    
-    # =========================================================================
-    # ADD DOCUMENTS
-    # =========================================================================
-    
-    print("\n📁 Adding Documents...")
-    
-    # Option 1: Add a single document
-    # engine.add_document("path/to/document.pdf")
-    
-    # Option 2: Add all documents from a directory
-    docs_path = Path("./documents")
-    if docs_path.exists():
-        results = engine.add_documents(
-            directory=docs_path,
-            extensions=['.pdf', '.docx'],
-            recursive=True,
-            skip_if_exists=True
-        )
-        
-        for doc_name, chunks_added in results.items():
-            status = "✓" if chunks_added > 0 else "⏭️ (skipped)" if chunks_added == 0 else "✗ (failed)"
-            print(f"  {status} {doc_name}: {chunks_added} chunks")
-    else:
-        print("  Creating sample documents directory...")
-        docs_path.mkdir(parents=True, exist_ok=True)
-        print(f"  Please add PDF/DOCX files to: {docs_path.absolute()}")
-    
-    # =========================================================================
-    # SAVE VECTOR STORE
-    # =========================================================================
-    
-    print("\n💾 Saving Vector Store...")
-    engine.save()
-    print("  Vector store saved successfully!")
-    
-    # =========================================================================
-    # SEARCH EXAMPLES
-    # =========================================================================
-    
-    print("\n🔍 Search Examples...")
-    
-    # Get stats
-    stats = engine.get_stats()
-    print(f"\n  📊 Vector Store Stats:")
-    print(f"     - Total Chunks: {stats['total_chunks']}")
-    print(f"     - Total Documents: {stats['total_documents']}")
-    print(f"     - Index Type: {stats['index_type']}")
-    
-    if stats['total_chunks'] > 0:
-        # Basic search
-        query = "What are the main features?"
-        print(f"\n  🔎 Query: '{query}'")
-        
-        results = engine.search(
-            query=query,
-            top_k=3,
-            threshold=0.3
-        )
-        
-        print(f"\n  📝 Results ({len(results)} found):")
-        for i, result in enumerate(results, 1):
-            print(f"\n  --- Result {i} (Score: {result.score:.4f}) ---")
-            print(f"  Document: {result.document_name}")
-            if result.page_number:
-                print(f"  Page: {result.page_number}")
-            print(f"  Text: {result.text[:200]}...")
-        
-        # Search with reranking
-        print(f"\n  🔎 Search with Reranking: '{query}'")
-        reranked_results = engine.search_with_reranking(
-            query=query,
-            top_k=3,
-            initial_k=20
-        )
-        
-        print(f"\n  📝 Reranked Results:")
-        for i, result in enumerate(reranked_results, 1):
-            print(f"  {i}. [{result.score:.4f}] {result.document_name}: {result.text[:100]}...")
-        
-        # Get context for LLM
-        print(f"\n  📚 Getting Context for LLM...")
-        context = engine.get_answer_context(
-            query=query,
-            top_k=3,
-            max_tokens=1000
-        )
-        print(f"\n  Context:\n{context[:500]}...")
-    
-    # =========================================================================
-    # HYBRID SEARCH (OPTIONAL)
-    # =========================================================================
-    
-    print("\n" + "=" * 60)
-    print("HYBRID SEARCH ENGINE (Semantic + Keyword)")
-    print("=" * 60)
-    
-    hybrid_engine = HybridSearchEngine(
-        embedding_model= "nvidia/llama-nemotron-embed-1b-v2",  #"sentence-transformers/all-MiniLM-L6-v2",
-        chunk_size=512,
-        storage_path="./data/vector_db"  # Reuse existing store
-    )
-    
-    if hybrid_engine.get_stats()['total_chunks'] > 0:
-        query = "machine learning algorithms"
-        print(f"\n  🔎 Hybrid Query: '{query}'")
-        
-        results = hybrid_engine.hybrid_search(
-            query=query,
-            top_k=3,
-            semantic_weight=0.7
-        )
-        
-        print(f"\n  📝 Hybrid Results:")
-        for i, result in enumerate(results, 1):
-            print(f"  {i}. [{result.score:.4f}] {result.document_name}: {result.text[:100]}...")
-
-
-def interactive_search():
-    """Interactive search mode."""
-    print("\n" + "=" * 60)
-    print("INTERACTIVE SEARCH MODE")
-    print("=" * 60)
-    
-    engine = SemanticSearchEngine(storage_path="./data/vector_db")
-    
-    stats = engine.get_stats()
-    print(f"\n📊 Loaded {stats['total_chunks']} chunks from {stats['total_documents']} documents")
-    
-    if stats['total_chunks'] == 0:
-        print("⚠️ No documents indexed. Please add documents first.")
+def print_search_results(results: List[SearchResult], show_tables: bool = True):
+    """Pretty print search results."""
+    if not results:
+        print("No results found.")
         return
     
-    print("\nEnter your queries (type 'quit' to exit):\n")
+    print(f"\n{'='*60}")
+    print(f"Found {len(results)} results")
+    print('='*60)
+    
+    for i, result in enumerate(results, 1):
+        print(f"\n--- Result {i} ---")
+        print(f"Score: {result.score:.4f}")
+        print(f"Type: {result.content_type.upper()}")
+        print(f"Document: {result.document_name}")
+        if result.page_number:
+            print(f"Page: {result.page_number}")
+        
+        if result.content_type == "text":
+            print(f"\nContent:\n{result.content[:500]}...")
+        else:
+            print(f"\nTable ({result.num_rows} rows x {result.num_cols} cols)")
+            print(f"Columns: {', '.join(result.column_names or [])}")
+            if show_tables and result.dataframe is not None:
+                print(f"\n{result.dataframe.head(5).to_string()}")
+                if result.num_rows > 5:
+                    print(f"... and {result.num_rows - 5} more rows")
+        
+        print()
+
+
+# ============================================================================
+# MAIN USAGE EXAMPLE
+# ============================================================================
+
+def main():
+    """Main example usage."""
+    print("="*60)
+    print("ENHANCED VECTOR STORE WITH TABLE SUPPORT")
+    print("="*60)
+    
+    # Initialize engine
+    engine = SemanticSearchEngine(
+        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        chunk_size=512,
+        chunk_overlap=50,
+        index_type="flat",
+        storage_path="./data/vector_db",
+        storage_format="both"  # Save as both JSON and PKL
+    )
+    
+    # Create documents folder
+    docs_folder = Path("./my_documents")
+    docs_folder.mkdir(exist_ok=True)
+    
+    print(f"\n📁 Place your PDF/DOCX files in: {docs_folder.absolute()}")
+    
+    # Check for existing documents
+    pdf_files = list(docs_folder.glob("*.pdf"))
+    docx_files = list(docs_folder.glob("*.docx"))
+    
+    if pdf_files or docx_files:
+        print(f"\n📄 Found {len(pdf_files)} PDFs and {len(docx_files)} DOCX files")
+        
+        # Add documents
+        results = engine.add_documents(docs_folder)
+        
+        print("\n📊 Processing Results:")
+        for doc_name, stats in results.items():
+            if "error" in stats:
+                print(f"  ❌ {doc_name}: Error - {stats['error']}")
+            elif stats.get("skipped"):
+                print(f"  ⏭️  {doc_name}: Skipped (already indexed)")
+            else:
+                print(f"  ✅ {doc_name}: {stats['text_chunks']} text chunks, {stats['table_chunks']} tables")
+        
+        # Save
+        engine.save()
+        print("\n💾 Vector store saved!")
+        
+        # Get stats
+        stats = engine.get_stats()
+        print(f"\n📈 Vector Store Statistics:")
+        print(f"   - Total Text Chunks: {stats['total_text_chunks']}")
+        print(f"   - Total Table Chunks: {stats['total_table_chunks']}")
+        print(f"   - Total Documents: {stats['total_documents']}")
+        print(f"   - Storage Format: {stats['storage_format']}")
+        
+        # Example searches
+        if stats['total_chunks'] > 0:
+            print("\n" + "="*60)
+            print("SEARCH EXAMPLES")
+            print("="*60)
+            
+            # Search all content
+            query = "data analysis results"
+            print(f"\n🔍 Query: '{query}' (All content)")
+            results = engine.search(query, top_k=3)
+            print_search_results(results)
+            
+            # Search tables only
+            print(f"\n🔍 Query: '{query}' (Tables only)")
+            table_results = engine.search_tables_only(query, top_k=3)
+            print_search_results(table_results)
+            
+            # Search text only
+            print(f"\n🔍 Query: '{query}' (Text only)")
+            text_results = engine.search_text_only(query, top_k=3)
+            print_search_results(text_results, show_tables=False)
+            
+            # Get context for LLM
+            print("\n📚 Context for LLM:")
+            context = engine.get_answer_context(query, top_k=2)
+            print(context[:1000] + "..." if len(context) > 1000 else context)
+    else:
+        print("\n⚠️  No documents found. Please add PDF/DOCX files to the folder.")
+    
+    return engine
+
+
+def interactive_mode():
+    """Interactive search mode."""
+    print("\n" + "="*60)
+    print("INTERACTIVE SEARCH MODE")
+    print("="*60)
+    
+    engine = SemanticSearchEngine(storage_path="./data/vector_db")
+    stats = engine.get_stats()
+    
+    print(f"\n📊 Loaded: {stats['total_text_chunks']} text chunks, {stats['total_table_chunks']} tables")
+    
+    if stats['total_chunks'] == 0:
+        print("⚠️  No content indexed. Please add documents first.")
+        return
+    
+    print("\nCommands:")
+    print("  'q' or 'quit' - Exit")
+    print("  'tables' - Search tables only")
+    print("  'text' - Search text only")
+    print("  'stats' - Show statistics")
+    print("  'export' - Export tables to Excel")
+    print("\n")
     
     while True:
         query = input("🔍 Query: ").strip()
         
-        if query.lower() in ['quit', 'exit', 'q']:
+        if query.lower() in ['q', 'quit', 'exit']:
             print("Goodbye! 👋")
             break
+        
+        if query.lower() == 'stats':
+            stats = engine.get_stats()
+            print(f"\n📈 Statistics:")
+            for key, value in stats.items():
+                print(f"   {key}: {value}")
+            continue
+        
+        if query.lower() == 'export':
+            engine.export_tables_to_excel("./exported_tables.xlsx")
+            print("✅ Tables exported to ./exported_tables.xlsx")
+            continue
         
         if not query:
             continue
         
-        results = engine.search(query, top_k=5, threshold=0.3)
+        # Determine search type
+        search_type = None
+        if query.lower().startswith('tables '):
+            query = query[7:]
+            search_type = 'table'
+        elif query.lower().startswith('text '):
+            query = query[5:]
+            search_type = 'text'
         
-        if not results:
-            print("  ❌ No results found.\n")
-            continue
-        
-        print(f"\n  📝 Found {len(results)} results:\n")
-        for i, result in enumerate(results, 1):
-            print(f"  {i}. [Score: {result.score:.4f}]")
-            print(f"     Document: {result.document_name}")
-            if result.page_number:
-                print(f"     Page: {result.page_number}")
-            print(f"     Text: {result.text[:200]}...")
-            print()
-
-
-def benchmark():
-    """Benchmark search performance."""
-    import time
-    
-    print("\n" + "=" * 60)
-    print("BENCHMARK")
-    print("=" * 60)
-    
-    engine = SemanticSearchEngine(storage_path="./data/vector_db")
-    stats = engine.get_stats()
-    
-    if stats['total_chunks'] == 0:
-        print("⚠️ No documents indexed. Please add documents first.")
-        return
-    
-    print(f"\n📊 Testing with {stats['total_chunks']} chunks\n")
-    
-    queries = [
-        "What is the main topic?",
-        "How does it work?",
-        "What are the benefits?",
-        "technical specifications",
-        "summary of findings"
-    ]
-    
-    times = []
-    for query in queries:
-        start = time.time()
-        for _ in range(10):  # Run 10 times for averaging
-            engine.search(query, top_k=5)
-        elapsed = (time.time() - start) / 10
-        times.append(elapsed)
-        print(f"  Query: '{query[:30]}...' -> {elapsed*1000:.2f}ms")
-    
-    avg_time = sum(times) / len(times)
-    print(f"\n  ⚡ Average search time: {avg_time*1000:.2f}ms")
-    print(f"  ⚡ Queries per second: {1/avg_time:.0f}")
+        results = engine.search(query, top_k=5, content_type=search_type)
+        print_search_results(results)
 
 
 if __name__ == "__main__":
@@ -1264,57 +1832,39 @@ if __name__ == "__main__":
     
     if len(sys.argv) > 1:
         if sys.argv[1] == "interactive":
-            interactive_search()
-        elif sys.argv[1] == "benchmark":
-            benchmark()
+            interactive_mode()
         else:
             main()
     else:
         main()
-
-"""
-Quick start script - Run this to get started immediately.
-"""
-
-# from vector_store import SemanticSearchEngine
-from pathlib import Path
-
-
-def quick_start():
-    # 1. Create engine
-    engine = SemanticSearchEngine(
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-        chunk_size=512,
-        storage_path="./my_vector_db"
-    )
-    
-    # 2. Create sample documents folder
-    docs_folder = Path("./my_documents")
-    docs_folder.mkdir(exist_ok=True)
-    
-    # 3. Add your documents (put PDFs/DOCXs in ./my_documents/)
-    print("Add your PDF/DOCX files to ./my_documents/ folder")
-    print("Then run: engine.add_documents('./my_documents/')")
-    
-    # 4. If documents exist, index them
-    if list(docs_folder.glob("*.pdf")) or list(docs_folder.glob("*.docx")):
-        results = engine.add_documents(docs_folder)
-        print(f"Indexed {sum(v for v in results.values() if v > 0)} chunks")
-        engine.save()
         
-        # 5. Search
-        query = input("Enter search query: ")
-        results = engine.search(query, top_k=3)
         
-        for r in results:
-            print(f"\n[{r.score:.3f}] {r.document_name}")
-            print(r.text[:300])
-    
-    return engine
+# Initialize
+engine = SemanticSearchEngine(
+    storage_path="./my_vector_db",
+    storage_format="both"  # JSON and PKL
+)
 
+# Add documents
+engine.add_documents("./my_documents/")
+engine.save()
 
-if __name__ == "__main__":
-    engine = quick_start()
+# Search all content (text + tables)
+results = engine.search("revenue data", top_k=5)
 
+# Search tables only
+table_results = engine.search_tables_only("quarterly sales", top_k=3)
 
-config = Config()777
+# Search text only  
+text_results = engine.search_text_only("introduction", top_k=3)
+
+# Get DataFrames from results
+for r in table_results:
+    if r.dataframe is not None:
+        print(r.dataframe.head())
+
+# Export all tables to Excel
+engine.export_tables_to_excel("./all_tables.xlsx")
+
+# Get all tables from a specific document
+tables = engine.get_all_tables("report.pdf")
