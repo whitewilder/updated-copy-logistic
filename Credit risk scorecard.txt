@@ -1,470 +1,1320 @@
-import pandas as pd
-import numpy as np
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import (
-    Font, PatternFill, Alignment, Border, Side, 
-    NamedStyle, numbers
-)
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.utils import get_column_letter
-from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
+"""Configuration settings for the vector store."""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+
+@dataclass
+class Config:
+    # Embedding model settings
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"  # Fast & efficient
+    # Alternative models:
+    # "sentence-transformers/all-mpnet-base-v2"  # More accurate, slower
+    # "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"  # Optimized for Q&A
+    
+    # Chunking settings
+    CHUNK_SIZE: int = 512
+    CHUNK_OVERLAP: int = 50
+    
+    # FAISS settings
+    FAISS_INDEX_TYPE: Literal["flat", "ivf", "hnsw"] = "flat"
+    NLIST: int = 100  # For IVF index
+    NPROBE: int = 10  # For IVF search
+    
+    # Paths
+    VECTOR_DB_PATH: Path = Path("./data/vector_db")
+    
+    # Search settings
+    DEFAULT_TOP_K: int = 5
+    SIMILARITY_THRESHOLD: float = 0.3  # Minimum similarity score
+
+
+"""
+End-to-End Vector Store with FAISS for PDF and DOCX files.
+Supports efficient similarity search with local storage.
+"""
+
 import os
-import warnings
+import re
+import pickle
+import hashlib
+import logging
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-warnings.filterwarnings('ignore')
+import numpy as np
+import faiss
+from tqdm import tqdm
+
+# Document processing
+import pdfplumber
+from PyPDF2 import PdfReader
+from docx import Document as DocxDocument
+
+# Embeddings
+from sentence_transformers import SentenceTransformer
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-class ExcelFormatter:
-    """
-    A comprehensive Excel/CSV formatter with data cleaning and styling capabilities.
-    """
+# ============================================================================
+# DATA CLASSES
+# ============================================================================
+
+@dataclass
+class TextChunk:
+    """Represents a chunk of text with metadata."""
+    text: str
+    chunk_id: str
+    document_id: str
+    document_name: str
+    page_number: Optional[int] = None
+    chunk_index: int = 0
+    start_char: int = 0
+    end_char: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SearchResult:
+    """Represents a search result."""
+    text: str
+    score: float
+    document_name: str
+    page_number: Optional[int]
+    chunk_id: str
+    metadata: Dict[str, Any]
+
+
+# ============================================================================
+# DOCUMENT LOADERS
+# ============================================================================
+
+class PDFLoader:
+    """Efficient PDF text extraction with multiple fallback methods."""
     
-    def __init__(self):
-        # Define color schemes
-        self.header_fill = PatternFill(
-            start_color="C00000",  # Dark Red
-            end_color="C00000",
-            fill_type="solid"
-        )
-        self.header_font = Font(
-            name='Calibri',
-            size=10,
-            bold=True,
-            color="FFFFFF"  # White text
-        )
-        self.data_font = Font(
-            name='Calibri',
-            size=9,
-            bold=False,
-            color="333333"  # Dark grey
-        )
-        self.alternate_fill = PatternFill(
-            start_color="F2F2F2",  # Light grey
-            end_color="F2F2F2",
-            fill_type="solid"
-        )
-        self.border = Border(
-            left=Side(style='thin', color='CCCCCC'),
-            right=Side(style='thin', color='CCCCCC'),
-            top=Side(style='thin', color='CCCCCC'),
-            bottom=Side(style='thin', color='CCCCCC')
-        )
-        self.center_alignment = Alignment(
-            horizontal='center',
-            vertical='center',
-            wrap_text=True
-        )
-        self.left_alignment = Alignment(
-            horizontal='left',
-            vertical='center',
-            wrap_text=True
-        )
+    @staticmethod
+    def extract_with_pdfplumber(file_path: str) -> List[Tuple[int, str]]:
+        """Extract text using pdfplumber (better for complex PDFs)."""
+        pages = []
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        pages.append((i + 1, text))
+        except Exception as e:
+            logger.warning(f"pdfplumber failed: {e}")
+        return pages
     
-    def read_file(self, file_path):
-        """
-        Read CSV or Excel file and return dictionary of DataFrames.
-        """
-        file_extension = os.path.splitext(file_path)[1].lower()
+    @staticmethod
+    def extract_with_pypdf2(file_path: str) -> List[Tuple[int, str]]:
+        """Extract text using PyPDF2 (faster, less accurate)."""
+        pages = []
+        try:
+            reader = PdfReader(file_path)
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append((i + 1, text))
+        except Exception as e:
+            logger.warning(f"PyPDF2 failed: {e}")
+        return pages
+    
+    @classmethod
+    def load(cls, file_path: str) -> List[Tuple[int, str]]:
+        """Load PDF with fallback methods."""
+        # Try pdfplumber first (better quality)
+        pages = cls.extract_with_pdfplumber(file_path)
+        if not pages:
+            # Fallback to PyPDF2
+            pages = cls.extract_with_pypdf2(file_path)
+        return pages
+
+
+class DOCXLoader:
+    """Efficient DOCX text extraction."""
+    
+    @staticmethod
+    def load(file_path: str) -> List[Tuple[int, str]]:
+        """Extract text from DOCX file."""
+        try:
+            doc = DocxDocument(file_path)
+            full_text = []
+            current_page = 1
+            
+            for para in doc.paragraphs:
+                text = para.text.strip()
+                if text:
+                    full_text.append(text)
+            
+            # DOCX doesn't have pages, treat as single page
+            combined_text = "\n\n".join(full_text)
+            return [(1, combined_text)] if combined_text else []
+            
+        except Exception as e:
+            logger.error(f"Failed to load DOCX {file_path}: {e}")
+            return []
+
+
+class DocumentLoader:
+    """Unified document loader supporting multiple formats."""
+    
+    SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc'}
+    
+    @classmethod
+    def load(cls, file_path: Union[str, Path]) -> List[Tuple[int, str]]:
+        """Load document based on file extension."""
+        file_path = Path(file_path)
         
-        if file_extension == '.csv':
-            df = pd.read_csv(file_path)
-            return {'Sheet1': df}
-        elif file_extension in ['.xlsx', '.xls']:
-            excel_file = pd.ExcelFile(file_path)
-            sheets_dict = {}
-            for sheet_name in excel_file.sheet_names:
-                sheets_dict[sheet_name] = pd.read_excel(
-                    excel_file, 
-                    sheet_name=sheet_name
-                )
-            return sheets_dict
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        ext = file_path.suffix.lower()
+        
+        if ext == '.pdf':
+            return PDFLoader.load(str(file_path))
+        elif ext in {'.docx', '.doc'}:
+            return DOCXLoader.load(str(file_path))
         else:
-            raise ValueError(f"Unsupported file format: {file_extension}")
-    
-    def convert_to_numeric(self, df):
-        """
-        Detect and convert columns to numeric where possible.
-        """
-        df_copy = df.copy()
-        
-        for col in df_copy.columns:
-            # Try to convert to numeric
-            if df_copy[col].dtype == 'object':
-                # Remove common formatting characters
-                try:
-                    cleaned = df_copy[col].astype(str).str.replace(
-                        r'[\$,€£%\s]', '', regex=True
-                    )
-                    numeric_col = pd.to_numeric(cleaned, errors='coerce')
-                    
-                    # If more than 50% are valid numbers, convert
-                    if numeric_col.notna().sum() / len(numeric_col) > 0.5:
-                        df_copy[col] = numeric_col
-                except:
-                    pass
-        
-        return df_copy
-    
-    def detect_percentage_rows(self, df):
-        """
-        Detect rows where all numeric values are between 0 and 1.
-        Returns set of column indices that should be formatted as percentage.
-        """
-        percentage_columns = set()
-        
-        for col in df.columns:
-            if pd.api.types.is_numeric_dtype(df[col]):
-                non_null_values = df[col].dropna()
-                if len(non_null_values) > 0:
-                    # Check if all values are between 0 and 1
-                    if (non_null_values >= 0).all() and (non_null_values <= 1).all():
-                        # Additional check: if max value is very small, likely percentage
-                        if non_null_values.max() <= 1:
-                            percentage_columns.add(col)
-        
-        return percentage_columns
-    
-    def remove_high_missing_columns(self, df, threshold=0.5):
-        """
-        Remove columns with missing values greater than threshold.
-        """
-        missing_pct = df.isnull().sum() / len(df)
-        cols_to_keep = missing_pct[missing_pct <= threshold].index.tolist()
-        removed_cols = [col for col in df.columns if col not in cols_to_keep]
-        
-        if removed_cols:
-            print(f"  Removed columns with >{threshold*100}% missing: {removed_cols}")
-        
-        return df[cols_to_keep]
-    
-    def remove_high_duplicate_columns(self, df, threshold=0.9):
-        """
-        Remove columns where duplicate values exceed threshold.
-        """
-        cols_to_remove = []
-        
-        for col in df.columns:
-            # Calculate duplicate percentage
-            value_counts = df[col].value_counts(normalize=True, dropna=False)
-            if len(value_counts) > 0:
-                max_duplicate_pct = value_counts.iloc[0]
-                if max_duplicate_pct > threshold:
-                    cols_to_remove.append(col)
-        
-        if cols_to_remove:
-            print(f"  Removed columns with >{threshold*100}% duplicates: {cols_to_remove}")
-        
-        return df.drop(columns=cols_to_remove)
-    
-    def clean_dataframe(self, df):
-        """
-        Apply all cleaning operations to DataFrame.
-        """
-        print("  Converting to numeric...")
-        df = self.convert_to_numeric(df)
-        
-        print("  Removing high missing columns...")
-        df = self.remove_high_missing_columns(df, threshold=0.5)
-        
-        print("  Removing high duplicate columns...")
-        df = self.remove_high_duplicate_columns(df, threshold=0.9)
-        
-        return df
-    
-    def auto_fit_column_width(self, ws):
-        """
-        Auto-fit column widths based on content.
-        """
-        for column_cells in ws.columns:
-            max_length = 0
-            column_letter = get_column_letter(column_cells[0].column)
-            
-            for cell in column_cells:
-                try:
-                    if cell.value:
-                        cell_length = len(str(cell.value))
-                        if cell_length > max_length:
-                            max_length = cell_length
-                except:
-                    pass
-            
-            # Set width with some padding, max 50, min 8
-            adjusted_width = min(max(max_length + 2, 8), 50)
-            ws.column_dimensions[column_letter].width = adjusted_width
-    
-    def apply_formatting(self, ws, df, percentage_columns):
-        """
-        Apply all formatting to worksheet.
-        """
-        # Format header row
-        for col_idx, cell in enumerate(ws[1], 1):
-            cell.font = self.header_font
-            cell.fill = self.header_fill
-            cell.alignment = self.center_alignment
-            cell.border = self.border
-        
-        # Format data rows
-        for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
-            for col_idx, cell in enumerate(row, 1):
-                # Apply base formatting
-                cell.font = self.data_font
-                cell.border = self.border
-                
-                # Alternate row coloring
-                if row_idx % 2 == 0:
-                    cell.fill = self.alternate_fill
-                
-                # Apply alignment based on data type
-                if isinstance(cell.value, (int, float)):
-                    cell.alignment = Alignment(horizontal='right', vertical='center')
-                else:
-                    cell.alignment = self.left_alignment
-                
-                # Apply percentage format
-                col_name = df.columns[col_idx - 1] if col_idx <= len(df.columns) else None
-                if col_name in percentage_columns and isinstance(cell.value, (int, float)):
-                    cell.number_format = '0.00%'
-                elif isinstance(cell.value, float):
-                    # Format other numbers - handle NaN values
-                    import math
-                    if not math.isnan(cell.value):
-                        # Check if float is actually an integer value
-                        if cell.value == int(cell.value):
-                            cell.number_format = '#,##0'
-                        else:
-                            cell.number_format = '#,##0.00'
-                    else:
-                        # NaN value - you might want to format it differently
-                        cell.number_format = 'General'
-                elif isinstance(cell.value, int):
-                    # Handle integer values
-                    cell.number_format = '#,##0'
-        
-        # Freeze top row
-        ws.freeze_panes = 'A2'
-        
-        # Auto-fit columns
-        self.auto_fit_column_width(ws)
-        
-        # Set row height
-        ws.row_dimensions[1].height = 25  # Header row
-        for row_idx in range(2, ws.max_row + 1):
-            ws.row_dimensions[row_idx].height = 18
-    
-    def add_conditional_formatting(self, ws, df):
-        """
-        Add conditional formatting rules.
-        """
-        from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
-        
-        for col_idx, col in enumerate(df.columns, 1):
-            if pd.api.types.is_numeric_dtype(df[col]):
-                col_letter = get_column_letter(col_idx)
-                cell_range = f"{col_letter}2:{col_letter}{ws.max_row}"
-                
-                # Add color scale for numeric columns
-                rule = ColorScaleRule(
-                    start_type='min',
-                    start_color='FFFFFF',
-                    mid_type='percentile',
-                    mid_value=50,
-                    mid_color='FFEB9C',
-                    end_type='max',
-                    end_color='63BE7B'
-                )
-                ws.conditional_formatting.add(cell_range, rule)
-    
+            raise ValueError(f"Unsupported file format: {ext}")
 
+
+# ============================================================================
+# TEXT CHUNKING
+# ============================================================================
+
+class TextChunker:
+    """
+    Intelligent text chunking with multiple strategies.
+    Supports semantic-aware chunking for better retrieval.
+    """
     
-    def process_and_format(self, input_file, output_file=None, 
-                            add_conditional=False):
-        """
-        Main function to process and format the file.
+    def __init__(
+        self,
+        chunk_size: int = 512,
+        chunk_overlap: int = 50,
+        separators: List[str] = None
+    ):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.separators = separators or ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "]
+    
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize text."""
+        # Remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text)
+        # Remove special characters but keep punctuation
+        text = re.sub(r'[^\w\s.,!?;:\'"()-]', '', text)
+        return text.strip()
+    
+    def _split_by_separator(self, text: str, separator: str) -> List[str]:
+        """Split text by separator while keeping the separator."""
+        if separator == " ":
+            return text.split(separator)
         
-        Parameters:
-        -----------
-        input_file : str
-            Path to input CSV or Excel file
-        output_file : str, optional
-            Path for output file. If None, creates formatted_<input_file>.xlsx
-  
-        add_conditional : bool
-            Whether to add conditional formatting
+        parts = text.split(separator)
+        result = []
+        for i, part in enumerate(parts):
+            if i < len(parts) - 1:
+                result.append(part + separator)
+            else:
+                result.append(part)
+        return [p for p in result if p.strip()]
+    
+    def _recursive_split(self, text: str, separators: List[str]) -> List[str]:
+        """Recursively split text using separators."""
+        if not separators:
+            return [text]
+        
+        separator = separators[0]
+        remaining_separators = separators[1:]
+        
+        splits = self._split_by_separator(text, separator)
+        
+        result = []
+        for split in splits:
+            if len(split) <= self.chunk_size:
+                result.append(split)
+            elif remaining_separators:
+                result.extend(self._recursive_split(split, remaining_separators))
+            else:
+                # Force split at chunk_size
+                for i in range(0, len(split), self.chunk_size - self.chunk_overlap):
+                    result.append(split[i:i + self.chunk_size])
+        
+        return result
+    
+    def _merge_small_chunks(self, chunks: List[str]) -> List[str]:
+        """Merge small chunks to reach optimal size."""
+        merged = []
+        current_chunk = ""
+        
+        for chunk in chunks:
+            if len(current_chunk) + len(chunk) <= self.chunk_size:
+                current_chunk += chunk
+            else:
+                if current_chunk:
+                    merged.append(current_chunk.strip())
+                current_chunk = chunk
+        
+        if current_chunk:
+            merged.append(current_chunk.strip())
+        
+        return merged
+    
+    def _add_overlap(self, chunks: List[str]) -> List[str]:
+        """Add overlap between chunks for context continuity."""
+        if len(chunks) <= 1:
+            return chunks
+        
+        overlapped = []
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                # Get overlap from previous chunk
+                prev_chunk = chunks[i - 1]
+                overlap_text = prev_chunk[-self.chunk_overlap:] if len(prev_chunk) > self.chunk_overlap else prev_chunk
+                chunk = overlap_text + " " + chunk
+            overlapped.append(chunk.strip())
+        
+        return overlapped
+    
+    def chunk(self, text: str) -> List[str]:
+        """Split text into overlapping chunks."""
+        text = self._clean_text(text)
+        
+        if len(text) <= self.chunk_size:
+            return [text] if text else []
+        
+        # Recursive split
+        splits = self._recursive_split(text, self.separators)
+        
+        # Merge small chunks
+        merged = self._merge_small_chunks(splits)
+        
+        # Add overlap
+        final_chunks = self._add_overlap(merged)
+        
+        return [c for c in final_chunks if c.strip()]
+
+
+# ============================================================================
+# EMBEDDING ENGINE
+# ============================================================================
+
+class EmbeddingEngine:
+    """
+    Efficient embedding generation using Sentence Transformers.
+    Supports batching and caching for performance.
+    """
+    
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        self.model_name = model_name
+        self._model = None
+        self._embedding_dim = None
+    
+    @property
+    def model(self) -> SentenceTransformer:
+        """Lazy load the model."""
+        if self._model is None:
+            logger.info(f"Loading embedding model: {self.model_name}")
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
+    
+    @property
+    def embedding_dim(self) -> int:
+        """Get embedding dimension."""
+        if self._embedding_dim is None:
+            self._embedding_dim = self.model.get_sentence_embedding_dimension()
+        return self._embedding_dim
+    
+    def embed(
+        self,
+        texts: Union[str, List[str]],
+        batch_size: int = 32,
+        show_progress: bool = True
+    ) -> np.ndarray:
+        """
+        Generate embeddings for texts.
+        
+        Args:
+            texts: Single text or list of texts
+            batch_size: Batch size for encoding
+            show_progress: Show progress bar
             
         Returns:
-        --------
-        str : Path to the output file
+            Numpy array of embeddings
         """
-        print(f"\n{'='*60}")
-        print(f"Processing: {input_file}")
-        print(f"{'='*60}")
+        if isinstance(texts, str):
+            texts = [texts]
         
-        # Generate output filename if not provided
-        if output_file is None:
-            base_name = os.path.splitext(os.path.basename(input_file))[0]
-            output_file = f"formatted_{base_name}.xlsx"
+        embeddings = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=show_progress,
+            convert_to_numpy=True,
+            normalize_embeddings=True  # For cosine similarity
+        )
         
-        # Read the file
-        print("\n[1/5] Reading file...")
-        sheets_dict = self.read_file(input_file)
-        print(f"  Found {len(sheets_dict)} sheet(s): {list(sheets_dict.keys())}")
-        
-        # Create workbook
-        wb = Workbook()
-        wb.remove(wb.active)  # Remove default sheet
-        
-        # Process each sheet
-        for sheet_idx, (sheet_name, df) in enumerate(sheets_dict.items()):
-            print(f"\n[2/5] Processing sheet: '{sheet_name}' ({len(df)} rows, {len(df.columns)} columns)")
-            
-            # Clean the dataframe
-            print("\n[3/5] Cleaning data...")
-            df_cleaned = self.clean_dataframe(df)
-            print(f"  After cleaning: {len(df_cleaned)} rows, {len(df_cleaned.columns)} columns")
-            
-            # Detect percentage columns
-            percentage_columns = self.detect_percentage_rows(df_cleaned)
-            if percentage_columns:
-                print(f"  Percentage columns detected: {percentage_columns}")
-            
-            # Create worksheet
-            ws = wb.create_sheet(title=sheet_name[:31])  # Excel sheet name limit
-            
-            # Write data to worksheet
-            print("\n[4/5] Writing data to worksheet...")
-            for r_idx, row in enumerate(dataframe_to_rows(df_cleaned, index=False, header=True), 1):
-                for c_idx, value in enumerate(row, 1):
-                    cell = ws.cell(row=r_idx, column=c_idx, value=value)
-            
-            # Apply formatting
-            print("\n[5/5] Applying formatting...")
-            self.apply_formatting(ws, df_cleaned, percentage_columns)
-            
-            # Add conditional formatting
-            if add_conditional:
-                self.add_conditional_formatting(ws, df_cleaned)
-            
-
-        # Save workbook
-        wb.save(output_file)
-        print(f"\n{'='*60}")
-        print(f"✓ File saved successfully: {output_file}")
-        print(f"{'='*60}\n")
-        
-        return output_file
-
-
-def format_excel(input_file, output_file=None, **kwargs):
-    """
-    Convenience function to format Excel/CSV files.
+        return embeddings.astype(np.float32)
     
-    Parameters:
-    -----------
-    input_file : str
-        Path to input CSV or Excel file
-    output_file : str, optional
-        Path for output file
-    **kwargs : 
-        Additional arguments passed to process_and_format()
- 
-        - add_conditional (bool): Add conditional formatting (default: True)
-    
-    Returns:
-    --------
-    str : Path to the output file
-    
-    Example:
-    --------
-    >>> format_excel('data.csv', 'formatted_data.xlsx')
-    >>> format_excel('report.xlsx')
-    """
-    formatter = ExcelFormatter()
-    return formatter.process_and_format(input_file, output_file, **kwargs)
+    def embed_query(self, query: str) -> np.ndarray:
+        """Embed a single query (no progress bar)."""
+        return self.embed([query], show_progress=False)[0]
 
 
 # ============================================================================
-# Additional utility functions
+# FAISS VECTOR STORE
 # ============================================================================
 
-def batch_format_files(input_folder, output_folder=None, file_pattern='*.csv'):
+class FAISSVectorStore:
     """
-    Format multiple files in a folder.
-    
-    Parameters:
-    -----------
-    input_folder : str
-        Path to folder containing files
-    output_folder : str, optional
-        Path to output folder. If None, saves in same folder
-    file_pattern : str
-        Pattern to match files (e.g., '*.csv', '*.xlsx', '*')
+    FAISS-based vector store with support for multiple index types.
+    Optimized for fast similarity search.
     """
-    import glob
     
-    if output_folder is None:
-        output_folder = input_folder
+    def __init__(
+        self,
+        embedding_dim: int,
+        index_type: str = "flat",
+        nlist: int = 100,
+        use_gpu: bool = False
+    ):
+        self.embedding_dim = embedding_dim
+        self.index_type = index_type
+        self.nlist = nlist
+        self.use_gpu = use_gpu
+        
+        self.index = None
+        self.chunks: List[TextChunk] = []
+        self.document_hashes: Dict[str, str] = {}
+        
+        self._create_index()
     
-    os.makedirs(output_folder, exist_ok=True)
+    def _create_index(self):
+        """Create FAISS index based on type."""
+        if self.index_type == "flat":
+            # Exact search - best for small datasets (<100k vectors)
+            self.index = faiss.IndexFlatIP(self.embedding_dim)
+        
+        elif self.index_type == "ivf":
+            # IVF - faster for larger datasets
+            quantizer = faiss.IndexFlatIP(self.embedding_dim)
+            self.index = faiss.IndexIVFFlat(
+                quantizer,
+                self.embedding_dim,
+                self.nlist,
+                faiss.METRIC_INNER_PRODUCT
+            )
+        
+        elif self.index_type == "hnsw":
+            # HNSW - very fast, good recall
+            self.index = faiss.IndexHNSWFlat(self.embedding_dim, 32)
+            self.index.hnsw.efConstruction = 200
+            self.index.hnsw.efSearch = 50
+        
+        else:
+            raise ValueError(f"Unknown index type: {self.index_type}")
+        
+        # GPU support
+        if self.use_gpu and faiss.get_num_gpus() > 0:
+            self.index = faiss.index_cpu_to_gpu(
+                faiss.StandardGpuResources(),
+                0,
+                self.index
+            )
+        
+        logger.info(f"Created FAISS index: {self.index_type}")
     
-    files = glob.glob(os.path.join(input_folder, file_pattern))
+    def _compute_document_hash(self, file_path: str) -> str:
+        """Compute hash of document for deduplication."""
+        hasher = hashlib.md5()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
     
-    print(f"Found {len(files)} files to process")
+    def add_embeddings(
+        self,
+        embeddings: np.ndarray,
+        chunks: List[TextChunk]
+    ):
+        """Add embeddings and chunks to the index."""
+        if embeddings.shape[0] != len(chunks):
+            raise ValueError("Embeddings and chunks must have same length")
+        
+        # Train IVF index if needed
+        if self.index_type == "ivf" and not self.index.is_trained:
+            if embeddings.shape[0] >= self.nlist:
+                self.index.train(embeddings)
+            else:
+                # Fall back to flat index if not enough data
+                logger.warning("Not enough data for IVF, using flat index")
+                self.index = faiss.IndexFlatIP(self.embedding_dim)
+        
+        # Add to index
+        start_idx = len(self.chunks)
+        self.index.add(embeddings)
+        
+        # Store chunks
+        self.chunks.extend(chunks)
+        
+        logger.info(f"Added {len(chunks)} chunks to index (total: {len(self.chunks)})")
     
-    for file_path in files:
-        try:
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            output_path = os.path.join(output_folder, f"formatted_{base_name}.xlsx")
-            format_excel(file_path, output_path)
-        except Exception as e:
-            print(f"Error processing {file_path}: {str(e)}")
-
-
-def create_sample_data():
-    """
-    Create sample data for testing.
-    """
-    np.random.seed(42)
+    def search(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 5,
+        threshold: float = 0.0,
+        nprobe: int = 10
+    ) -> List[Tuple[int, float]]:
+        """
+        Search for similar vectors.
+        
+        Args:
+            query_embedding: Query vector
+            top_k: Number of results
+            threshold: Minimum similarity threshold
+            nprobe: Number of clusters to search (for IVF)
+            
+        Returns:
+            List of (index, score) tuples
+        """
+        if self.index.ntotal == 0:
+            return []
+        
+        # Set nprobe for IVF
+        if self.index_type == "ivf":
+            self.index.nprobe = nprobe
+        
+        # Reshape query
+        query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
+        
+        # Search
+        scores, indices = self.index.search(query_embedding, min(top_k, self.index.ntotal))
+        
+        # Filter by threshold and return
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx != -1 and score >= threshold:
+                results.append((int(idx), float(score)))
+        
+        return results
     
-    df = pd.DataFrame({
-        'ID': range(1, 101),
-        'Name': [f'Product_{i}' for i in range(1, 101)],
-        'Category': np.random.choice(['A', 'B', 'C'], 100),
-        'Price': np.random.uniform(10, 1000, 100).round(2),
-        'Quantity': np.random.randint(1, 100, 100),
-        'Discount_Rate': np.random.uniform(0, 0.5, 100).round(4),  # Will be detected as percentage
-        'Profit_Margin': np.random.uniform(0.1, 0.4, 100).round(4),  # Will be detected as percentage
-        'High_Missing': [np.nan if np.random.random() > 0.4 else i for i in range(100)],  # >50% missing
-        'Constant_Col': ['Same Value'] * 100,  # >90% duplicate
-        'Sales_Date': pd.date_range('2024-01-01', periods=100).astype(str),
-        'Revenue': np.random.uniform(1000, 50000, 100).round(2),
-    })
+    def get_chunks(self, indices: List[int]) -> List[TextChunk]:
+        """Get chunks by indices."""
+        return [self.chunks[i] for i in indices if i < len(self.chunks)]
     
-    # Add some missing values randomly
-    for col in ['Price', 'Revenue']:
-        mask = np.random.random(100) > 0.9
-        df.loc[mask, col] = np.nan
+    def save(self, directory: Union[str, Path]):
+        """Save index and metadata to disk."""
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        
+        # Save FAISS index
+        index_path = directory / "index.faiss"
+        if self.use_gpu:
+            index_cpu = faiss.index_gpu_to_cpu(self.index)
+            faiss.write_index(index_cpu, str(index_path))
+        else:
+            faiss.write_index(self.index, str(index_path))
+        
+        # Save chunks and metadata
+        metadata = {
+            "chunks": self.chunks,
+            "document_hashes": self.document_hashes,
+            "embedding_dim": self.embedding_dim,
+            "index_type": self.index_type,
+            "nlist": self.nlist,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        with open(directory / "metadata.pkl", 'wb') as f:
+            pickle.dump(metadata, f)
+        
+        logger.info(f"Saved vector store to {directory}")
     
-    df.to_csv('sample_data.csv', index=False)
-    print("Sample data created: sample_data.csv")
-    return df
+    @classmethod
+    def load(cls, directory: Union[str, Path], use_gpu: bool = False) -> 'FAISSVectorStore':
+        """Load index and metadata from disk."""
+        directory = Path(directory)
+        
+        if not directory.exists():
+            raise FileNotFoundError(f"Directory not found: {directory}")
+        
+        # Load metadata
+        with open(directory / "metadata.pkl", 'rb') as f:
+            metadata = pickle.load(f)
+        
+        # Create instance
+        store = cls(
+            embedding_dim=metadata["embedding_dim"],
+            index_type=metadata["index_type"],
+            nlist=metadata["nlist"],
+            use_gpu=use_gpu
+        )
+        
+        # Load FAISS index
+        store.index = faiss.read_index(str(directory / "index.faiss"))
+        
+        if use_gpu and faiss.get_num_gpus() > 0:
+            store.index = faiss.index_cpu_to_gpu(
+                faiss.StandardGpuResources(),
+                0,
+                store.index
+            )
+        
+        store.chunks = metadata["chunks"]
+        store.document_hashes = metadata["document_hashes"]
+        
+        logger.info(f"Loaded vector store with {len(store.chunks)} chunks")
+        return store
+    
+    def delete_document(self, document_name: str):
+        """
+        Delete all chunks from a specific document.
+        Note: FAISS doesn't support deletion, so we rebuild the index.
+        """
+        # Find indices to keep
+        keep_indices = [
+            i for i, chunk in enumerate(self.chunks)
+            if chunk.document_name != document_name
+        ]
+        
+        if len(keep_indices) == len(self.chunks):
+            logger.warning(f"Document not found: {document_name}")
+            return
+        
+        # We need embeddings to rebuild - this is a limitation
+        # In production, you'd store embeddings separately
+        logger.warning("Document deletion requires index rebuild with original embeddings")
 
 
 # ============================================================================
-# Main execution
+# MAIN SEMANTIC SEARCH ENGINE
 # ============================================================================
 
-if __name__ == "__main__":
-    # Create sample data
-    print("Creating sample data...")
-    create_sample_data()
+class SemanticSearchEngine:
+    """
+    Main engine for semantic search over documents.
+    Handles document processing, indexing, and retrieval.
+    """
     
-    # Format the sample file
-    print("\nFormatting sample data...")
-    output_path = format_excel(
-        'sample_data.csv', 
-        'formatted_sample_data.xlsx',
+    def __init__(
+        self,
+        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        chunk_size: int = 512,
+        chunk_overlap: int = 50,
+        index_type: str = "flat",
+        storage_path: Union[str, Path] = "./data/vector_db"
+    ):
+        self.embedding_engine = EmbeddingEngine(embedding_model)
+        self.chunker = TextChunker(chunk_size, chunk_overlap)
+        self.storage_path = Path(storage_path)
+        self.index_type = index_type
+        
+        self.vector_store: Optional[FAISSVectorStore] = None
+        self._load_or_create_store()
+    
+    def _load_or_create_store(self):
+        """Load existing store or create new one."""
+        if self.storage_path.exists() and (self.storage_path / "index.faiss").exists():
+            try:
+                self.vector_store = FAISSVectorStore.load(self.storage_path)
+                logger.info("Loaded existing vector store")
+            except Exception as e:
+                logger.warning(f"Failed to load store: {e}, creating new one")
+                self._create_new_store()
+        else:
+            self._create_new_store()
+    
+    def _create_new_store(self):
+        """Create a new vector store."""
+        self.vector_store = FAISSVectorStore(
+            embedding_dim=self.embedding_engine.embedding_dim,
+            index_type=self.index_type
+        )
+    
+    def _generate_document_id(self, file_path: str) -> str:
+        """Generate unique document ID."""
+        return hashlib.md5(file_path.encode()).hexdigest()[:12]
+    
+    def _process_document(
+        self,
+        file_path: Union[str, Path]
+    ) -> List[TextChunk]:
+        """Process a single document into chunks."""
+        file_path = Path(file_path)
+        document_name = file_path.name
+        document_id = self._generate_document_id(str(file_path))
+        
+        # Load document
+        pages = DocumentLoader.load(file_path)
+        
+        if not pages:
+            logger.warning(f"No content extracted from: {file_path}")
+            return []
+        
+        # Create chunks
+        all_chunks = []
+        chunk_index = 0
+        
+        for page_number, page_text in pages:
+            text_chunks = self.chunker.chunk(page_text)
+            
+            for chunk_text in text_chunks:
+                chunk = TextChunk(
+                    text=chunk_text,
+                    chunk_id=f"{document_id}_{chunk_index}",
+                    document_id=document_id,
+                    document_name=document_name,
+                    page_number=page_number,
+                    chunk_index=chunk_index,
+                    metadata={
+                        "source": str(file_path),
+                        "file_type": file_path.suffix.lower()
+                    }
+                )
+                all_chunks.append(chunk)
+                chunk_index += 1
+        
+        return all_chunks
+    
+    def add_document(
+        self,
+        file_path: Union[str, Path],
+        skip_if_exists: bool = True
+    ) -> int:
+        """
+        Add a single document to the vector store.
+        
+        Args:
+            file_path: Path to document
+            skip_if_exists: Skip if document already indexed
+            
+        Returns:
+            Number of chunks added
+        """
+        file_path = Path(file_path)
+        document_name = file_path.name
+        
+        # Check if already indexed
+        if skip_if_exists:
+            existing_docs = set(c.document_name for c in self.vector_store.chunks)
+            if document_name in existing_docs:
+                logger.info(f"Document already indexed: {document_name}")
+                return 0
+        
+        # Process document
+        chunks = self._process_document(file_path)
+        
+        if not chunks:
+            return 0
+        
+        # Generate embeddings
+        texts = [c.text for c in chunks]
+        embeddings = self.embedding_engine.embed(texts, show_progress=False)
+        
+        # Add to store
+        self.vector_store.add_embeddings(embeddings, chunks)
+        
+        return len(chunks)
+    
+    def add_documents(
+        self,
+        directory: Union[str, Path],
+        extensions: List[str] = None,
+        recursive: bool = True,
+        skip_if_exists: bool = True
+    ) -> Dict[str, int]:
+        """
+        Add all documents from a directory.
+        
+        Args:
+            directory: Path to directory
+            extensions: File extensions to process (default: .pdf, .docx)
+            recursive: Search subdirectories
+            skip_if_exists: Skip already indexed documents
+            
+        Returns:
+            Dictionary of {filename: chunks_added}
+        """
+        directory = Path(directory)
+        extensions = extensions or ['.pdf', '.docx', '.doc']
+        
+        # Find all files
+        files = []
+        for ext in extensions:
+            pattern = f"**/*{ext}" if recursive else f"*{ext}"
+            files.extend(directory.glob(pattern))
+        
+        logger.info(f"Found {len(files)} documents to process")
+        
+        results = {}
+        all_chunks = []
+        
+        # Process all documents
+        for file_path in tqdm(files, desc="Processing documents"):
+            document_name = file_path.name
+            
+            # Check if already indexed
+            if skip_if_exists:
+                existing_docs = set(c.document_name for c in self.vector_store.chunks)
+                if document_name in existing_docs:
+                    results[document_name] = 0
+                    continue
+            
+            try:
+                chunks = self._process_document(file_path)
+                all_chunks.extend(chunks)
+                results[document_name] = len(chunks)
+            except Exception as e:
+                logger.error(f"Failed to process {file_path}: {e}")
+                results[document_name] = -1
+        
+        # Batch embed and add
+        if all_chunks:
+            logger.info(f"Generating embeddings for {len(all_chunks)} chunks")
+            texts = [c.text for c in all_chunks]
+            embeddings = self.embedding_engine.embed(texts)
+            self.vector_store.add_embeddings(embeddings, all_chunks)
+        
+        return results
+    
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        threshold: float = 0.3,
+        filter_documents: List[str] = None,
+        return_context: bool = True
+    ) -> List[SearchResult]:
+        """
+        Search for relevant text chunks.
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            threshold: Minimum similarity threshold (0-1)
+            filter_documents: Only search in these documents
+            return_context: Include surrounding context
+            
+        Returns:
+            List of SearchResult objects
+        """
+        if self.vector_store.index.ntotal == 0:
+            logger.warning("Vector store is empty")
+            return []
+        
+        # Embed query
+        query_embedding = self.embedding_engine.embed_query(query)
+        
+        # Search
+        results = self.vector_store.search(
+            query_embedding,
+            top_k=top_k * 2 if filter_documents else top_k,  # Get more for filtering
+            threshold=threshold
+        )
+        
+        # Get chunks and create results
+        search_results = []
+        for idx, score in results:
+            chunk = self.vector_store.chunks[idx]
+            
+            # Apply document filter
+            if filter_documents and chunk.document_name not in filter_documents:
+                continue
+            
+            result = SearchResult(
+                text=chunk.text,
+                score=score,
+                document_name=chunk.document_name,
+                page_number=chunk.page_number,
+                chunk_id=chunk.chunk_id,
+                metadata=chunk.metadata
+            )
+            search_results.append(result)
+            
+            if len(search_results) >= top_k:
+                break
+        
+        return search_results
+    
+    def search_with_reranking(
+        self,
+        query: str,
+        top_k: int = 5,
+        initial_k: int = 20,
+        threshold: float = 0.3
+    ) -> List[SearchResult]:
+        """
+        Search with keyword-based reranking for better precision.
+        """
+        # Get initial results
+        initial_results = self.search(query, top_k=initial_k, threshold=threshold)
+        
+        if not initial_results:
+            return []
+        
+        # Keyword-based reranking
+        query_words = set(query.lower().split())
+        
+        def compute_keyword_score(text: str) -> float:
+            text_lower = text.lower()
+            matches = sum(1 for word in query_words if word in text_lower)
+            return matches / len(query_words) if query_words else 0
+        
+        # Combine semantic and keyword scores
+        reranked = []
+        for result in initial_results:
+            keyword_score = compute_keyword_score(result.text)
+            combined_score = 0.7 * result.score + 0.3 * keyword_score
+            result.score = combined_score
+            reranked.append(result)
+        
+        # Sort by combined score
+        reranked.sort(key=lambda x: x.score, reverse=True)
+        
+        return reranked[:top_k]
+    
+    def get_answer_context(
+        self,
+        query: str,
+        top_k: int = 3,
+        max_tokens: int = 2000
+    ) -> str:
+        """
+        Get formatted context for question answering.
+        Useful for feeding to LLMs.
+        """
+        results = self.search(query, top_k=top_k)
+        
+        context_parts = []
+        total_length = 0
+        
+        for i, result in enumerate(results, 1):
+            chunk_text = f"[Source: {result.document_name}"
+            if result.page_number:
+                chunk_text += f", Page {result.page_number}"
+            chunk_text += f"]\n{result.text}\n"
+            
+            if total_length + len(chunk_text) > max_tokens * 4:  # Approximate token count
+                break
+            
+            context_parts.append(chunk_text)
+            total_length += len(chunk_text)
+        
+        return "\n---\n".join(context_parts)
+    
+    def save(self):
+        """Save the vector store to disk."""
+        self.vector_store.save(self.storage_path)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the vector store."""
+        documents = set(c.document_name for c in self.vector_store.chunks)
+        
+        return {
+            "total_chunks": len(self.vector_store.chunks),
+            "total_documents": len(documents),
+            "documents": list(documents),
+            "index_type": self.vector_store.index_type,
+            "embedding_dim": self.vector_store.embedding_dim,
+            "storage_path": str(self.storage_path)
+        }
+    
+    def clear(self):
+        """Clear the vector store."""
+        self._create_new_store()
+        logger.info("Vector store cleared")
 
-        add_conditional=False
+
+# ============================================================================
+# HYBRID SEARCH (Optional Enhancement)
+# ============================================================================
+
+class HybridSearchEngine(SemanticSearchEngine):
+    """
+    Enhanced search engine with hybrid (semantic + keyword) search.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.keyword_index: Dict[str, List[int]] = {}  # word -> chunk indices
+    
+    def _build_keyword_index(self):
+        """Build inverted index for keyword search."""
+        self.keyword_index.clear()
+        
+        for idx, chunk in enumerate(self.vector_store.chunks):
+            words = set(re.findall(r'\b\w+\b', chunk.text.lower()))
+            for word in words:
+                if word not in self.keyword_index:
+                    self.keyword_index[word] = []
+                self.keyword_index[word].append(idx)
+    
+    def keyword_search(self, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
+        """Perform keyword-based search using BM25-like scoring."""
+        query_words = set(re.findall(r'\b\w+\b', query.lower()))
+        
+        # Score chunks
+        chunk_scores = {}
+        for word in query_words:
+            if word in self.keyword_index:
+                for idx in self.keyword_index[word]:
+                    chunk_scores[idx] = chunk_scores.get(idx, 0) + 1
+        
+        # Normalize scores
+        max_score = max(chunk_scores.values()) if chunk_scores else 1
+        results = [(idx, score/max_score) for idx, score in chunk_scores.items()]
+        results.sort(key=lambda x: x[1], reverse=True)
+        
+        return results[:top_k]
+    
+    def hybrid_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        semantic_weight: float = 0.7,
+        threshold: float = 0.3
+    ) -> List[SearchResult]:
+        """
+        Combine semantic and keyword search results.
+        
+        Args:
+            query: Search query
+            top_k: Number of results
+            semantic_weight: Weight for semantic search (0-1)
+            threshold: Minimum score threshold
+        """
+        # Ensure keyword index is built
+        if not self.keyword_index:
+            self._build_keyword_index()
+        
+        # Get semantic results
+        query_embedding = self.embedding_engine.embed_query(query)
+        semantic_results = self.vector_store.search(query_embedding, top_k=top_k * 2)
+        
+        # Get keyword results
+        keyword_results = self.keyword_search(query, top_k=top_k * 2)
+        
+        # Combine scores
+        combined_scores = {}
+        
+        for idx, score in semantic_results:
+            combined_scores[idx] = semantic_weight * score
+        
+        keyword_weight = 1 - semantic_weight
+        for idx, score in keyword_results:
+            combined_scores[idx] = combined_scores.get(idx, 0) + keyword_weight * score
+        
+        # Sort and filter
+        sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        search_results = []
+        for idx, score in sorted_results[:top_k]:
+            if score < threshold:
+                continue
+            
+            chunk = self.vector_store.chunks[idx]
+            result = SearchResult(
+                text=chunk.text,
+                score=score,
+                document_name=chunk.document_name,
+                page_number=chunk.page_number,
+                chunk_id=chunk.chunk_id,
+                metadata=chunk.metadata
+            )
+            search_results.append(result)
+        
+        return search_results
+
+"""
+Example usage of the Vector Store and Semantic Search Engine.
+"""
+
+# from pathlib import Path
+# from vector_store import SemanticSearchEngine, HybridSearchEngine
+
+
+def main():
+    # =========================================================================
+    # BASIC USAGE
+    # =========================================================================
+    
+    print("=" * 60)
+    print("VECTOR STORE - SEMANTIC SEARCH ENGINE")
+    print("=" * 60)
+    
+    # Initialize the search engine
+    engine = SemanticSearchEngine(
+        embedding_model="sentence-transformers/all-MiniLM-L6-v2",  # Fast model
+        chunk_size=512,
+        chunk_overlap=50,
+        index_type="flat",  # Use "ivf" for large datasets
+        storage_path="./data/vector_db"
     )
     
-    print(f"\nDone! Check '{output_path}' for the formatted output.")
+    # =========================================================================
+    # ADD DOCUMENTS
+    # =========================================================================
+    
+    print("\n📁 Adding Documents...")
+    
+    # Option 1: Add a single document
+    # engine.add_document("path/to/document.pdf")
+    
+    # Option 2: Add all documents from a directory
+    docs_path = Path("./documents")
+    if docs_path.exists():
+        results = engine.add_documents(
+            directory=docs_path,
+            extensions=['.pdf', '.docx'],
+            recursive=True,
+            skip_if_exists=True
+        )
+        
+        for doc_name, chunks_added in results.items():
+            status = "✓" if chunks_added > 0 else "⏭️ (skipped)" if chunks_added == 0 else "✗ (failed)"
+            print(f"  {status} {doc_name}: {chunks_added} chunks")
+    else:
+        print("  Creating sample documents directory...")
+        docs_path.mkdir(parents=True, exist_ok=True)
+        print(f"  Please add PDF/DOCX files to: {docs_path.absolute()}")
+    
+    # =========================================================================
+    # SAVE VECTOR STORE
+    # =========================================================================
+    
+    print("\n💾 Saving Vector Store...")
+    engine.save()
+    print("  Vector store saved successfully!")
+    
+    # =========================================================================
+    # SEARCH EXAMPLES
+    # =========================================================================
+    
+    print("\n🔍 Search Examples...")
+    
+    # Get stats
+    stats = engine.get_stats()
+    print(f"\n  📊 Vector Store Stats:")
+    print(f"     - Total Chunks: {stats['total_chunks']}")
+    print(f"     - Total Documents: {stats['total_documents']}")
+    print(f"     - Index Type: {stats['index_type']}")
+    
+    if stats['total_chunks'] > 0:
+        # Basic search
+        query = "What are the main features?"
+        print(f"\n  🔎 Query: '{query}'")
+        
+        results = engine.search(
+            query=query,
+            top_k=3,
+            threshold=0.3
+        )
+        
+        print(f"\n  📝 Results ({len(results)} found):")
+        for i, result in enumerate(results, 1):
+            print(f"\n  --- Result {i} (Score: {result.score:.4f}) ---")
+            print(f"  Document: {result.document_name}")
+            if result.page_number:
+                print(f"  Page: {result.page_number}")
+            print(f"  Text: {result.text[:200]}...")
+        
+        # Search with reranking
+        print(f"\n  🔎 Search with Reranking: '{query}'")
+        reranked_results = engine.search_with_reranking(
+            query=query,
+            top_k=3,
+            initial_k=20
+        )
+        
+        print(f"\n  📝 Reranked Results:")
+        for i, result in enumerate(reranked_results, 1):
+            print(f"  {i}. [{result.score:.4f}] {result.document_name}: {result.text[:100]}...")
+        
+        # Get context for LLM
+        print(f"\n  📚 Getting Context for LLM...")
+        context = engine.get_answer_context(
+            query=query,
+            top_k=3,
+            max_tokens=1000
+        )
+        print(f"\n  Context:\n{context[:500]}...")
+    
+    # =========================================================================
+    # HYBRID SEARCH (OPTIONAL)
+    # =========================================================================
+    
+    print("\n" + "=" * 60)
+    print("HYBRID SEARCH ENGINE (Semantic + Keyword)")
+    print("=" * 60)
+    
+    hybrid_engine = HybridSearchEngine(
+        embedding_model= "nvidia/llama-nemotron-embed-1b-v2",  #"sentence-transformers/all-MiniLM-L6-v2",
+        chunk_size=512,
+        storage_path="./data/vector_db"  # Reuse existing store
+    )
+    
+    if hybrid_engine.get_stats()['total_chunks'] > 0:
+        query = "machine learning algorithms"
+        print(f"\n  🔎 Hybrid Query: '{query}'")
+        
+        results = hybrid_engine.hybrid_search(
+            query=query,
+            top_k=3,
+            semantic_weight=0.7
+        )
+        
+        print(f"\n  📝 Hybrid Results:")
+        for i, result in enumerate(results, 1):
+            print(f"  {i}. [{result.score:.4f}] {result.document_name}: {result.text[:100]}...")
+
+
+def interactive_search():
+    """Interactive search mode."""
+    print("\n" + "=" * 60)
+    print("INTERACTIVE SEARCH MODE")
+    print("=" * 60)
+    
+    engine = SemanticSearchEngine(storage_path="./data/vector_db")
+    
+    stats = engine.get_stats()
+    print(f"\n📊 Loaded {stats['total_chunks']} chunks from {stats['total_documents']} documents")
+    
+    if stats['total_chunks'] == 0:
+        print("⚠️ No documents indexed. Please add documents first.")
+        return
+    
+    print("\nEnter your queries (type 'quit' to exit):\n")
+    
+    while True:
+        query = input("🔍 Query: ").strip()
+        
+        if query.lower() in ['quit', 'exit', 'q']:
+            print("Goodbye! 👋")
+            break
+        
+        if not query:
+            continue
+        
+        results = engine.search(query, top_k=5, threshold=0.3)
+        
+        if not results:
+            print("  ❌ No results found.\n")
+            continue
+        
+        print(f"\n  📝 Found {len(results)} results:\n")
+        for i, result in enumerate(results, 1):
+            print(f"  {i}. [Score: {result.score:.4f}]")
+            print(f"     Document: {result.document_name}")
+            if result.page_number:
+                print(f"     Page: {result.page_number}")
+            print(f"     Text: {result.text[:200]}...")
+            print()
+
+
+def benchmark():
+    """Benchmark search performance."""
+    import time
+    
+    print("\n" + "=" * 60)
+    print("BENCHMARK")
+    print("=" * 60)
+    
+    engine = SemanticSearchEngine(storage_path="./data/vector_db")
+    stats = engine.get_stats()
+    
+    if stats['total_chunks'] == 0:
+        print("⚠️ No documents indexed. Please add documents first.")
+        return
+    
+    print(f"\n📊 Testing with {stats['total_chunks']} chunks\n")
+    
+    queries = [
+        "What is the main topic?",
+        "How does it work?",
+        "What are the benefits?",
+        "technical specifications",
+        "summary of findings"
+    ]
+    
+    times = []
+    for query in queries:
+        start = time.time()
+        for _ in range(10):  # Run 10 times for averaging
+            engine.search(query, top_k=5)
+        elapsed = (time.time() - start) / 10
+        times.append(elapsed)
+        print(f"  Query: '{query[:30]}...' -> {elapsed*1000:.2f}ms")
+    
+    avg_time = sum(times) / len(times)
+    print(f"\n  ⚡ Average search time: {avg_time*1000:.2f}ms")
+    print(f"  ⚡ Queries per second: {1/avg_time:.0f}")
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "interactive":
+            interactive_search()
+        elif sys.argv[1] == "benchmark":
+            benchmark()
+        else:
+            main()
+    else:
+        main()
+
+"""
+Quick start script - Run this to get started immediately.
+"""
+
+# from vector_store import SemanticSearchEngine
+from pathlib import Path
+
+
+def quick_start():
+    # 1. Create engine
+    engine = SemanticSearchEngine(
+        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        chunk_size=512,
+        storage_path="./my_vector_db"
+    )
+    
+    # 2. Create sample documents folder
+    docs_folder = Path("./my_documents")
+    docs_folder.mkdir(exist_ok=True)
+    
+    # 3. Add your documents (put PDFs/DOCXs in ./my_documents/)
+    print("Add your PDF/DOCX files to ./my_documents/ folder")
+    print("Then run: engine.add_documents('./my_documents/')")
+    
+    # 4. If documents exist, index them
+    if list(docs_folder.glob("*.pdf")) or list(docs_folder.glob("*.docx")):
+        results = engine.add_documents(docs_folder)
+        print(f"Indexed {sum(v for v in results.values() if v > 0)} chunks")
+        engine.save()
+        
+        # 5. Search
+        query = input("Enter search query: ")
+        results = engine.search(query, top_k=3)
+        
+        for r in results:
+            print(f"\n[{r.score:.3f}] {r.document_name}")
+            print(r.text[:300])
+    
+    return engine
+
+
+if __name__ == "__main__":
+    engine = quick_start()
+
+
+config = Config()777
