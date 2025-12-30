@@ -1,1870 +1,1988 @@
 """
-Enhanced Vector Store with FAISS - Table Extraction & Multi-Datatype Support
-Supports PDF/DOCX text and table extraction with DataFrame storage.
+Word Document Editor - Functional Approach
+Comprehensive automation tool for Word document operations
+Author: Assistant
+Version: 2.0
 """
 
 import os
 import re
+import shutil
 import json
-import pickle
-import hashlib
-import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union, Literal
-from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from enum import Enum
-import io
+from typing import List, Dict, Tuple, Optional, Any, Callable, Union
+from io import BytesIO
+import warnings
 
-import numpy as np
-import pandas as pd
-import faiss
-from tqdm import tqdm
+# Third-party imports
+try:
+    from docx import Document
+    from docx.shared import Inches, Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.enum.style import WD_STYLE_TYPE
+    from docx.oxml.ns import qn, nsmap
+    from docx.oxml import OxmlElement
+    import pandas as pd
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.utils.dataframe import dataframe_to_rows
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from PIL import Image
+except ImportError as e:
+    print(f"Missing dependency: {e}")
+    print("Install with: pip install python-docx pandas openpyxl Pillow")
+    raise
 
-# Document processing
-import pdfplumber
-from PyPDF2 import PdfReader
-from docx import Document as DocxDocument
-from docx.table import Table as DocxTable
 
-# Embeddings
-from sentence_transformers import SentenceTransformer
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-# ============================================================================
+# =============================================================================
 # CONFIGURATION
-# ============================================================================
+# =============================================================================
 
-@dataclass
-class Config:
-    """Configuration settings for the vector store."""
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    CHUNK_SIZE: int = 512
-    CHUNK_OVERLAP: int = 50
-    FAISS_INDEX_TYPE: Literal["flat", "ivf", "hnsw"] = "flat"
-    NLIST: int = 100
-    NPROBE: int = 10
-    VECTOR_DB_PATH: Path = Path("./data/vector_db")
-    DEFAULT_TOP_K: int = 5
-    SIMILARITY_THRESHOLD: float = 0.3
-    STORAGE_FORMAT: Literal["json", "pkl", "both"] = "both"
+CONFIG = {
+    'backup_enabled': True,
+    'backup_folder': '_backups',
+    'default_image_width': 4.0,  # inches
+    'table_style': 'Table Grid',
+    'supported_image_formats': {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'},
+    'max_column_width': 50,
+}
 
 
-config = Config()
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def create_folder_if_not_exists(folder_path: str) -> str:
+    """Create folder if it doesn't exist"""
+    os.makedirs(folder_path, exist_ok=True)
+    return folder_path
 
 
-# ============================================================================
-# ENUMS AND DATA CLASSES
-# ============================================================================
-
-class ContentType(Enum):
-    """Type of content stored in the vector store."""
-    TEXT = "text"
-    TABLE = "table"
-    MIXED = "mixed"
+def get_timestamp() -> str:
+    """Get formatted timestamp"""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-@dataclass
-class TextChunk:
-    """Represents a chunk of text with metadata."""
-    text: str
-    chunk_id: str
-    document_id: str
-    document_name: str
-    content_type: str = "text"
-    page_number: Optional[int] = None
-    chunk_index: int = 0
-    start_char: int = 0
-    end_char: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+def create_backup_path(file_path: str, backup_folder: Optional[str] = None) -> str:
+    """Create backup file path with timestamp"""
+    directory = os.path.dirname(file_path) or '.'
+    filename = os.path.basename(file_path)
+    name, ext = os.path.splitext(filename)
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "text": self.text,
-            "chunk_id": self.chunk_id,
-            "document_id": self.document_id,
-            "document_name": self.document_name,
-            "content_type": self.content_type,
-            "page_number": self.page_number,
-            "chunk_index": self.chunk_index,
-            "start_char": self.start_char,
-            "end_char": self.end_char,
-            "metadata": self.metadata
-        }
+    if backup_folder:
+        backup_dir = os.path.join(directory, backup_folder)
+        create_folder_if_not_exists(backup_dir)
+    else:
+        backup_dir = directory
     
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TextChunk':
-        """Create from dictionary."""
-        return cls(**data)
+    return os.path.join(backup_dir, f"{name}_backup_{get_timestamp()}{ext}")
 
 
-@dataclass
-class TableChunk:
-    """Represents a table with metadata and DataFrame storage."""
-    table_id: str
-    document_id: str
-    document_name: str
-    page_number: Optional[int] = None
-    table_index: int = 0
+def log_action(message: str, level: str = "INFO") -> None:
+    """Log action with timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [{level}] {message}")
+
+
+def validate_file_exists(file_path: str) -> None:
+    """Validate that file exists"""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+
+def get_docx_files_in_folder(folder_path: str) -> List[str]:
+    """Get all .docx files in folder"""
+    validate_file_exists(folder_path)
+    return [
+        os.path.join(folder_path, f) 
+        for f in os.listdir(folder_path) 
+        if f.endswith('.docx') and not f.startswith('~$')
+    ]
+
+
+# =============================================================================
+# DOCUMENT LOADING/SAVING FUNCTIONS
+# =============================================================================
+
+def load_document(file_path: str) -> Document:
+    """
+    Load a Word document from file path
     
-    # DataFrame storage
-    dataframe_json: str = ""  # JSON representation for storage
-    dataframe_csv: str = ""   # CSV representation for display
+    Args:
+        file_path: Path to the .docx file
+        
+    Returns:
+        Document object
+        
+    Example:
+        doc = load_document('report.docx')
+    """
+    validate_file_exists(file_path)
+    log_action(f"Loading document: {file_path}")
+    return Document(file_path)
+
+
+def save_document(
+    doc: Document, 
+    output_path: str, 
+    create_backup: bool = True
+) -> str:
+    """
+    Save Word document with optional backup
     
-    # Text representation for embedding
-    text_representation: str = ""
+    Args:
+        doc: Document object
+        output_path: Output file path
+        create_backup: Whether to create backup of existing file
+        
+    Returns:
+        Path to saved document
+    """
+    if create_backup and os.path.exists(output_path):
+        backup_path = create_backup_path(output_path, CONFIG['backup_folder'])
+        shutil.copy2(output_path, backup_path)
+        log_action(f"Backup created: {backup_path}")
     
-    # Table metadata
-    num_rows: int = 0
-    num_cols: int = 0
-    column_names: List[str] = field(default_factory=list)
+    # Ensure directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        create_folder_if_not_exists(output_dir)
     
-    # Additional metadata
-    caption: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    content_type: str = "table"
+    doc.save(output_path)
+    log_action(f"Document saved: {output_path}")
+    return output_path
+
+
+def create_new_document() -> Document:
+    """Create a new empty Word document"""
+    log_action("Creating new document")
+    return Document()
+
+
+def copy_document(source_path: str, dest_path: str) -> str:
+    """Copy a document to new location"""
+    validate_file_exists(source_path)
+    shutil.copy2(source_path, dest_path)
+    log_action(f"Document copied: {source_path} -> {dest_path}")
+    return dest_path
+
+
+# =============================================================================
+# DOCUMENT STRUCTURE & INFO FUNCTIONS
+# =============================================================================
+
+def get_document_info(doc: Document) -> Dict[str, Any]:
+    """
+    Get comprehensive document information
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "table_id": self.table_id,
-            "document_id": self.document_id,
-            "document_name": self.document_name,
-            "page_number": self.page_number,
-            "table_index": self.table_index,
-            "dataframe_json": self.dataframe_json,
-            "dataframe_csv": self.dataframe_csv,
-            "text_representation": self.text_representation,
-            "num_rows": self.num_rows,
-            "num_cols": self.num_cols,
-            "column_names": self.column_names,
-            "caption": self.caption,
-            "metadata": self.metadata,
-            "content_type": self.content_type
-        }
+    Returns:
+        Dictionary with document metadata and statistics
+    """
+    core_props = doc.core_properties
     
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TableChunk':
-        """Create from dictionary."""
-        return cls(**data)
+    return {
+        'title': core_props.title,
+        'author': core_props.author,
+        'created': str(core_props.created) if core_props.created else None,
+        'modified': str(core_props.modified) if core_props.modified else None,
+        'last_modified_by': core_props.last_modified_by,
+        'paragraph_count': len(doc.paragraphs),
+        'table_count': len(doc.tables),
+        'section_count': len(doc.sections),
+        'word_count': sum(len(p.text.split()) for p in doc.paragraphs),
+        'character_count': sum(len(p.text) for p in doc.paragraphs),
+    }
+
+
+def get_document_structure(doc: Document) -> Dict[str, Any]:
+    """
+    Get complete document structure overview
     
-    def get_dataframe(self) -> pd.DataFrame:
-        """Reconstruct DataFrame from JSON storage."""
-        if self.dataframe_json:
-            return pd.read_json(io.StringIO(self.dataframe_json), orient='split')
+    Returns:
+        Dictionary with headers, tables, images info
+    """
+    return {
+        'headers': extract_headers(doc),
+        'paragraph_count': len(doc.paragraphs),
+        'table_count': len(doc.tables),
+        'image_count': count_images(doc),
+        'section_count': len(doc.sections),
+        'styles_used': list(set(p.style.name for p in doc.paragraphs if p.style)),
+        'table_summaries': [
+            {'index': i, 'rows': len(t.rows), 'cols': len(t.columns) if t.rows else 0}
+            for i, t in enumerate(doc.tables)
+        ]
+    }
+
+
+def print_document_structure(doc: Document) -> None:
+    """Print formatted document structure"""
+    structure = get_document_structure(doc)
+    
+    print("\n" + "=" * 60)
+    print("DOCUMENT STRUCTURE")
+    print("=" * 60)
+    print(f"Paragraphs: {structure['paragraph_count']}")
+    print(f"Tables: {structure['table_count']}")
+    print(f"Images: {structure['image_count']}")
+    print(f"Sections: {structure['section_count']}")
+    
+    if structure['headers']:
+        print("\nHEADERS:")
+        for h in structure['headers']:
+            indent = "  " * (h['level'] - 1)
+            print(f"{indent}[H{h['level']}] {h['text'][:60]}...")
+    
+    if structure['table_summaries']:
+        print("\nTABLES:")
+        for t in structure['table_summaries']:
+            print(f"  Table {t['index']}: {t['rows']} rows x {t['cols']} columns")
+    
+    print("=" * 60 + "\n")
+
+
+# =============================================================================
+# HEADER/PARAGRAPH EXTRACTION FUNCTIONS
+# =============================================================================
+
+def extract_headers(
+    doc: Document, 
+    level: Optional[int] = None,
+    include_text: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Extract all headers from document
+    
+    Args:
+        doc: Word document
+        level: Specific heading level (1-9), None for all
+        include_text: Whether to include header text
+        
+    Returns:
+        List of header dictionaries
+        
+    Example:
+        headers = extract_headers(doc)
+        h2_headers = extract_headers(doc, level=2)
+    """
+    headers = []
+    
+    for i, para in enumerate(doc.paragraphs):
+        if not para.style:
+            continue
+            
+        style_name = para.style.name
+        if style_name.startswith('Heading'):
+            try:
+                heading_level = int(style_name.replace('Heading ', '').split()[0])
+                if level is None or heading_level == level:
+                    header_info = {
+                        'index': i,
+                        'level': heading_level,
+                        'style': style_name
+                    }
+                    if include_text:
+                        header_info['text'] = para.text
+                    headers.append(header_info)
+            except ValueError:
+                continue
+    
+    return headers
+
+
+def extract_paragraphs(
+    doc: Document,
+    style_filter: Optional[str] = None,
+    text_contains: Optional[str] = None,
+    exclude_empty: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Extract paragraphs with optional filtering
+    
+    Args:
+        doc: Word document
+        style_filter: Only include paragraphs with this style
+        text_contains: Only include paragraphs containing this text
+        exclude_empty: Exclude empty paragraphs
+        
+    Returns:
+        List of paragraph dictionaries
+    """
+    paragraphs = []
+    
+    for i, para in enumerate(doc.paragraphs):
+        # Apply filters
+        if exclude_empty and not para.text.strip():
+            continue
+        if style_filter and (not para.style or para.style.name != style_filter):
+            continue
+        if text_contains and text_contains.lower() not in para.text.lower():
+            continue
+        
+        paragraphs.append({
+            'index': i,
+            'text': para.text,
+            'style': para.style.name if para.style else 'Normal'
+        })
+    
+    return paragraphs
+
+
+def extract_text_content(doc: Document, include_tables: bool = True) -> str:
+    """
+    Extract all text content from document
+    
+    Args:
+        doc: Word document
+        include_tables: Whether to include table text
+        
+    Returns:
+        Full text content as string
+    """
+    content_parts = []
+    
+    # Paragraphs
+    for para in doc.paragraphs:
+        if para.text.strip():
+            content_parts.append(para.text)
+    
+    # Tables
+    if include_tables:
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = ' | '.join(cell.text.strip() for cell in row.cells)
+                if row_text.strip():
+                    content_parts.append(row_text)
+    
+    return '\n'.join(content_parts)
+
+
+# =============================================================================
+# TABLE EXTRACTION FUNCTIONS
+# =============================================================================
+
+def table_to_dataframe(
+    table, 
+    header_row: int = 0,
+    skip_rows: Optional[List[int]] = None
+) -> pd.DataFrame:
+    """
+    Convert a Word table to pandas DataFrame
+    
+    Args:
+        table: Word table object
+        header_row: Row index to use as header (default 0)
+        skip_rows: List of row indices to skip
+        
+    Returns:
+        pandas DataFrame
+    """
+    skip_rows = skip_rows or []
+    data = []
+    
+    for i, row in enumerate(table.rows):
+        if i in skip_rows:
+            continue
+        row_data = []
+        for cell in row.cells:
+            # Handle merged cells by getting unique text
+            cell_text = cell.text.strip()
+            row_data.append(cell_text)
+        data.append(row_data)
+    
+    if not data:
         return pd.DataFrame()
     
-    @classmethod
-    def from_dataframe(
-        cls,
-        df: pd.DataFrame,
-        table_id: str,
-        document_id: str,
-        document_name: str,
-        page_number: Optional[int] = None,
-        table_index: int = 0,
-        caption: Optional[str] = None,
-        metadata: Dict[str, Any] = None
-    ) -> 'TableChunk':
-        """Create TableChunk from a pandas DataFrame."""
-        # Generate text representation for embedding
-        text_repr = cls._dataframe_to_text(df, caption)
-        
-        return cls(
-            table_id=table_id,
-            document_id=document_id,
-            document_name=document_name,
-            page_number=page_number,
-            table_index=table_index,
-            dataframe_json=df.to_json(orient='split', date_format='iso'),
-            dataframe_csv=df.to_csv(index=False),
-            text_representation=text_repr,
-            num_rows=len(df),
-            num_cols=len(df.columns),
-            column_names=list(df.columns),
-            caption=caption,
-            metadata=metadata or {},
-            content_type="table"
-        )
+    # Adjust header row index after skipping
+    adjusted_header = header_row - sum(1 for r in skip_rows if r < header_row)
     
-    @staticmethod
-    def _dataframe_to_text(df: pd.DataFrame, caption: Optional[str] = None) -> str:
-        """Convert DataFrame to searchable text representation."""
-        text_parts = []
-        
-        if caption:
-            text_parts.append(f"Table: {caption}")
-        
-        # Add column names
-        text_parts.append(f"Columns: {', '.join(df.columns.astype(str))}")
-        
-        # Add row data (limit to avoid too long text)
-        max_rows = min(20, len(df))
-        for idx, row in df.head(max_rows).iterrows():
-            row_text = " | ".join([f"{col}: {val}" for col, val in row.items()])
-            text_parts.append(row_text)
-        
-        if len(df) > max_rows:
-            text_parts.append(f"... and {len(df) - max_rows} more rows")
-        
-        return "\n".join(text_parts)
-
-
-@dataclass
-class SearchResult:
-    """Represents a search result (text or table)."""
-    content: str  # Text content or table text representation
-    score: float
-    document_name: str
-    page_number: Optional[int]
-    chunk_id: str
-    content_type: str  # "text" or "table"
-    metadata: Dict[str, Any]
-    
-    # Table-specific fields
-    dataframe: Optional[pd.DataFrame] = None
-    table_csv: Optional[str] = None
-    column_names: Optional[List[str]] = None
-    num_rows: Optional[int] = None
-    num_cols: Optional[int] = None
-    
-    def get_formatted_table(self, max_rows: int = 10) -> str:
-        """Get formatted table string for display."""
-        if self.dataframe is not None:
-            return self.dataframe.head(max_rows).to_string()
-        elif self.table_csv:
-            df = pd.read_csv(io.StringIO(self.table_csv))
-            return df.head(max_rows).to_string()
-        return ""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        result = {
-            "content": self.content,
-            "score": self.score,
-            "document_name": self.document_name,
-            "page_number": self.page_number,
-            "chunk_id": self.chunk_id,
-            "content_type": self.content_type,
-            "metadata": self.metadata,
-            "column_names": self.column_names,
-            "num_rows": self.num_rows,
-            "num_cols": self.num_cols
-        }
-        if self.dataframe is not None:
-            result["dataframe_json"] = self.dataframe.to_json(orient='split')
-        return result
-
-
-# ============================================================================
-# TABLE EXTRACTORS
-# ============================================================================
-
-class PDFTableExtractor:
-    """Extract tables from PDF files using pdfplumber."""
-    
-    @staticmethod
-    def extract_tables(file_path: str) -> List[Tuple[int, int, pd.DataFrame, Optional[str]]]:
-        """
-        Extract all tables from a PDF file.
-        
-        Returns:
-            List of (page_number, table_index, dataframe, caption) tuples
-        """
-        tables = []
-        
-        try:
-            with pdfplumber.open(file_path) as pdf:
-                for page_num, page in enumerate(pdf.pages, 1):
-                    page_tables = page.extract_tables()
-                    
-                    for table_idx, table_data in enumerate(page_tables):
-                        if table_data and len(table_data) > 0:
-                            # Convert to DataFrame
-                            df = PDFTableExtractor._table_to_dataframe(table_data)
-                            
-                            if df is not None and not df.empty:
-                                # Try to extract caption (text near table)
-                                caption = PDFTableExtractor._extract_table_caption(
-                                    page, table_idx
-                                )
-                                tables.append((page_num, table_idx, df, caption))
-        
-        except Exception as e:
-            logger.error(f"Error extracting tables from PDF: {e}")
-        
-        return tables
-    
-    @staticmethod
-    def _table_to_dataframe(table_data: List[List]) -> Optional[pd.DataFrame]:
-        """Convert raw table data to DataFrame."""
-        try:
-            if len(table_data) < 2:
-                return None
-            
-            # Clean the data
-            cleaned_data = []
-            for row in table_data:
-                cleaned_row = [
-                    str(cell).strip() if cell is not None else ""
-                    for cell in row
-                ]
-                cleaned_data.append(cleaned_row)
-            
-            # Use first row as header if it looks like headers
-            headers = cleaned_data[0]
-            data_rows = cleaned_data[1:]
-            
-            # Create DataFrame
-            df = pd.DataFrame(data_rows, columns=headers)
-            
-            # Clean column names
-            df.columns = [
-                re.sub(r'\s+', ' ', str(col)).strip() or f"Column_{i}"
-                for i, col in enumerate(df.columns)
-            ]
-            
-            return df
-        
-        except Exception as e:
-            logger.warning(f"Failed to convert table to DataFrame: {e}")
-            return None
-    
-    @staticmethod
-    def _extract_table_caption(page, table_idx: int) -> Optional[str]:
-        """Try to extract table caption from nearby text."""
-        try:
-            text = page.extract_text() or ""
-            # Look for common caption patterns
-            patterns = [
-                rf"Table\s*{table_idx + 1}[:\.\s]+([^\n]+)",
-                rf"Table\s+\d+[:\.\s]+([^\n]+)",
-                r"(?:Caption|Title)[:\s]+([^\n]+)"
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    return match.group(1).strip()
-            
-            return None
-        except:
-            return None
-
-
-class DOCXTableExtractor:
-    """Extract tables from DOCX files."""
-    
-    @staticmethod
-    def extract_tables(file_path: str) -> List[Tuple[int, int, pd.DataFrame, Optional[str]]]:
-        """
-        Extract all tables from a DOCX file.
-        
-        Returns:
-            List of (page_number, table_index, dataframe, caption) tuples
-        """
-        tables = []
-        
-        try:
-            doc = DocxDocument(file_path)
-            
-            for table_idx, table in enumerate(doc.tables):
-                df = DOCXTableExtractor._table_to_dataframe(table)
-                
-                if df is not None and not df.empty:
-                    # DOCX doesn't have page numbers, use 1
-                    caption = DOCXTableExtractor._extract_table_caption(doc, table_idx)
-                    tables.append((1, table_idx, df, caption))
-        
-        except Exception as e:
-            logger.error(f"Error extracting tables from DOCX: {e}")
-        
-        return tables
-    
-    @staticmethod
-    def _table_to_dataframe(table: DocxTable) -> Optional[pd.DataFrame]:
-        """Convert DOCX table to DataFrame."""
-        try:
-            data = []
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                data.append(row_data)
-            
-            if len(data) < 2:
-                return None
-            
-            # Use first row as header
-            headers = data[0]
-            data_rows = data[1:]
-            
-            df = pd.DataFrame(data_rows, columns=headers)
-            
-            # Clean column names
-            df.columns = [
-                re.sub(r'\s+', ' ', str(col)).strip() or f"Column_{i}"
-                for i, col in enumerate(df.columns)
-            ]
-            
-            return df
-        
-        except Exception as e:
-            logger.warning(f"Failed to convert DOCX table to DataFrame: {e}")
-            return None
-    
-    @staticmethod
-    def _extract_table_caption(doc: DocxDocument, table_idx: int) -> Optional[str]:
-        """Try to extract table caption."""
-        try:
-            # Look for caption in paragraphs before the table
-            for para in doc.paragraphs:
-                text = para.text.strip()
-                if re.match(rf"Table\s*{table_idx + 1}", text, re.IGNORECASE):
-                    return text
-            return None
-        except:
-            return None
-
-
-# ============================================================================
-# DOCUMENT LOADERS (Enhanced with Table Support)
-# ============================================================================
-
-class PDFLoader:
-    """Enhanced PDF loader with text and table extraction."""
-    
-    @staticmethod
-    def extract_text_with_pdfplumber(file_path: str) -> List[Tuple[int, str]]:
-        """Extract text using pdfplumber."""
-        pages = []
-        try:
-            with pdfplumber.open(file_path) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text() or ""
-                    if text.strip():
-                        pages.append((i + 1, text))
-        except Exception as e:
-            logger.warning(f"pdfplumber text extraction failed: {e}")
-        return pages
-    
-    @staticmethod
-    def extract_text_with_pypdf2(file_path: str) -> List[Tuple[int, str]]:
-        """Extract text using PyPDF2 as fallback."""
-        pages = []
-        try:
-            reader = PdfReader(file_path)
-            for i, page in enumerate(reader.pages):
-                text = page.extract_text() or ""
-                if text.strip():
-                    pages.append((i + 1, text))
-        except Exception as e:
-            logger.warning(f"PyPDF2 text extraction failed: {e}")
-        return pages
-    
-    @classmethod
-    def load(cls, file_path: str) -> Dict[str, Any]:
-        """
-        Load PDF with text and tables.
-        
-        Returns:
-            Dictionary with 'text_pages' and 'tables'
-        """
-        # Extract text
-        text_pages = cls.extract_text_with_pdfplumber(file_path)
-        if not text_pages:
-            text_pages = cls.extract_text_with_pypdf2(file_path)
-        
-        # Extract tables
-        tables = PDFTableExtractor.extract_tables(file_path)
-        
-        return {
-            "text_pages": text_pages,
-            "tables": tables
-        }
-
-
-class DOCXLoader:
-    """Enhanced DOCX loader with text and table extraction."""
-    
-    @staticmethod
-    def load(file_path: str) -> Dict[str, Any]:
-        """
-        Load DOCX with text and tables.
-        
-        Returns:
-            Dictionary with 'text_pages' and 'tables'
-        """
-        text_pages = []
-        tables = []
-        
-        try:
-            doc = DocxDocument(file_path)
-            
-            # Extract text from paragraphs
-            full_text = []
-            for para in doc.paragraphs:
-                text = para.text.strip()
-                if text:
-                    full_text.append(text)
-            
-            if full_text:
-                combined_text = "\n\n".join(full_text)
-                text_pages = [(1, combined_text)]
-            
-            # Extract tables
-            tables = DOCXTableExtractor.extract_tables(file_path)
-            
-        except Exception as e:
-            logger.error(f"Failed to load DOCX {file_path}: {e}")
-        
-        return {
-            "text_pages": text_pages,
-            "tables": tables
-        }
-
-
-class DocumentLoader:
-    """Unified document loader with multi-format support."""
-    
-    SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc'}
-    
-    @classmethod
-    def load(cls, file_path: Union[str, Path]) -> Dict[str, Any]:
-        """Load document based on file extension."""
-        file_path = Path(file_path)
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        ext = file_path.suffix.lower()
-        
-        if ext == '.pdf':
-            return PDFLoader.load(str(file_path))
-        elif ext in {'.docx', '.doc'}:
-            return DOCXLoader.load(str(file_path))
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
-
-
-# ============================================================================
-# TEXT CHUNKING
-# ============================================================================
-
-class TextChunker:
-    """Intelligent text chunking with semantic awareness."""
-    
-    def __init__(
-        self,
-        chunk_size: int = 512,
-        chunk_overlap: int = 50,
-        separators: List[str] = None
-    ):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.separators = separators or ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "]
-    
-    def _clean_text(self, text: str) -> str:
-        """Clean and normalize text."""
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'[^\w\s.,!?;:\'"()\-\[\]{}]', '', text)
-        return text.strip()
-    
-    def _split_by_separator(self, text: str, separator: str) -> List[str]:
-        """Split text by separator while keeping the separator."""
-        if separator == " ":
-            return text.split(separator)
-        
-        parts = text.split(separator)
-        result = []
-        for i, part in enumerate(parts):
-            if i < len(parts) - 1:
-                result.append(part + separator)
+    if adjusted_header < len(data):
+        headers = data[adjusted_header]
+        # Make headers unique
+        seen = {}
+        unique_headers = []
+        for h in headers:
+            if h in seen:
+                seen[h] += 1
+                unique_headers.append(f"{h}_{seen[h]}")
             else:
-                result.append(part)
-        return [p for p in result if p.strip()]
+                seen[h] = 0
+                unique_headers.append(h)
+        
+        body_data = data[adjusted_header + 1:]
+        df = pd.DataFrame(body_data, columns=unique_headers)
+    else:
+        df = pd.DataFrame(data)
     
-    def _recursive_split(self, text: str, separators: List[str]) -> List[str]:
-        """Recursively split text using separators."""
-        if not separators:
-            return [text]
-        
-        separator = separators[0]
-        remaining_separators = separators[1:]
-        
-        splits = self._split_by_separator(text, separator)
-        
-        result = []
-        for split in splits:
-            if len(split) <= self.chunk_size:
-                result.append(split)
-            elif remaining_separators:
-                result.extend(self._recursive_split(split, remaining_separators))
-            else:
-                for i in range(0, len(split), self.chunk_size - self.chunk_overlap):
-                    result.append(split[i:i + self.chunk_size])
-        
-        return result
-    
-    def _merge_small_chunks(self, chunks: List[str]) -> List[str]:
-        """Merge small chunks to reach optimal size."""
-        merged = []
-        current_chunk = ""
-        
-        for chunk in chunks:
-            if len(current_chunk) + len(chunk) <= self.chunk_size:
-                current_chunk += chunk
-            else:
-                if current_chunk:
-                    merged.append(current_chunk.strip())
-                current_chunk = chunk
-        
-        if current_chunk:
-            merged.append(current_chunk.strip())
-        
-        return merged
-    
-    def _add_overlap(self, chunks: List[str]) -> List[str]:
-        """Add overlap between chunks for context continuity."""
-        if len(chunks) <= 1:
-            return chunks
-        
-        overlapped = []
-        for i, chunk in enumerate(chunks):
-            if i > 0:
-                prev_chunk = chunks[i - 1]
-                overlap_text = prev_chunk[-self.chunk_overlap:] if len(prev_chunk) > self.chunk_overlap else prev_chunk
-                chunk = overlap_text + " " + chunk
-            overlapped.append(chunk.strip())
-        
-        return overlapped
-    
-    def chunk(self, text: str) -> List[str]:
-        """Split text into overlapping chunks."""
-        text = self._clean_text(text)
-        
-        if len(text) <= self.chunk_size:
-            return [text] if text else []
-        
-        splits = self._recursive_split(text, self.separators)
-        merged = self._merge_small_chunks(splits)
-        final_chunks = self._add_overlap(merged)
-        
-        return [c for c in final_chunks if c.strip()]
+    return df
 
 
-# ============================================================================
-# EMBEDDING ENGINE
-# ============================================================================
-
-class EmbeddingEngine:
-    """Efficient embedding generation using Sentence Transformers."""
-    
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        self.model_name = model_name
-        self._model = None
-        self._embedding_dim = None
-    
-    @property
-    def model(self) -> SentenceTransformer:
-        """Lazy load the model."""
-        if self._model is None:
-            logger.info(f"Loading embedding model: {self.model_name}")
-            self._model = SentenceTransformer(self.model_name)
-        return self._model
-    
-    @property
-    def embedding_dim(self) -> int:
-        """Get embedding dimension."""
-        if self._embedding_dim is None:
-            self._embedding_dim = self.model.get_sentence_embedding_dimension()
-        return self._embedding_dim
-    
-    def embed(
-        self,
-        texts: Union[str, List[str]],
-        batch_size: int = 32,
-        show_progress: bool = True
-    ) -> np.ndarray:
-        """Generate embeddings for texts."""
-        if isinstance(texts, str):
-            texts = [texts]
-        
-        embeddings = self.model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=show_progress,
-            convert_to_numpy=True,
-            normalize_embeddings=True
-        )
-        
-        return embeddings.astype(np.float32)
-    
-    def embed_query(self, query: str) -> np.ndarray:
-        """Embed a single query."""
-        return self.embed([query], show_progress=False)[0]
-
-
-# ============================================================================
-# JSON SERIALIZATION HELPERS
-# ============================================================================
-
-class DataFrameJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder that handles DataFrames and numpy types."""
-    
-    def default(self, obj):
-        if isinstance(obj, pd.DataFrame):
-            return {
-                "__type__": "DataFrame",
-                "data": obj.to_json(orient='split', date_format='iso')
-            }
-        elif isinstance(obj, np.ndarray):
-            return {
-                "__type__": "ndarray",
-                "data": obj.tolist(),
-                "dtype": str(obj.dtype)
-            }
-        elif isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, Path):
-            return str(obj)
-        elif isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
-
-
-def json_decoder_hook(obj: Dict) -> Any:
-    """Custom JSON decoder hook for DataFrames."""
-    if "__type__" in obj:
-        if obj["__type__"] == "DataFrame":
-            return pd.read_json(io.StringIO(obj["data"]), orient='split')
-        elif obj["__type__"] == "ndarray":
-            return np.array(obj["data"], dtype=obj["dtype"])
-    return obj
-
-
-# ============================================================================
-# FAISS VECTOR STORE (Enhanced)
-# ============================================================================
-
-class FAISSVectorStore:
+def extract_all_tables(
+    doc: Document,
+    as_dataframes: bool = True
+) -> List[Dict[str, Any]]:
     """
-    Enhanced FAISS vector store with multi-datatype support.
-    Supports text chunks, tables, and JSON/PKL storage.
+    Extract all tables from document
+    
+    Args:
+        doc: Word document
+        as_dataframes: Convert tables to DataFrames
+        
+    Returns:
+        List of table information dictionaries
+        
+    Example:
+        tables = extract_all_tables(doc)
+        for t in tables:
+            print(f"Table {t['index']}: {t['row_count']} rows")
+            print(t['dataframe'])
     """
+    tables = []
     
-    def __init__(
-        self,
-        embedding_dim: int,
-        index_type: str = "flat",
-        nlist: int = 100,
-        use_gpu: bool = False
-    ):
-        self.embedding_dim = embedding_dim
-        self.index_type = index_type
-        self.nlist = nlist
-        self.use_gpu = use_gpu
+    for i, table in enumerate(doc.tables):
+        table_info = {
+            'index': i,
+            'row_count': len(table.rows),
+            'column_count': len(table.columns) if table.rows else 0,
+        }
         
-        self.index = None
-        self.text_chunks: List[TextChunk] = []
-        self.table_chunks: List[TableChunk] = []
-        self.chunk_mapping: List[Tuple[str, int]] = []  # (type, index) mapping
-        self.document_hashes: Dict[str, str] = {}
-        self.embeddings_store: Optional[np.ndarray] = None  # Store embeddings for rebuild
-        
-        self._create_index()
-    
-    def _create_index(self):
-        """Create FAISS index based on type."""
-        if self.index_type == "flat":
-            self.index = faiss.IndexFlatIP(self.embedding_dim)
-        elif self.index_type == "ivf":
-            quantizer = faiss.IndexFlatIP(self.embedding_dim)
-            self.index = faiss.IndexIVFFlat(
-                quantizer,
-                self.embedding_dim,
-                self.nlist,
-                faiss.METRIC_INNER_PRODUCT
-            )
-        elif self.index_type == "hnsw":
-            self.index = faiss.IndexHNSWFlat(self.embedding_dim, 32)
-            self.index.hnsw.efConstruction = 200
-            self.index.hnsw.efSearch = 50
+        if as_dataframes:
+            table_info['dataframe'] = table_to_dataframe(table)
         else:
-            raise ValueError(f"Unknown index type: {self.index_type}")
+            # Raw data
+            table_info['data'] = [
+                [cell.text.strip() for cell in row.cells]
+                for row in table.rows
+            ]
         
-        if self.use_gpu and faiss.get_num_gpus() > 0:
-            self.index = faiss.index_cpu_to_gpu(
-                faiss.StandardGpuResources(),
-                0,
-                self.index
-            )
-        
-        logger.info(f"Created FAISS index: {self.index_type}")
+        tables.append(table_info)
     
-    def add_text_embeddings(
-        self,
-        embeddings: np.ndarray,
-        chunks: List[TextChunk]
-    ):
-        """Add text chunk embeddings to the index."""
-        self._add_embeddings(embeddings, chunks, "text")
+    log_action(f"Extracted {len(tables)} tables")
+    return tables
+
+
+def extract_table_by_index(doc: Document, table_index: int) -> pd.DataFrame:
+    """
+    Extract a specific table by index
     
-    def add_table_embeddings(
-        self,
-        embeddings: np.ndarray,
-        chunks: List[TableChunk]
-    ):
-        """Add table chunk embeddings to the index."""
-        self._add_embeddings(embeddings, chunks, "table")
+    Args:
+        doc: Word document
+        table_index: Index of table to extract
+        
+    Returns:
+        pandas DataFrame
+    """
+    if table_index >= len(doc.tables):
+        raise IndexError(
+            f"Table index {table_index} out of range. "
+            f"Document has {len(doc.tables)} tables."
+        )
+    return table_to_dataframe(doc.tables[table_index])
+
+
+def extract_tables_by_header(
+    doc: Document,
+    header_text: str,
+    case_sensitive: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    Extract tables that appear after a specific header
     
-    def _add_embeddings(
-        self,
-        embeddings: np.ndarray,
-        chunks: List[Union[TextChunk, TableChunk]],
-        chunk_type: str
-    ):
-        """Generic method to add embeddings to the index."""
-        if embeddings.shape[0] != len(chunks):
-            raise ValueError("Embeddings and chunks must have same length")
+    Args:
+        doc: Word document
+        header_text: Header text to search for
+        case_sensitive: Whether search is case sensitive
         
-        # Train IVF index if needed
-        if self.index_type == "ivf" and not self.index.is_trained:
-            if embeddings.shape[0] >= self.nlist:
-                self.index.train(embeddings)
-            else:
-                logger.warning("Not enough data for IVF, using flat index")
-                self.index = faiss.IndexFlatIP(self.embedding_dim)
-        
-        # Add to index
-        self.index.add(embeddings)
-        
-        # Store embeddings for potential rebuild
-        if self.embeddings_store is None:
-            self.embeddings_store = embeddings
-        else:
-            self.embeddings_store = np.vstack([self.embeddings_store, embeddings])
-        
-        # Store chunks and mapping
-        for chunk in chunks:
-            if chunk_type == "text":
-                self.chunk_mapping.append(("text", len(self.text_chunks)))
-                self.text_chunks.append(chunk)
-            else:
-                self.chunk_mapping.append(("table", len(self.table_chunks)))
-                self.table_chunks.append(chunk)
-        
-        logger.info(f"Added {len(chunks)} {chunk_type} chunks to index")
+    Returns:
+        List of table info with associated header
+    """
+    results = []
     
-    def search(
-        self,
-        query_embedding: np.ndarray,
-        top_k: int = 5,
-        threshold: float = 0.0,
-        content_type_filter: Optional[str] = None,
-        nprobe: int = 10
-    ) -> List[Tuple[int, float, str]]:
-        """
-        Search for similar vectors.
-        
-        Returns:
-            List of (index, score, content_type) tuples
-        """
-        if self.index.ntotal == 0:
-            return []
-        
-        if self.index_type == "ivf":
-            self.index.nprobe = nprobe
-        
-        query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
-        
-        # Get more results if filtering
-        search_k = top_k * 3 if content_type_filter else top_k
-        scores, indices = self.index.search(query_embedding, min(search_k, self.index.ntotal))
-        
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx != -1 and score >= threshold:
-                chunk_type, _ = self.chunk_mapping[idx]
-                
-                if content_type_filter and chunk_type != content_type_filter:
-                    continue
-                
-                results.append((int(idx), float(score), chunk_type))
-                
-                if len(results) >= top_k:
+    # Build document element order
+    body = doc.element.body
+    current_header = None
+    
+    for element in body:
+        # Check if paragraph with heading style
+        if element.tag.endswith('p'):
+            for para in doc.paragraphs:
+                if para._element == element:
+                    if para.style and para.style.name.startswith('Heading'):
+                        text = para.text
+                        match = (text == header_text if case_sensitive 
+                                else text.lower() == header_text.lower())
+                        if match or (header_text.lower() in text.lower()):
+                            current_header = text
                     break
         
-        return results
+        # Check if table
+        elif element.tag.endswith('tbl'):
+            if current_header:
+                for i, table in enumerate(doc.tables):
+                    if table._tbl == element:
+                        results.append({
+                            'header': current_header,
+                            'table_index': i,
+                            'dataframe': table_to_dataframe(table)
+                        })
+                        break
     
-    def get_chunk(self, global_index: int) -> Union[TextChunk, TableChunk, None]:
-        """Get chunk by global index."""
-        if global_index >= len(self.chunk_mapping):
-            return None
-        
-        chunk_type, local_index = self.chunk_mapping[global_index]
-        
-        if chunk_type == "text":
-            return self.text_chunks[local_index]
-        else:
-            return self.table_chunks[local_index]
-    
-    def save(self, directory: Union[str, Path], format: str = "both"):
-        """
-        Save index and metadata to disk.
-        
-        Args:
-            directory: Save directory
-            format: "json", "pkl", or "both"
-        """
-        directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        
-        # Save FAISS index
-        index_path = directory / "index.faiss"
-        if self.use_gpu:
-            index_cpu = faiss.index_gpu_to_cpu(self.index)
-            faiss.write_index(index_cpu, str(index_path))
-        else:
-            faiss.write_index(self.index, str(index_path))
-        
-        # Save embeddings
-        np.save(directory / "embeddings.npy", self.embeddings_store)
-        
-        # Prepare metadata
-        metadata = {
-            "text_chunks": [c.to_dict() for c in self.text_chunks],
-            "table_chunks": [c.to_dict() for c in self.table_chunks],
-            "chunk_mapping": self.chunk_mapping,
-            "document_hashes": self.document_hashes,
-            "embedding_dim": self.embedding_dim,
-            "index_type": self.index_type,
-            "nlist": self.nlist,
-            "created_at": datetime.now().isoformat(),
-            "total_text_chunks": len(self.text_chunks),
-            "total_table_chunks": len(self.table_chunks)
-        }
-        
-        # Save in requested format(s)
-        if format in ["pkl", "both"]:
-            with open(directory / "metadata.pkl", 'wb') as f:
-                pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
-            logger.info(f"Saved PKL metadata to {directory}")
-        
-        if format in ["json", "both"]:
-            with open(directory / "metadata.json", 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, cls=DataFrameJSONEncoder, indent=2)
-            logger.info(f"Saved JSON metadata to {directory}")
-        
-        logger.info(f"Saved vector store to {directory}")
-    
-    @classmethod
-    def load(
-        cls,
-        directory: Union[str, Path],
-        use_gpu: bool = False,
-        prefer_format: str = "pkl"
-    ) -> 'FAISSVectorStore':
-        """
-        Load index and metadata from disk.
-        
-        Args:
-            directory: Load directory
-            use_gpu: Use GPU for FAISS
-            prefer_format: Preferred format ("pkl" or "json")
-        """
-        directory = Path(directory)
-        
-        if not directory.exists():
-            raise FileNotFoundError(f"Directory not found: {directory}")
-        
-        # Load metadata (try preferred format first)
-        metadata = None
-        
-        if prefer_format == "pkl" and (directory / "metadata.pkl").exists():
-            with open(directory / "metadata.pkl", 'rb') as f:
-                metadata = pickle.load(f)
-        elif (directory / "metadata.json").exists():
-            with open(directory / "metadata.json", 'r', encoding='utf-8') as f:
-                metadata = json.load(f, object_hook=json_decoder_hook)
-        elif (directory / "metadata.pkl").exists():
-            with open(directory / "metadata.pkl", 'rb') as f:
-                metadata = pickle.load(f)
-        else:
-            raise FileNotFoundError("No metadata file found")
-        
-        # Create instance
-        store = cls(
-            embedding_dim=metadata["embedding_dim"],
-            index_type=metadata["index_type"],
-            nlist=metadata["nlist"],
-            use_gpu=use_gpu
-        )
-        
-        # Load FAISS index
-        store.index = faiss.read_index(str(directory / "index.faiss"))
-        
-        if use_gpu and faiss.get_num_gpus() > 0:
-            store.index = faiss.index_cpu_to_gpu(
-                faiss.StandardGpuResources(),
-                0,
-                store.index
-            )
-        
-        # Load embeddings
-        embeddings_path = directory / "embeddings.npy"
-        if embeddings_path.exists():
-            store.embeddings_store = np.load(embeddings_path)
-        
-        # Reconstruct chunks
-        store.text_chunks = [TextChunk.from_dict(c) for c in metadata["text_chunks"]]
-        store.table_chunks = [TableChunk.from_dict(c) for c in metadata["table_chunks"]]
-        store.chunk_mapping = [tuple(m) for m in metadata["chunk_mapping"]]
-        store.document_hashes = metadata["document_hashes"]
-        
-        logger.info(
-            f"Loaded vector store with {len(store.text_chunks)} text chunks "
-            f"and {len(store.table_chunks)} table chunks"
-        )
-        return store
-    
-    def delete_document(self, document_name: str) -> bool:
-        """Delete all content from a specific document and rebuild index."""
-        # Find indices to keep
-        keep_indices = []
-        new_text_chunks = []
-        new_table_chunks = []
-        new_mapping = []
-        new_embeddings = []
-        
-        for global_idx, (chunk_type, local_idx) in enumerate(self.chunk_mapping):
-            if chunk_type == "text":
-                chunk = self.text_chunks[local_idx]
-            else:
-                chunk = self.table_chunks[local_idx]
-            
-            if chunk.document_name != document_name:
-                keep_indices.append(global_idx)
-                
-                if chunk_type == "text":
-                    new_mapping.append(("text", len(new_text_chunks)))
-                    new_text_chunks.append(chunk)
-                else:
-                    new_mapping.append(("table", len(new_table_chunks)))
-                    new_table_chunks.append(chunk)
-                
-                if self.embeddings_store is not None:
-                    new_embeddings.append(self.embeddings_store[global_idx])
-        
-        if len(keep_indices) == len(self.chunk_mapping):
-            logger.warning(f"Document not found: {document_name}")
-            return False
-        
-        # Rebuild
-        self.text_chunks = new_text_chunks
-        self.table_chunks = new_table_chunks
-        self.chunk_mapping = new_mapping
-        
-        # Rebuild index
-        self._create_index()
-        if new_embeddings:
-            new_embeddings = np.vstack(new_embeddings)
-            self.embeddings_store = new_embeddings
-            
-            if self.index_type == "ivf" and len(new_embeddings) >= self.nlist:
-                self.index.train(new_embeddings)
-            
-            self.index.add(new_embeddings)
-        else:
-            self.embeddings_store = None
-        
-        logger.info(f"Deleted document: {document_name}")
-        return True
+    return results
 
 
-# ============================================================================
-# SEMANTIC SEARCH ENGINE (Enhanced)
-# ============================================================================
-
-class SemanticSearchEngine:
+def save_tables_to_excel(
+    tables: List[Dict[str, Any]],
+    output_path: str,
+    one_sheet_per_table: bool = True,
+    include_metadata: bool = True,
+    format_cells: bool = True
+) -> str:
     """
-    Enhanced semantic search engine with table support.
-    Handles text and table extraction, indexing, and retrieval.
+    Save extracted tables to Excel file
+    
+    Args:
+        tables: List of table dictionaries from extract_all_tables
+        output_path: Output Excel file path
+        one_sheet_per_table: Each table on separate sheet
+        include_metadata: Add metadata sheet
+        format_cells: Apply cell formatting
+        
+    Returns:
+        Path to saved Excel file
+        
+    Example:
+        tables = extract_all_tables(doc)
+        save_tables_to_excel(tables, 'output/tables.xlsx')
     """
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        create_folder_if_not_exists(output_dir)
     
-    def __init__(
-        self,
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
-        chunk_size: int = 512,
-        chunk_overlap: int = 50,
-        index_type: str = "flat",
-        storage_path: Union[str, Path] = "./data/vector_db",
-        storage_format: str = "both"
-    ):
-        self.embedding_engine = EmbeddingEngine(embedding_model)
-        self.chunker = TextChunker(chunk_size, chunk_overlap)
-        self.storage_path = Path(storage_path)
-        self.index_type = index_type
-        self.storage_format = storage_format
-        
-        self.vector_store: Optional[FAISSVectorStore] = None
-        self._load_or_create_store()
-    
-    def _load_or_create_store(self):
-        """Load existing store or create new one."""
-        if self.storage_path.exists() and (self.storage_path / "index.faiss").exists():
-            try:
-                self.vector_store = FAISSVectorStore.load(self.storage_path)
-                logger.info("Loaded existing vector store")
-            except Exception as e:
-                logger.warning(f"Failed to load store: {e}, creating new one")
-                self._create_new_store()
-        else:
-            self._create_new_store()
-    
-    def _create_new_store(self):
-        """Create a new vector store."""
-        self.vector_store = FAISSVectorStore(
-            embedding_dim=self.embedding_engine.embedding_dim,
-            index_type=self.index_type
-        )
-    
-    def _generate_id(self, file_path: str, suffix: str = "") -> str:
-        """Generate unique ID."""
-        base = hashlib.md5(file_path.encode()).hexdigest()[:12]
-        return f"{base}{suffix}"
-    
-    def _process_document(
-        self,
-        file_path: Union[str, Path]
-    ) -> Tuple[List[TextChunk], List[TableChunk]]:
-        """Process a document into text and table chunks."""
-        file_path = Path(file_path)
-        document_name = file_path.name
-        document_id = self._generate_id(str(file_path))
-        
-        # Load document
-        doc_data = DocumentLoader.load(file_path)
-        
-        text_chunks = []
-        table_chunks = []
-        
-        # Process text
-        chunk_index = 0
-        for page_number, page_text in doc_data.get("text_pages", []):
-            chunks = self.chunker.chunk(page_text)
-            
-            for chunk_text in chunks:
-                chunk = TextChunk(
-                    text=chunk_text,
-                    chunk_id=f"{document_id}_t{chunk_index}",
-                    document_id=document_id,
-                    document_name=document_name,
-                    content_type="text",
-                    page_number=page_number,
-                    chunk_index=chunk_index,
-                    metadata={
-                        "source": str(file_path),
-                        "file_type": file_path.suffix.lower()
-                    }
-                )
-                text_chunks.append(chunk)
-                chunk_index += 1
-        
-        # Process tables
-        for page_num, table_idx, df, caption in doc_data.get("tables", []):
-            table_chunk = TableChunk.from_dataframe(
-                df=df,
-                table_id=f"{document_id}_tbl{table_idx}",
-                document_id=document_id,
-                document_name=document_name,
-                page_number=page_num,
-                table_index=table_idx,
-                caption=caption,
-                metadata={
-                    "source": str(file_path),
-                    "file_type": file_path.suffix.lower()
-                }
-            )
-            table_chunks.append(table_chunk)
-        
-        return text_chunks, table_chunks
-    
-    def add_document(
-        self,
-        file_path: Union[str, Path],
-        skip_if_exists: bool = True
-    ) -> Dict[str, int]:
-        """
-        Add a single document to the vector store.
-        
-        Returns:
-            Dictionary with 'text_chunks' and 'table_chunks' counts
-        """
-        file_path = Path(file_path)
-        document_name = file_path.name
-        
-        # Check if already indexed
-        if skip_if_exists:
-            existing_text = set(c.document_name for c in self.vector_store.text_chunks)
-            existing_tables = set(c.document_name for c in self.vector_store.table_chunks)
-            if document_name in existing_text or document_name in existing_tables:
-                logger.info(f"Document already indexed: {document_name}")
-                return {"text_chunks": 0, "table_chunks": 0}
-        
-        # Process document
-        text_chunks, table_chunks = self._process_document(file_path)
-        
-        result = {"text_chunks": 0, "table_chunks": 0}
-        
-        # Add text chunks
-        if text_chunks:
-            texts = [c.text for c in text_chunks]
-            embeddings = self.embedding_engine.embed(texts, show_progress=False)
-            self.vector_store.add_text_embeddings(embeddings, text_chunks)
-            result["text_chunks"] = len(text_chunks)
-        
-        # Add table chunks
-        if table_chunks:
-            table_texts = [c.text_representation for c in table_chunks]
-            embeddings = self.embedding_engine.embed(table_texts, show_progress=False)
-            self.vector_store.add_table_embeddings(embeddings, table_chunks)
-            result["table_chunks"] = len(table_chunks)
-        
-        return result
-    
-    def add_documents(
-        self,
-        directory: Union[str, Path],
-        extensions: List[str] = None,
-        recursive: bool = True,
-        skip_if_exists: bool = True
-    ) -> Dict[str, Dict[str, int]]:
-        """
-        Add all documents from a directory.
-        
-        Returns:
-            Dictionary of {filename: {text_chunks, table_chunks}}
-        """
-        directory = Path(directory)
-        extensions = extensions or ['.pdf', '.docx', '.doc']
-        
-        files = []
-        for ext in extensions:
-            pattern = f"**/*{ext}" if recursive else f"*{ext}"
-            files.extend(directory.glob(pattern))
-        
-        logger.info(f"Found {len(files)} documents to process")
-        
-        results = {}
-        all_text_chunks = []
-        all_table_chunks = []
-        
-        for file_path in tqdm(files, desc="Processing documents"):
-            document_name = file_path.name
-            
-            if skip_if_exists:
-                existing_text = set(c.document_name for c in self.vector_store.text_chunks)
-                existing_tables = set(c.document_name for c in self.vector_store.table_chunks)
-                if document_name in existing_text or document_name in existing_tables:
-                    results[document_name] = {"text_chunks": 0, "table_chunks": 0, "skipped": True}
-                    continue
-            
-            try:
-                text_chunks, table_chunks = self._process_document(file_path)
-                all_text_chunks.extend(text_chunks)
-                all_table_chunks.extend(table_chunks)
-                results[document_name] = {
-                    "text_chunks": len(text_chunks),
-                    "table_chunks": len(table_chunks)
-                }
-            except Exception as e:
-                logger.error(f"Failed to process {file_path}: {e}")
-                results[document_name] = {"error": str(e)}
-        
-        # Batch embed and add
-        if all_text_chunks:
-            logger.info(f"Generating embeddings for {len(all_text_chunks)} text chunks")
-            texts = [c.text for c in all_text_chunks]
-            embeddings = self.embedding_engine.embed(texts)
-            self.vector_store.add_text_embeddings(embeddings, all_text_chunks)
-        
-        if all_table_chunks:
-            logger.info(f"Generating embeddings for {len(all_table_chunks)} table chunks")
-            table_texts = [c.text_representation for c in all_table_chunks]
-            embeddings = self.embedding_engine.embed(table_texts)
-            self.vector_store.add_table_embeddings(embeddings, all_table_chunks)
-        
-        return results
-    
-    def search(
-        self,
-        query: str,
-        top_k: int = 5,
-        threshold: float = 0.3,
-        content_type: Optional[str] = None,
-        filter_documents: List[str] = None,
-        include_tables: bool = True
-    ) -> List[SearchResult]:
-        """
-        Search for relevant content (text and/or tables).
-        
-        Args:
-            query: Search query
-            top_k: Number of results
-            threshold: Minimum similarity threshold
-            content_type: Filter by "text" or "table" (None for both)
-            filter_documents: Only search in these documents
-            include_tables: Include table results (with DataFrames)
-        """
-        if self.vector_store.index.ntotal == 0:
-            logger.warning("Vector store is empty")
-            return []
-        
-        query_embedding = self.embedding_engine.embed_query(query)
-        
-        results = self.vector_store.search(
-            query_embedding,
-            top_k=top_k * 2 if filter_documents else top_k,
-            threshold=threshold,
-            content_type_filter=content_type
-        )
-        
-        search_results = []
-        for idx, score, chunk_type in results:
-            chunk = self.vector_store.get_chunk(idx)
-            
-            if chunk is None:
-                continue
-            
-            # Apply document filter
-            if filter_documents and chunk.document_name not in filter_documents:
-                continue
-            
-            if chunk_type == "text":
-                result = SearchResult(
-                    content=chunk.text,
-                    score=score,
-                    document_name=chunk.document_name,
-                    page_number=chunk.page_number,
-                    chunk_id=chunk.chunk_id,
-                    content_type="text",
-                    metadata=chunk.metadata
-                )
-            else:  # table
-                df = chunk.get_dataframe() if include_tables else None
-                result = SearchResult(
-                    content=chunk.text_representation,
-                    score=score,
-                    document_name=chunk.document_name,
-                    page_number=chunk.page_number,
-                    chunk_id=chunk.table_id,
-                    content_type="table",
-                    metadata=chunk.metadata,
-                    dataframe=df,
-                    table_csv=chunk.dataframe_csv,
-                    column_names=chunk.column_names,
-                    num_rows=chunk.num_rows,
-                    num_cols=chunk.num_cols
-                )
-            
-            search_results.append(result)
-            
-            if len(search_results) >= top_k:
-                break
-        
-        return search_results
-    
-    def search_tables_only(
-        self,
-        query: str,
-        top_k: int = 5,
-        threshold: float = 0.3
-    ) -> List[SearchResult]:
-        """Search only for tables."""
-        return self.search(
-            query=query,
-            top_k=top_k,
-            threshold=threshold,
-            content_type="table"
-        )
-    
-    def search_text_only(
-        self,
-        query: str,
-        top_k: int = 5,
-        threshold: float = 0.3
-    ) -> List[SearchResult]:
-        """Search only for text."""
-        return self.search(
-            query=query,
-            top_k=top_k,
-            threshold=threshold,
-            content_type="text"
-        )
-    
-    def search_with_reranking(
-        self,
-        query: str,
-        top_k: int = 5,
-        initial_k: int = 20,
-        threshold: float = 0.3
-    ) -> List[SearchResult]:
-        """Search with keyword-based reranking."""
-        initial_results = self.search(query, top_k=initial_k, threshold=threshold)
-        
-        if not initial_results:
-            return []
-        
-        query_words = set(query.lower().split())
-        
-        def compute_keyword_score(text: str) -> float:
-            text_lower = text.lower()
-            matches = sum(1 for word in query_words if word in text_lower)
-            return matches / len(query_words) if query_words else 0
-        
-        for result in initial_results:
-            keyword_score = compute_keyword_score(result.content)
-            result.score = 0.7 * result.score + 0.3 * keyword_score
-        
-        initial_results.sort(key=lambda x: x.score, reverse=True)
-        return initial_results[:top_k]
-    
-    def get_answer_context(
-        self,
-        query: str,
-        top_k: int = 3,
-        max_tokens: int = 2000,
-        include_tables: bool = True
-    ) -> str:
-        """Get formatted context for LLM question answering."""
-        results = self.search(query, top_k=top_k, include_tables=include_tables)
-        
-        context_parts = []
-        total_length = 0
-        
-        for result in results:
-            if result.content_type == "text":
-                chunk_text = f"[Source: {result.document_name}"
-                if result.page_number:
-                    chunk_text += f", Page {result.page_number}"
-                chunk_text += f", Type: Text]\n{result.content}\n"
-            else:
-                chunk_text = f"[Source: {result.document_name}"
-                if result.page_number:
-                    chunk_text += f", Page {result.page_number}"
-                chunk_text += f", Type: Table ({result.num_rows}x{result.num_cols})]\n"
-                chunk_text += f"Columns: {', '.join(result.column_names or [])}\n"
-                if result.dataframe is not None:
-                    chunk_text += result.dataframe.head(10).to_string() + "\n"
-            
-            if total_length + len(chunk_text) > max_tokens * 4:
-                break
-            
-            context_parts.append(chunk_text)
-            total_length += len(chunk_text)
-        
-        return "\n---\n".join(context_parts)
-    
-    def get_all_tables(self, document_name: Optional[str] = None) -> List[Tuple[str, pd.DataFrame]]:
-        """Get all tables, optionally filtered by document."""
-        tables = []
-        for table_chunk in self.vector_store.table_chunks:
-            if document_name is None or table_chunk.document_name == document_name:
-                df = table_chunk.get_dataframe()
-                tables.append((table_chunk.table_id, df))
-        return tables
-    
-    def export_tables_to_excel(
-        self,
-        output_path: Union[str, Path],
-        document_name: Optional[str] = None
-    ):
-        """Export all tables to an Excel file."""
-        output_path = Path(output_path)
-        tables = self.get_all_tables(document_name)
-        
-        if not tables:
-            logger.warning("No tables to export")
-            return
-        
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            for i, (table_id, df) in enumerate(tables):
-                sheet_name = f"Table_{i+1}"[:31]  # Excel sheet name limit
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        if one_sheet_per_table:
+            for table_info in tables:
+                sheet_name = f"Table_{table_info['index'] + 1}"
+                df = table_info.get('dataframe', pd.DataFrame(table_info.get('data', [])))
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
-        logger.info(f"Exported {len(tables)} tables to {output_path}")
-    
-    def save(self):
-        """Save the vector store to disk."""
-        self.vector_store.save(self.storage_path, format=self.storage_format)
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about the vector store."""
-        text_documents = set(c.document_name for c in self.vector_store.text_chunks)
-        table_documents = set(c.document_name for c in self.vector_store.table_chunks)
-        all_documents = text_documents | table_documents
-        
-        return {
-            "total_text_chunks": len(self.vector_store.text_chunks),
-            "total_table_chunks": len(self.vector_store.table_chunks),
-            "total_chunks": len(self.vector_store.chunk_mapping),
-            "total_documents": len(all_documents),
-            "documents_with_text": list(text_documents),
-            "documents_with_tables": list(table_documents),
-            "index_type": self.vector_store.index_type,
-            "embedding_dim": self.vector_store.embedding_dim,
-            "storage_path": str(self.storage_path),
-            "storage_format": self.storage_format
-        }
-    
-    def clear(self):
-        """Clear the vector store."""
-        self._create_new_store()
-        logger.info("Vector store cleared")
-    
-    def delete_document(self, document_name: str) -> bool:
-        """Delete a document from the vector store."""
-        return self.vector_store.delete_document(document_name)
-
-
-# ============================================================================
-# HYBRID SEARCH ENGINE
-# ============================================================================
-
-class HybridSearchEngine(SemanticSearchEngine):
-    """Enhanced search engine with hybrid (semantic + keyword) search."""
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.keyword_index: Dict[str, List[int]] = {}
-    
-    def _build_keyword_index(self):
-        """Build inverted index for keyword search."""
-        self.keyword_index.clear()
-        
-        for idx, (chunk_type, local_idx) in enumerate(self.vector_store.chunk_mapping):
-            if chunk_type == "text":
-                text = self.vector_store.text_chunks[local_idx].text
-            else:
-                text = self.vector_store.table_chunks[local_idx].text_representation
-            
-            words = set(re.findall(r'\b\w+\b', text.lower()))
-            for word in words:
-                if word not in self.keyword_index:
-                    self.keyword_index[word] = []
-                self.keyword_index[word].append(idx)
-    
-    def hybrid_search(
-        self,
-        query: str,
-        top_k: int = 5,
-        semantic_weight: float = 0.7,
-        threshold: float = 0.3,
-        content_type: Optional[str] = None
-    ) -> List[SearchResult]:
-        """Combine semantic and keyword search."""
-        if not self.keyword_index:
-            self._build_keyword_index()
-        
-        # Semantic search
-        query_embedding = self.embedding_engine.embed_query(query)
-        semantic_results = self.vector_store.search(
-            query_embedding,
-            top_k=top_k * 3,
-            content_type_filter=content_type
-        )
-        
-        # Keyword search
-        query_words = set(re.findall(r'\b\w+\b', query.lower()))
-        keyword_scores = {}
-        for word in query_words:
-            if word in self.keyword_index:
-                for idx in self.keyword_index[word]:
-                    keyword_scores[idx] = keyword_scores.get(idx, 0) + 1
-        
-        max_keyword = max(keyword_scores.values()) if keyword_scores else 1
-        
-        # Combine scores
-        combined_scores = {}
-        for idx, score, _ in semantic_results:
-            combined_scores[idx] = semantic_weight * score
-        
-        keyword_weight = 1 - semantic_weight
-        for idx, score in keyword_scores.items():
-            normalized = score / max_keyword
-            combined_scores[idx] = combined_scores.get(idx, 0) + keyword_weight * normalized
-        
-        # Sort and create results
-        sorted_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
-        
-        search_results = []
-        for idx, score in sorted_indices[:top_k]:
-            if score < threshold:
-                continue
-            
-            chunk = self.vector_store.get_chunk(idx)
-            if chunk is None:
-                continue
-            
-            chunk_type, _ = self.vector_store.chunk_mapping[idx]
-            
-            if chunk_type == "text":
-                result = SearchResult(
-                    content=chunk.text,
-                    score=score,
-                    document_name=chunk.document_name,
-                    page_number=chunk.page_number,
-                    chunk_id=chunk.chunk_id,
-                    content_type="text",
-                    metadata=chunk.metadata
-                )
-            else:
-                result = SearchResult(
-                    content=chunk.text_representation,
-                    score=score,
-                    document_name=chunk.document_name,
-                    page_number=chunk.page_number,
-                    chunk_id=chunk.table_id,
-                    content_type="table",
-                    metadata=chunk.metadata,
-                    dataframe=chunk.get_dataframe(),
-                    table_csv=chunk.dataframe_csv,
-                    column_names=chunk.column_names,
-                    num_rows=chunk.num_rows,
-                    num_cols=chunk.num_cols
-                )
-            
-            search_results.append(result)
-        
-        return search_results
-
-
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
-
-def print_search_results(results: List[SearchResult], show_tables: bool = True):
-    """Pretty print search results."""
-    if not results:
-        print("No results found.")
-        return
-    
-    print(f"\n{'='*60}")
-    print(f"Found {len(results)} results")
-    print('='*60)
-    
-    for i, result in enumerate(results, 1):
-        print(f"\n--- Result {i} ---")
-        print(f"Score: {result.score:.4f}")
-        print(f"Type: {result.content_type.upper()}")
-        print(f"Document: {result.document_name}")
-        if result.page_number:
-            print(f"Page: {result.page_number}")
-        
-        if result.content_type == "text":
-            print(f"\nContent:\n{result.content[:500]}...")
         else:
-            print(f"\nTable ({result.num_rows} rows x {result.num_cols} cols)")
-            print(f"Columns: {', '.join(result.column_names or [])}")
-            if show_tables and result.dataframe is not None:
-                print(f"\n{result.dataframe.head(5).to_string()}")
-                if result.num_rows > 5:
-                    print(f"... and {result.num_rows - 5} more rows")
+            # All tables in one sheet
+            start_row = 0
+            all_tables_sheet = 'All_Tables'
+            
+            for table_info in tables:
+                df = table_info.get('dataframe', pd.DataFrame(table_info.get('data', [])))
+                
+                # Write table label
+                label_df = pd.DataFrame([[f"=== Table {table_info['index'] + 1} ==="]])
+                label_df.to_excel(
+                    writer, sheet_name=all_tables_sheet, 
+                    startrow=start_row, index=False, header=False
+                )
+                start_row += 1
+                
+                # Write table data
+                df.to_excel(
+                    writer, sheet_name=all_tables_sheet,
+                    startrow=start_row, index=False
+                )
+                start_row += len(df) + 3
         
-        print()
-
-
-# ============================================================================
-# MAIN USAGE EXAMPLE
-# ============================================================================
-
-def main():
-    """Main example usage."""
-    print("="*60)
-    print("ENHANCED VECTOR STORE WITH TABLE SUPPORT")
-    print("="*60)
+        # Add metadata sheet
+        if include_metadata:
+            metadata = pd.DataFrame([
+                {'Property': 'Extraction Date', 'Value': get_timestamp()},
+                {'Property': 'Total Tables', 'Value': len(tables)},
+                {'Property': 'Total Rows', 
+                 'Value': sum(t.get('row_count', 0) for t in tables)},
+            ])
+            metadata.to_excel(writer, sheet_name='_Metadata', index=False)
     
-    # Initialize engine
-    engine = SemanticSearchEngine(
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-        chunk_size=512,
-        chunk_overlap=50,
-        index_type="flat",
-        storage_path="./data/vector_db",
-        storage_format="both"  # Save as both JSON and PKL
+    # Apply formatting
+    if format_cells:
+        _format_excel_file(output_path)
+    
+    log_action(f"Saved {len(tables)} tables to: {output_path}")
+    return output_path
+
+
+def _format_excel_file(file_path: str) -> None:
+    """Apply formatting to Excel file"""
+    wb = load_workbook(file_path)
+    
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
     )
     
-    # Create documents folder
-    docs_folder = Path("./my_documents")
-    docs_folder.mkdir(exist_ok=True)
-    
-    print(f"\n📁 Place your PDF/DOCX files in: {docs_folder.absolute()}")
-    
-    # Check for existing documents
-    pdf_files = list(docs_folder.glob("*.pdf"))
-    docx_files = list(docs_folder.glob("*.docx"))
-    
-    if pdf_files or docx_files:
-        print(f"\n📄 Found {len(pdf_files)} PDFs and {len(docx_files)} DOCX files")
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
         
-        # Add documents
-        results = engine.add_documents(docs_folder)
+        # Format header row
+        for cell in ws[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal='center', wrap_text=True)
         
-        print("\n📊 Processing Results:")
-        for doc_name, stats in results.items():
-            if "error" in stats:
-                print(f"  ❌ {doc_name}: Error - {stats['error']}")
-            elif stats.get("skipped"):
-                print(f"  ⏭️  {doc_name}: Skipped (already indexed)")
-            else:
-                print(f"  ✅ {doc_name}: {stats['text_chunks']} text chunks, {stats['table_chunks']} tables")
-        
-        # Save
-        engine.save()
-        print("\n💾 Vector store saved!")
-        
-        # Get stats
-        stats = engine.get_stats()
-        print(f"\n📈 Vector Store Statistics:")
-        print(f"   - Total Text Chunks: {stats['total_text_chunks']}")
-        print(f"   - Total Table Chunks: {stats['total_table_chunks']}")
-        print(f"   - Total Documents: {stats['total_documents']}")
-        print(f"   - Storage Format: {stats['storage_format']}")
-        
-        # Example searches
-        if stats['total_chunks'] > 0:
-            print("\n" + "="*60)
-            print("SEARCH EXAMPLES")
-            print("="*60)
+        # Auto-adjust column widths
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
             
-            # Search all content
-            query = "data analysis results"
-            print(f"\n🔍 Query: '{query}' (All content)")
-            results = engine.search(query, top_k=3)
-            print_search_results(results)
+            for cell in column:
+                try:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                except:
+                    pass
             
-            # Search tables only
-            print(f"\n🔍 Query: '{query}' (Tables only)")
-            table_results = engine.search_tables_only(query, top_k=3)
-            print_search_results(table_results)
-            
-            # Search text only
-            print(f"\n🔍 Query: '{query}' (Text only)")
-            text_results = engine.search_text_only(query, top_k=3)
-            print_search_results(text_results, show_tables=False)
-            
-            # Get context for LLM
-            print("\n📚 Context for LLM:")
-            context = engine.get_answer_context(query, top_k=2)
-            print(context[:1000] + "..." if len(context) > 1000 else context)
-    else:
-        print("\n⚠️  No documents found. Please add PDF/DOCX files to the folder.")
+            adjusted_width = min(max_length + 2, CONFIG['max_column_width'])
+            ws.column_dimensions[column_letter].width = adjusted_width
     
-    return engine
+    wb.save(file_path)
 
 
-def interactive_mode():
-    """Interactive search mode."""
-    print("\n" + "="*60)
-    print("INTERACTIVE SEARCH MODE")
-    print("="*60)
+def save_table_to_csv(
+    doc: Document,
+    table_index: int,
+    output_path: str,
+    encoding: str = 'utf-8'
+) -> str:
+    """Save a single table to CSV file"""
+    df = extract_table_by_index(doc, table_index)
+    df.to_csv(output_path, index=False, encoding=encoding)
+    log_action(f"Table {table_index} saved to CSV: {output_path}")
+    return output_path
+
+
+# =============================================================================
+# TABLE REPLACEMENT FUNCTIONS
+# =============================================================================
+
+def clear_table(table) -> None:
+    """Clear all content from a table while preserving structure"""
+    for row in table.rows:
+        for cell in row.cells:
+            cell.text = ''
+
+
+def resize_table(table, new_rows: int, new_cols: int) -> None:
+    """Resize table to new dimensions"""
+    current_rows = len(table.rows)
+    current_cols = len(table.columns) if table.rows else 0
     
-    engine = SemanticSearchEngine(storage_path="./data/vector_db")
-    stats = engine.get_stats()
+    # Add/remove rows
+    while len(table.rows) < new_rows:
+        table.add_row()
     
-    print(f"\n📊 Loaded: {stats['total_text_chunks']} text chunks, {stats['total_table_chunks']} tables")
+    while len(table.rows) > new_rows:
+        row = table.rows[-1]
+        tbl = table._tbl
+        tr = row._tr
+        tbl.remove(tr)
     
-    if stats['total_chunks'] == 0:
-        print("⚠️  No content indexed. Please add documents first.")
-        return
+    # Note: Adding/removing columns is more complex in python-docx
+    # For now, we handle column count mismatch in the replacement function
+
+
+def replace_table_with_dataframe(
+    doc: Document,
+    table_index: int,
+    df: pd.DataFrame,
+    preserve_formatting: bool = True,
+    include_header: bool = True
+) -> Document:
+    """
+    Replace a table in document with DataFrame data
     
-    print("\nCommands:")
-    print("  'q' or 'quit' - Exit")
-    print("  'tables' - Search tables only")
-    print("  'text' - Search text only")
-    print("  'stats' - Show statistics")
-    print("  'export' - Export tables to Excel")
-    print("\n")
-    
-    while True:
-        query = input("🔍 Query: ").strip()
+    Args:
+        doc: Word document
+        table_index: Index of table to replace
+        df: DataFrame with new data
+        preserve_formatting: Try to keep original table style
+        include_header: Include DataFrame column names as header row
         
-        if query.lower() in ['q', 'quit', 'exit']:
-            print("Goodbye! 👋")
+    Returns:
+        Modified document
+        
+    Example:
+        df = pd.DataFrame({'Name': ['Alice', 'Bob'], 'Score': [95, 87]})
+        doc = replace_table_with_dataframe(doc, 0, df)
+    """
+    if table_index >= len(doc.tables):
+        raise IndexError(
+            f"Table index {table_index} out of range. "
+            f"Document has {len(doc.tables)} tables."
+        )
+    
+    table = doc.tables[table_index]
+    
+    # Store original style
+    original_style = table.style if preserve_formatting else None
+    
+    # Calculate required dimensions
+    num_rows = len(df) + (1 if include_header else 0)
+    num_cols = len(df.columns)
+    
+    # Clear existing table
+    clear_table(table)
+    
+    # Resize if needed
+    while len(table.rows) < num_rows:
+        table.add_row()
+    while len(table.rows) > num_rows:
+        row = table.rows[-1]
+        table._tbl.remove(row._tr)
+    
+    # Fill data
+    row_idx = 0
+    
+    # Header row
+    if include_header:
+        for col_idx, col_name in enumerate(df.columns):
+            if col_idx < len(table.rows[row_idx].cells):
+                table.rows[row_idx].cells[col_idx].text = str(col_name)
+        row_idx += 1
+    
+    # Data rows
+    for _, data_row in df.iterrows():
+        if row_idx >= len(table.rows):
             break
-        
-        if query.lower() == 'stats':
-            stats = engine.get_stats()
-            print(f"\n📈 Statistics:")
-            for key, value in stats.items():
-                print(f"   {key}: {value}")
-            continue
-        
-        if query.lower() == 'export':
-            engine.export_tables_to_excel("./exported_tables.xlsx")
-            print("✅ Tables exported to ./exported_tables.xlsx")
-            continue
-        
-        if not query:
-            continue
-        
-        # Determine search type
-        search_type = None
-        if query.lower().startswith('tables '):
-            query = query[7:]
-            search_type = 'table'
-        elif query.lower().startswith('text '):
-            query = query[5:]
-            search_type = 'text'
-        
-        results = engine.search(query, top_k=5, content_type=search_type)
-        print_search_results(results)
-
-
-if __name__ == "__main__":
-    import sys
+        for col_idx, value in enumerate(data_row):
+            if col_idx < len(table.rows[row_idx].cells):
+                cell_value = '' if pd.isna(value) else str(value)
+                table.rows[row_idx].cells[col_idx].text = cell_value
+        row_idx += 1
     
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "interactive":
-            interactive_mode()
-        else:
-            main()
+    # Restore style
+    if original_style:
+        try:
+            table.style = original_style
+        except:
+            pass
+    
+    log_action(f"Replaced table {table_index} with DataFrame ({len(df)} rows)")
+    return doc
+
+
+def update_multiple_tables(
+    doc: Document,
+    table_updates: Dict[int, pd.DataFrame]
+) -> Document:
+    """
+    Update multiple tables at once
+    
+    Args:
+        doc: Word document
+        table_updates: Dict mapping table index to DataFrame
+        
+    Returns:
+        Modified document
+        
+    Example:
+        updates = {
+            0: df1,
+            2: df2,
+        }
+        doc = update_multiple_tables(doc, updates)
+    """
+    for table_index in sorted(table_updates.keys()):
+        df = table_updates[table_index]
+        doc = replace_table_with_dataframe(doc, table_index, df)
+    
+    log_action(f"Updated {len(table_updates)} tables")
+    return doc
+
+
+def insert_dataframe_as_table(
+    doc: Document,
+    df: pd.DataFrame,
+    position: str = 'end',
+    style: str = 'Table Grid',
+    heading: Optional[str] = None
+) -> Document:
+    """
+    Insert a new table from DataFrame
+    
+    Args:
+        doc: Word document
+        df: DataFrame to insert
+        position: 'end' to append, 'start' to prepend
+        style: Table style name
+        heading: Optional heading before table
+        
+    Returns:
+        Modified document
+    """
+    if heading:
+        doc.add_paragraph(heading, style='Heading 2')
+    
+    # Add table
+    table = doc.add_table(rows=1, cols=len(df.columns))
+    table.style = style
+    
+    # Add header row
+    header_cells = table.rows[0].cells
+    for i, col_name in enumerate(df.columns):
+        header_cells[i].text = str(col_name)
+        # Bold header
+        for para in header_cells[i].paragraphs:
+            for run in para.runs:
+                run.bold = True
+    
+    # Add data rows
+    for _, row_data in df.iterrows():
+        row = table.add_row()
+        for i, value in enumerate(row_data):
+            cell_value = '' if pd.isna(value) else str(value)
+            row.cells[i].text = cell_value
+    
+    log_action(f"Inserted new table with {len(df)} rows")
+    return doc
+
+
+def update_table_from_excel(
+    doc: Document,
+    excel_path: str,
+    table_mapping: Dict[int, str]
+) -> Document:
+    """
+    Update tables from Excel file
+    
+    Args:
+        doc: Word document
+        excel_path: Path to Excel file
+        table_mapping: Dict mapping table index to sheet name
+        
+    Returns:
+        Modified document
+        
+    Example:
+        mapping = {0: 'Sheet1', 2: 'DataSheet'}
+        doc = update_table_from_excel(doc, 'data.xlsx', mapping)
+    """
+    validate_file_exists(excel_path)
+    
+    for table_index, sheet_name in table_mapping.items():
+        try:
+            df = pd.read_excel(excel_path, sheet_name=sheet_name)
+            doc = replace_table_with_dataframe(doc, table_index, df)
+        except Exception as e:
+            log_action(f"Error updating table {table_index}: {e}", "ERROR")
+    
+    return doc
+
+
+# =============================================================================
+# IMAGE EXTRACTION FUNCTIONS
+# =============================================================================
+
+def count_images(doc: Document) -> int:
+    """Count images in document"""
+    count = 0
+    for rel in doc.part.rels.values():
+        if "image" in rel.reltype:
+            count += 1
+    return count
+
+
+def extract_images(
+    doc: Document,
+    output_folder: str,
+    prefix: str = 'image'
+) -> List[Dict[str, Any]]:
+    """
+    Extract all images from document
+    
+    Args:
+        doc: Word document
+        output_folder: Folder to save images
+        prefix: Prefix for image filenames
+        
+    Returns:
+        List of image info dictionaries
+        
+    Example:
+        images = extract_images(doc, './extracted_images')
+    """
+    create_folder_if_not_exists(output_folder)
+    images = []
+    
+    for rel in doc.part.rels.values():
+        if "image" in rel.reltype:
+            try:
+                image_data = rel.target_part.blob
+                content_type = rel.target_part.content_type
+                
+                # Determine extension
+                ext_map = {
+                    'image/png': '.png',
+                    'image/jpeg': '.jpg',
+                    'image/gif': '.gif',
+                    'image/bmp': '.bmp',
+                    'image/tiff': '.tiff',
+                    'image/x-emf': '.emf',
+                    'image/x-wmf': '.wmf',
+                }
+                ext = ext_map.get(content_type, '.png')
+                
+                image_name = f"{prefix}_{len(images) + 1}{ext}"
+                image_path = os.path.join(output_folder, image_name)
+                
+                with open(image_path, 'wb') as f:
+                    f.write(image_data)
+                
+                # Get image dimensions
+                try:
+                    with Image.open(BytesIO(image_data)) as img:
+                        width, height = img.size
+                except:
+                    width, height = None, None
+                
+                images.append({
+                    'index': len(images),
+                    'rel_id': rel.rId,
+                    'filename': image_name,
+                    'path': image_path,
+                    'content_type': content_type,
+                    'size_bytes': len(image_data),
+                    'width': width,
+                    'height': height
+                })
+                
+            except Exception as e:
+                log_action(f"Error extracting image: {e}", "WARNING")
+    
+    log_action(f"Extracted {len(images)} images to: {output_folder}")
+    return images
+
+
+def extract_images_with_positions(doc: Document) -> List[Dict[str, Any]]:
+    """
+    Get images with their approximate positions in document
+    
+    Returns:
+        List of image position info
+    """
+    positions = []
+    
+    for i, para in enumerate(doc.paragraphs):
+        for run in para.runs:
+            # Check for inline images
+            if run._element.xpath('.//a:blip'):
+                blips = run._element.xpath('.//a:blip')
+                for blip in blips:
+                    embed = blip.get(qn('r:embed'))
+                    if embed:
+                        positions.append({
+                            'paragraph_index': i,
+                            'paragraph_text': para.text[:50] + '...' if len(para.text) > 50 else para.text,
+                            'rel_id': embed,
+                            'type': 'inline'
+                        })
+    
+    return positions
+
+
+def save_images_info_to_excel(
+    images: List[Dict[str, Any]],
+    output_path: str
+) -> str:
+    """Save image information to Excel"""
+    df = pd.DataFrame(images)
+    df.to_excel(output_path, index=False)
+    log_action(f"Image info saved to: {output_path}")
+    return output_path
+
+
+# =============================================================================
+# IMAGE REPLACEMENT FUNCTIONS
+# =============================================================================
+
+def replace_image_by_index(
+    doc: Document,
+    image_index: int,
+    new_image_path: str
+) -> Document:
+    """
+    Replace an image by its index
+    
+    Args:
+        doc: Word document
+        image_index: Index of image to replace
+        new_image_path: Path to new image file
+        
+    Returns:
+        Modified document
+    """
+    validate_file_exists(new_image_path)
+    
+    # Get image relationships
+    image_rels = [
+        rel for rel in doc.part.rels.values() 
+        if "image" in rel.reltype
+    ]
+    
+    if image_index >= len(image_rels):
+        raise IndexError(
+            f"Image index {image_index} out of range. "
+            f"Document has {len(image_rels)} images."
+        )
+    
+    target_rel = image_rels[image_index]
+    
+    # Read new image
+    with open(new_image_path, 'rb') as f:
+        new_image_data = f.read()
+    
+    # Replace image blob
+    target_rel.target_part._blob = new_image_data
+    
+    log_action(f"Replaced image {image_index} with: {new_image_path}")
+    return doc
+
+
+def replace_images_from_folder(
+    doc: Document,
+    folder_path: str,
+    mapping: Optional[Dict[int, str]] = None,
+    match_by_name: bool = False
+) -> Document:
+    """
+    Replace multiple images from a folder
+    
+    Args:
+        doc: Word document
+        folder_path: Folder containing replacement images
+        mapping: Optional dict {image_index: filename}
+        match_by_name: If True, match by name pattern
+        
+    Returns:
+        Modified document
+        
+    Example:
+        # Replace by order
+        doc = replace_images_from_folder(doc, './new_images')
+        
+        # Replace with mapping
+        mapping = {0: 'logo.png', 2: 'chart.jpg'}
+        doc = replace_images_from_folder(doc, './images', mapping)
+    """
+    validate_file_exists(folder_path)
+    
+    # Get image files
+    image_files = sorted([
+        f for f in os.listdir(folder_path)
+        if os.path.splitext(f)[1].lower() in CONFIG['supported_image_formats']
+    ])
+    
+    if not image_files:
+        log_action(f"No image files found in: {folder_path}", "WARNING")
+        return doc
+    
+    replaced_count = 0
+    
+    if mapping:
+        for image_index, filename in mapping.items():
+            image_path = os.path.join(folder_path, filename)
+            if os.path.exists(image_path):
+                try:
+                    doc = replace_image_by_index(doc, image_index, image_path)
+                    replaced_count += 1
+                except IndexError as e:
+                    log_action(str(e), "WARNING")
+            else:
+                log_action(f"Image not found: {image_path}", "WARNING")
     else:
-        main()
+        for i, filename in enumerate(image_files):
+            image_path = os.path.join(folder_path, filename)
+            try:
+                doc = replace_image_by_index(doc, i, image_path)
+                replaced_count += 1
+            except IndexError:
+                log_action(f"No more images to replace at index {i}", "INFO")
+                break
+    
+    log_action(f"Replaced {replaced_count} images from folder")
+    return doc
+
+
+def add_image_to_document(
+    doc: Document,
+    image_path: str,
+    width_inches: Optional[float] = None,
+    height_inches: Optional[float] = None,
+    caption: Optional[str] = None,
+    alignment: str = 'center'
+) -> Document:
+    """
+    Add a new image to document
+    
+    Args:
+        doc: Word document
+        image_path: Path to image
+        width_inches: Width in inches
+        height_inches: Height in inches
+        caption: Optional caption below image
+        alignment: 'left', 'center', or 'right'
         
+    Returns:
+        Modified document
+    """
+    validate_file_exists(image_path)
+    
+    # Add paragraph for image
+    para = doc.add_paragraph()
+    
+    # Set alignment
+    align_map = {
+        'left': WD_ALIGN_PARAGRAPH.LEFT,
+        'center': WD_ALIGN_PARAGRAPH.CENTER,
+        'right': WD_ALIGN_PARAGRAPH.RIGHT
+    }
+    para.alignment = align_map.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
+    
+    # Add image
+    run = para.add_run()
+    
+    if width_inches and height_inches:
+        run.add_picture(image_path, width=Inches(width_inches), height=Inches(height_inches))
+    elif width_inches:
+        run.add_picture(image_path, width=Inches(width_inches))
+    elif height_inches:
+        run.add_picture(image_path, height=Inches(height_inches))
+    else:
+        run.add_picture(image_path, width=Inches(CONFIG['default_image_width']))
+    
+    # Add caption
+    if caption:
+        caption_para = doc.add_paragraph(caption)
+        caption_para.alignment = align_map.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        caption_para.runs[0].italic = True
+    
+    log_action(f"Added image: {image_path}")
+    return doc
+
+
+def add_images_from_folder(
+    doc: Document,
+    folder_path: str,
+    width_inches: Optional[float] = None,
+    add_captions: bool = True,
+    heading: Optional[str] = None
+) -> Document:
+    """
+    Add all images from a folder to document
+    
+    Args:
+        doc: Word document
+        folder_path: Folder containing images
+        width_inches: Width for all images
+        add_captions: Use filename as caption
+        heading: Optional heading before images
+    """
+    validate_file_exists(folder_path)
+    
+    image_files = sorted([
+        f for f in os.listdir(folder_path)
+        if os.path.splitext(f)[1].lower() in CONFIG['supported_image_formats']
+    ])
+    
+    if heading:
+        doc.add_paragraph(heading, style='Heading 2')
+    
+    for filename in image_files:
+        image_path = os.path.join(folder_path, filename)
+        caption = os.path.splitext(filename)[0] if add_captions else None
+        doc = add_image_to_document(
+            doc, image_path, 
+            width_inches=width_inches or CONFIG['default_image_width'],
+            caption=caption
+        )
+    
+    log_action(f"Added {len(image_files)} images from folder")
+    return doc
+
+
+# =============================================================================
+# SEARCH AND REPLACE FUNCTIONS
+# =============================================================================
+
+def find_text(
+    doc: Document,
+    search_text: str,
+    case_sensitive: bool = False,
+    include_tables: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Find all occurrences of text in document
+    
+    Args:
+        doc: Word document
+        search_text: Text to find
+        case_sensitive: Case sensitive search
+        include_tables: Search in tables too
         
-# Initialize
-engine = SemanticSearchEngine(
-    storage_path="./my_vector_db",
-    storage_format="both"  # JSON and PKL
-)
+    Returns:
+        List of match info dictionaries
+    """
+    results = []
+    search = search_text if case_sensitive else search_text.lower()
+    
+    # Search paragraphs
+    for i, para in enumerate(doc.paragraphs):
+        text = para.text if case_sensitive else para.text.lower()
+        if search in text:
+            # Find position
+            pos = text.find(search)
+            results.append({
+                'type': 'paragraph',
+                'index': i,
+                'position': pos,
+                'text': para.text,
+                'context': _get_context(para.text, pos, len(search_text))
+            })
+    
+    # Search tables
+    if include_tables:
+        for t_idx, table in enumerate(doc.tables):
+            for r_idx, row in enumerate(table.rows):
+                for c_idx, cell in enumerate(row.cells):
+                    text = cell.text if case_sensitive else cell.text.lower()
+                    if search in text:
+                        results.append({
+                            'type': 'table',
+                            'table_index': t_idx,
+                            'row': r_idx,
+                            'column': c_idx,
+                            'text': cell.text
+                        })
+    
+    return results
 
-# Add documents
-engine.add_documents("./my_documents/")
-engine.save()
 
-# Search all content (text + tables)
-results = engine.search("revenue data", top_k=5)
+def _get_context(text: str, position: int, length: int, context_size: int = 30) -> str:
+    """Get text context around match"""
+    start = max(0, position - context_size)
+    end = min(len(text), position + length + context_size)
+    
+    prefix = '...' if start > 0 else ''
+    suffix = '...' if end < len(text) else ''
+    
+    return prefix + text[start:end] + suffix
 
-# Search tables only
-table_results = engine.search_tables_only("quarterly sales", top_k=3)
 
-# Search text only  
-text_results = engine.search_text_only("introduction", top_k=3)
+def find_and_replace_text(
+    doc: Document,
+    search_text: str,
+    replace_text: str,
+    case_sensitive: bool = False,
+    include_tables: bool = True
+) -> Tuple[Document, int]:
+    """
+    Find and replace text throughout document
+    
+    Args:
+        doc: Word document
+        search_text: Text to find
+        replace_text: Replacement text
+        case_sensitive: Case sensitive search
+        include_tables: Replace in tables too
+        
+    Returns:
+        Tuple of (modified document, replacement count)
+        
+    Example:
+        doc, count = find_and_replace_text(doc, 'old', 'new')
+        print(f"Replaced {count} occurrences")
+    """
+    count = 0
+    
+    # Replace in paragraphs
+    for para in doc.paragraphs:
+        for run in para.runs:
+            if case_sensitive:
+                if search_text in run.text:
+                    run.text = run.text.replace(search_text, replace_text)
+                    count += run.text.count(replace_text)
+            else:
+                if search_text.lower() in run.text.lower():
+                    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+                    new_text = pattern.sub(replace_text, run.text)
+                    count += len(pattern.findall(run.text))
+                    run.text = new_text
+    
+    # Replace in tables
+    if include_tables:
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if case_sensitive:
+                                if search_text in run.text:
+                                    run.text = run.text.replace(search_text, replace_text)
+                                    count += 1
+                            else:
+                                if search_text.lower() in run.text.lower():
+                                    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+                                    new_text = pattern.sub(replace_text, run.text)
+                                    count += len(pattern.findall(run.text))
+                                    run.text = new_text
+    
+    log_action(f"Replaced '{search_text}' with '{replace_text}': {count} times")
+    return doc, count
 
-# Get DataFrames from results
-for r in table_results:
-    if r.dataframe is not None:
-        print(r.dataframe.head())
 
-# Export all tables to Excel
-engine.export_tables_to_excel("./all_tables.xlsx")
+def batch_find_replace(
+    doc: Document,
+    replacements: Dict[str, str],
+    case_sensitive: bool = False
+) -> Document:
+    """
+    Perform multiple find/replace operations
+    
+    Args:
+        doc: Word document
+        replacements: Dict of {search: replace}
+        case_sensitive: Case sensitive search
+        
+    Returns:
+        Modified document
+        
+    Example:
+        replacements = {
+            'old_name': 'new_name',
+            '2023': '2024',
+            'Draft': 'Final'
+        }
+        doc = batch_find_replace(doc, replacements)
+    """
+    total_count = 0
+    
+    for search_text, replace_text in replacements.items():
+        doc, count = find_and_replace_text(
+            doc, search_text, replace_text, case_sensitive
+        )
+        total_count += count
+    
+    log_action(f"Total replacements: {total_count}")
+    return doc
 
-# Get all tables from a specific document
-tables = engine.get_all_tables("report.pdf")
+
+def replace_with_regex(
+    doc: Document,
+    pattern: str,
+    replacement: str,
+    flags: int = 0
+) -> Tuple[Document, int]:
+    """
+    Replace text using regex pattern
+    
+    Args:
+        doc: Word document
+        pattern: Regex pattern
+        replacement: Replacement string (can use groups like \\1)
+        flags: Regex flags
+        
+    Returns:
+        Tuple of (modified document, replacement count)
+    """
+    count = 0
+    regex = re.compile(pattern, flags)
+    
+    for para in doc.paragraphs:
+        for run in para.runs:
+            if regex.search(run.text):
+                new_text, n = regex.subn(replacement, run.text)
+                run.text = new_text
+                count += n
+    
+    log_action(f"Regex replacement count: {count}")
+    return doc, count
+
+
+# =============================================================================
+# TEMPLATE FUNCTIONS
+# =============================================================================
+
+def fill_template_placeholders(
+    doc: Document,
+    placeholders: Dict[str, Any],
+    prefix: str = '{{',
+    suffix: str = '}}'
+) -> Document:
+    """
+    Fill template placeholders with values
+    
+    Args:
+        doc: Word document (template)
+        placeholders: Dict of {placeholder_name: value}
+        prefix: Placeholder prefix (default '{{')
+        suffix: Placeholder suffix (default '}}')
+        
+    Returns:
+        Filled document
+        
+    Example:
+        template_doc = load_document('template.docx')
+        data = {
+            'name': 'John Doe',
+            'date': '2024-01-15',
+            'amount': '1,500.00'
+        }
+        doc = fill_template_placeholders(template_doc, data)
+    """
+    for key, value in placeholders.items():
+        placeholder = f"{prefix}{key}{suffix}"
+        doc, _ = find_and_replace_text(doc, placeholder, str(value))
+    
+    return doc
+
+
+def get_template_placeholders(
+    doc: Document,
+    prefix: str = '{{',
+    suffix: str = '}}'
+) -> List[str]:
+    """
+    Find all placeholders in template document
+    
+    Returns:
+        List of placeholder names (without prefix/suffix)
+    """
+    pattern = re.escape(prefix) + r'(\w+)' + re.escape(suffix)
+    placeholders = set()
+    
+    for para in doc.paragraphs:
+        matches = re.findall(pattern, para.text)
+        placeholders.update(matches)
+    
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                matches = re.findall(pattern, cell.text)
+                placeholders.update(matches)
+    
+    return sorted(list(placeholders))
+
+
+def create_documents_from_template(
+    template_path: str,
+    data_list: List[Dict[str, Any]],
+    output_folder: str,
+    filename_template: str = 'document_{index}',
+    filename_field: Optional[str] = None
+) -> List[str]:
+    """
+    Generate multiple documents from template
+    
+    Args:
+        template_path: Path to template document
+        data_list: List of data dictionaries
+        output_folder: Output folder for generated documents
+        filename_template: Template for filename (use {index}, {field})
+        filename_field: Field from data to use in filename
+        
+    Returns:
+        List of generated file paths
+        
+    Example:
+        template = 'templates/letter.docx'
+        recipients = [
+            {'name': 'John', 'company': 'ABC Corp'},
+            {'name': 'Jane', 'company': 'XYZ Inc'}
+        ]
+        files = create_documents_from_template(
+            template, recipients, './output', 
+            filename_field='name'
+        )
+    """
+    create_folder_if_not_exists(output_folder)
+    generated_files = []
+    
+    for i, data in enumerate(data_list):
+        # Load fresh template
+        doc = load_document(template_path)
+        
+        # Fill placeholders
+        doc = fill_template_placeholders(doc, data)
+        
+        # Generate filename
+        if filename_field and filename_field in data:
+            # Sanitize filename
+            safe_name = re.sub(r'[^\w\s-]', '', str(data[filename_field]))
+            filename = f"{safe_name}.docx"
+        else:
+            filename = filename_template.format(index=i+1) + '.docx'
+        
+        output_path = os.path.join(output_folder, filename)
+        save_document(doc, output_path, create_backup=False)
+        generated_files.append(output_path)
+    
+    log_action(f"Generated {len(generated_files)} documents from template")
+    return generated_files
+
+
+def create_documents_from_excel(
+    template_path: str,
+    excel_path: str,
+    output_folder: str,
+    sheet_name: Union[str, int] = 0,
+    filename_column: Optional[str] = None
+) -> List[str]:
+    """
+    Generate documents from template using Excel data
+    
+    Args:
+        template_path: Path to template document
+        excel_path: Path to Excel file with data
+        output_folder: Output folder
+        sheet_name: Sheet to read from Excel
+        filename_column: Column to use for filenames
+    """
+    validate_file_exists(excel_path)
+    
+    df = pd.read_excel(excel_path, sheet_name=sheet_name)
+    data_list = df.to_dict('records')
+    
+    return create_documents_from_template(
+        template_path, data_list, output_folder,
+        filename_field=filename_column
+    )
+
+
+# =============================================================================
+# BATCH PROCESSING FUNCTIONS
+# =============================================================================
+
+def process_documents_in_folder(
+    input_folder: str,
+    process_function: Callable[[Document], Document],
+    output_folder: Optional[str] = None,
+    file_pattern: str = '*.docx'
+) -> List[str]:
+    """
+    Apply a processing function to all documents in folder
+    
+    Args:
+        input_folder: Folder with input documents
+        process_function: Function that modifies and returns document
+        output_folder: Output folder (None = modify in place)
+        file_pattern: File pattern to match
+        
+    Returns:
+        List of processed file paths
+        
+    Example:
+        def add_watermark(doc):
+            doc.add_paragraph("CONFIDENTIAL", style='Heading 1')
+            return doc
+        
+        processed = process_documents_in_folder(
+            './documents', add_watermark, './output'
+        )
+    """
+    from glob import glob
+    
+    validate_file_exists(input_folder)
+    
+    if output_folder:
+        create_folder_if_not_exists(output_folder)
+    
+    pattern = os.path.join(input_folder, file_pattern)
+    docx_files = [f for f in glob(pattern) if not os.path.basename(f).startswith('~$')]
+    
+    processed_files = []
+    
+    for file_path in docx_files:
+        try:
+            doc = load_document(file_path)
+            doc = process_function(doc)
+            
+            filename = os.path.basename(file_path)
+            output_path = os.path.join(output_folder or input_folder, filename)
+            
+            save_document(doc, output_path, create_backup=True)
+            processed_files.append(output_path)
+            
+        except Exception as e:
+            log_action(f"Error processing {file_path}: {e}", "ERROR")
+    
+    log_action(f"Processed {len(processed_files)} documents")
+    return processed_files
+
+
+def extract_all_tables_from_folder(
+    folder_path: str,
+    output_excel: str
+) -> str:
+    """
+    Extract all tables from all documents in folder to Excel
+    """
+    all_tables = []
+    docx_files = get_docx_files_in_folder(folder_path)
+    
+    for file_path in docx_files:
+        filename = os.path.basename(file_path)
+        doc = load_document(file_path)
+        tables = extract_all_tables(doc)
+        
+        for table_info in tables:
+            table_info['source_file'] = filename
+            all_tables.append(table_info)
+    
+    # Save to Excel
+    with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
+        for i, table_info in enumerate(all_tables):
+            # Create unique sheet name
+            src = table_info['source_file'][:15]
+            sheet_name = f"{src}_T{table_info['index'] + 1}"[:31]
+            
+            df = table_info['dataframe']
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    
+    log_action(f"Extracted {len(all_tables)} tables from {len(docx_files)} documents")
+    return output_excel
+
+
+def merge_documents(
+    doc_paths: List[str],
+    output_path: str,
+    add_page_breaks: bool = True
+) -> str:
+    """
+    Merge multiple documents into one
+    
+    Args:
+        doc_paths: List of document paths to merge
+        output_path: Output file path
+        add_page_breaks: Add page break between documents
+    """
+    if not doc_paths:
+        raise ValueError("No documents to merge")
+    
+    # Start with first document
+    merged_doc = load_document(doc_paths[0])
+    
+    # Append remaining documents
+    for doc_path in doc_paths[1:]:
+        if add_page_breaks:
+            merged_doc.add_page_break()
+        
+        source_doc = load_document(doc_path)
+        
+        # Copy paragraphs
+        for para in source_doc.paragraphs:
+            new_para = merged_doc.add_paragraph(para.text)
+            if para.style:
+                new_para.style = para.style.name
+        
+        # Copy tables
+        for table in source_doc.tables:
+            # Add table with same dimensions
+            new_table = merged_doc.add_table(
+                rows=len(table.rows),
+                cols=len(table.columns) if table.rows else 0
+            )
+            
+            for i, row in enumerate(table.rows):
+                for j, cell in enumerate(row.cells):
+                    new_table.rows[i].cells[j].text = cell.text
+    
+    save_document(merged_doc, output_path, create_backup=False)
+    log_action(f"Merged {len(doc_paths)} documents into: {output_path}")
+    return output_path
+
+
+# =============================================================================
+# EXPORT FUNCTIONS
+# =============================================================================
+
+def export_to_markdown(doc: Document, output_path: str) -> str:
+    """Export document to Markdown format"""
+    md_lines = []
+    
+    for para in doc.paragraphs:
+        style_name = para.style.name if para.style else 'Normal'
+        text = para.text
+        
+        if not text.strip():
+            md_lines.append('')
+            continue
+        
+        if style_name.startswith('Heading'):
+            try:
+                level = int(style_name.replace('Heading ', '').split()[0])
+                md_lines.append('#' * level + ' ' + text)
+            except:
+                md_lines.append(text)
+        elif 'List Bullet' in style_name:
+            md_lines.append('- ' + text)
+        elif 'List Number' in style_name:
+            md_lines.append('1. ' + text)
+        else:
+            md_lines.append(text)
+        
+        md_lines.append('')
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(md_lines))
+    
+    log_action(f"Exported to Markdown: {output_path}")
+    return output_path
+
+
+def export_to_json(doc: Document, output_path: str) -> str:
+    """Export document structure to JSON"""
+    structure = {
+        'metadata': get_document_info(doc),
+        'paragraphs': [
+            {
+                'index': i,
+                'text': p.text,
+                'style': p.style.name if p.style else 'Normal'
+            }
+            for i, p in enumerate(doc.paragraphs)
+        ],
+        'tables': [
+            {
+                'index': i,
+                'rows': len(t.rows),
+                'columns': len(t.columns) if t.rows else 0,
+                'data': [
+                    [cell.text for cell in row.cells]
+                    for row in t.rows
+                ]
+            }
+            for i, t in enumerate(doc.tables)
+        ],
+        'headers': extract_headers(doc)
+    }
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(structure, f, indent=2, ensure_ascii=False, default=str)
+    
+    log_action(f"Exported to JSON: {output_path}")
+    return output_path
+
+
+def export_tables_to_csv(
+    doc: Document,
+    output_folder: str,
+    prefix: str = 'table'
+) -> List[str]:
+    """Export all tables to separate CSV files"""
+    create_folder_if_not_exists(output_folder)
+    files = []
+    
+    tables = extract_all_tables(doc)
+    for table_info in tables:
+        csv_path = os.path.join(
+            output_folder, 
+            f"{prefix}_{table_info['index'] + 1}.csv"
+        )
+        table_info['dataframe'].to_csv(csv_path, index=False)
+        files.append(csv_path)
+    
+    log_action(f"Exported {len(files)} tables to CSV")
+    return files
+
+
+# =============================================================================
+# DOCUMENT COMPARISON FUNCTIONS
+# =============================================================================
+
+def compare_documents(doc1_path: str, doc2_path: str) -> Dict[str, Any]:
+    """
+    Compare two documents
+    
+    Returns:
+        Dictionary with differences
+    """
+    doc1 = load_document(doc1_path)
+    doc2 = load_document(doc2_path)
+    
+    # Get text sets
+    texts1 = [p.text.strip() for p in doc1.paragraphs if p.text.strip()]
+    texts2 = [p.text.strip() for p in doc2.paragraphs if p.text.strip()]
+    
+    set1 = set(texts1)
+    set2 = set(texts2)
+    
+    return {
+        'doc1': {
+            'path': doc1_path,
+            'paragraph_count': len(doc1.paragraphs),
+            'table_count': len(doc1.tables),
+        },
+        'doc2': {
+            'path': doc2_path,
+            'paragraph_count': len(doc2.paragraphs),
+            'table_count': len(doc2.tables),
+        },
+        'only_in_doc1': list(set1 - set2),
+        'only_in_doc2': list(set2 - set1),
+        'common': list(set1 & set2),
+        'paragraph_count_diff': len(doc1.paragraphs) - len(doc2.paragraphs),
+        'table_count_diff': len(doc1.tables) - len(doc2.tables),
+    }
+
+
+# =============================================================================
+# FORMATTING FUNCTIONS
+# =============================================================================
+
+def set_document_margins(
+    doc: Document,
+    top: float = 1,
+    bottom: float = 1,
+    left: float = 1,
+    right: float = 1
+) -> Document:
+    """Set document margins in inches"""
+    for section in doc.sections:
+        section.top_margin = Inches(top)
+        section.bottom_margin = Inches(bottom)
+        section.left_margin = Inches(left)
+        section.right_margin = Inches(right)
+    
+    return doc
+
+
+def add_header_footer(
+    doc: Document,
+    header_text: Optional[str] = None,
+    footer_text: Optional[str] = None
+) -> Document:
+    """Add header and/or footer to all sections"""
+    for section in doc.sections:
+        if header_text:
+            header = section.header
+            if not header.paragraphs:
+                header.add_paragraph()
+            header.paragraphs[0].text = header_text
+            header.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        if footer_text:
+            footer = section.footer
+            if not footer.paragraphs:
+                footer.add_paragraph()
+            footer.paragraphs[0].text = footer_text
+            footer.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    return doc
+
+
+def add_page_numbers(doc: Document) -> Document:
+    """Add page numbers to footer"""
+    for section in doc.sections:
+        footer = section.footer
+        if not footer.paragraphs:
+            footer.add_paragraph()
+        para = footer.paragraphs[0]
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        run = para.add_run()
+        fldChar = OxmlElement('w:fldChar')
+        fldChar.set(qn('w:fldCharType'), 'begin')
+        run._r.append(fldChar)
+        
+        instrText = OxmlElement('w:instrText')
+        instrText.text = "PAGE"
+        run._r.append(instrText)
+        
+        fldChar = OxmlElement('w:fldChar')
+        fldChar.set(qn('w:fldCharType'), 'end')
+        run._r.append(fldChar)
+    
+    return doc
+
+
+# =============================================================================
+# VALIDATION FUNCTIONS  
+# =============================================================================
+
+def validate_document(
+    doc: Document,
+    rules: Dict[str, Any]
+) -> List[str]:
+    """
+    Validate document against rules
+    
+    Args:
+        doc: Word document
+        rules: Validation rules dict:
+            - required_headers: List of required header texts
+            - min_tables: Minimum number of tables
+            - max_paragraphs: Maximum paragraphs allowed
+            - required_placeholders_filled: Check no unfilled {{placeholders}}
+            
+    Returns:
+        List of validation issues (empty if valid)
+    """
+    issues = []
+    
+    # Check required headers
+    if 'required_headers' in rules:
+        headers = [h['text'].lower() for h in extract_headers(doc)]
+        for req in rules['required_headers']:
+            if not any(req.lower() in h for h in headers):
+                issues.append(f"Missing required header: {req}")
+    
+    # Check minimum tables
+    if 'min_tables' in rules:
+        if len(doc.tables) < rules['min_tables']:
+            issues.append(
+                f"Document has {len(doc.tables)} tables, "
+                f"minimum required: {rules['min_tables']}"
+            )
+    
+    # Check maximum paragraphs
+    if 'max_paragraphs' in rules:
+        if len(doc.paragraphs) > rules['max_paragraphs']:
+            issues.append(
+                f"Document has {len(doc.paragraphs)} paragraphs, "
+                f"maximum allowed: {rules['max_paragraphs']}"
+            )
+    
+    # Check for unfilled placeholders
+    if rules.get('required_placeholders_filled'):
+        placeholders = get_template_placeholders(doc)
+        if placeholders:
+            issues.append(
+                f"Unfilled placeholders found: {', '.join(placeholders)}"
+            )
+    
+    return issues
+
+
+# =============================================================================
+# CONVENIENCE/WORKFLOW FUNCTIONS
+# =============================================================================
+
+def quick_extract_and_save(
+    doc_path: str,
+    output_folder: str
+) -> Dict[str, str]:
+    """
+    Quick extraction of all content types to separate files
+    
+    Returns:
+        Dict with paths to all extracted files
+    """
+    create_folder_if_not_exists(output_folder)
+    doc = load_document(doc_path)
+    
+    base_name = os.path.splitext(os.path.basename(doc_path))[0]
+    
+    results = {}
+    
+    # Extract tables
+    tables = 
