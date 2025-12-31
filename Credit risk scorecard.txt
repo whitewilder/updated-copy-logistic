@@ -214,3 +214,225 @@ def moc_a_missing_values(
         "PD_MoC": pd_moc,
         "MoC_Relative": moc_ratio
     }
+
+
+
+
+
+
+# ============================================================
+# MoC-A for Missing Values with 2nd-Order Logit Structure
+# ============================================================
+
+import numpy as np
+import pandas as pd
+from typing import Dict, List
+
+
+# ------------------------------------------------------------
+# 2nd-Order Logistic PD Model
+# ------------------------------------------------------------
+
+def pd_model_second_order(
+    X: np.ndarray,
+    Y: np.ndarray,
+    beta_x: np.ndarray,
+    beta_y: np.ndarray,
+    cons1: float,
+    cons3: float,
+    beta2: float,
+    beta3: float,
+    cons4: float
+) -> np.ndarray:
+    """
+    score = (cons1 + sum(beta_x * X)) * beta2
+          + beta3 * (cons3 + sum(beta_y * Y))
+          + cons4
+    """
+    block_x = cons1 + np.dot(X, beta_x)
+    block_y = cons3 + np.dot(Y, beta_y)
+
+    score = block_x * beta2 + beta3 * block_y + cons4
+    return 1 / (1 + np.exp(-score))
+
+
+# ------------------------------------------------------------
+# Appropriate Adjustment (AA)
+# ------------------------------------------------------------
+
+def apply_aa(df: pd.DataFrame, var: str) -> None:
+    aa = df[var].mean(skipna=True)
+    df[f"{var}_AA"] = df[var].fillna(aa)
+
+
+# ------------------------------------------------------------
+# Penalisation (PE) – Continuous X variables
+# ------------------------------------------------------------
+
+def compute_pe_continuous(df, var, relation):
+    x_aa = df[f"{var}_AA"]
+    x = df[var]
+
+    if relation == "inverse":
+        diff = np.maximum(x_aa - x, 0)
+    else:  # direct
+        diff = np.maximum(x - x_aa, 0)
+
+    return diff[x.notna()].mean()
+
+
+# ------------------------------------------------------------
+# Penalisation (PE) – WoE Y variables
+# ------------------------------------------------------------
+
+def compute_pe_woe(df, var, beta):
+    w_aa = df[f"{var}_AA"]
+    w = df[var]
+
+    if beta > 0:
+        diff = np.maximum(w - w_aa, 0)
+    else:
+        diff = np.maximum(w_aa - w, 0)
+
+    return diff[w.notna()].mean()
+
+
+# ------------------------------------------------------------
+# Apply MoC to Missing Values
+# ------------------------------------------------------------
+
+def apply_moc(df, var, pe, var_type, relation=None, beta=None):
+    df[f"{var}_MOC"] = df[f"{var}_AA"]
+
+    if var_type == "continuous":
+        if relation == "inverse":
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
+        else:
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
+
+    elif var_type == "woe":
+        if beta > 0:
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
+        else:
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
+
+
+# ------------------------------------------------------------
+# Year-wise Average PD (LRA compliant)
+# ------------------------------------------------------------
+
+def yearly_avg_pd_second_order(
+    df,
+    x_cols,
+    y_cols,
+    beta_x,
+    beta_y,
+    cons1,
+    cons3,
+    beta2,
+    beta3,
+    cons4
+):
+    yearly_pd = (
+        df.groupby("year")
+          .apply(
+              lambda d: pd_model_second_order(
+                  d[x_cols].values,
+                  d[y_cols].values,
+                  beta_x,
+                  beta_y,
+                  cons1,
+                  cons3,
+                  beta2,
+                  beta3,
+                  cons4
+              ).mean()
+          )
+    )
+    return yearly_pd.mean()
+
+
+# ------------------------------------------------------------
+# Unified MoC-A Engine (2nd Order)
+# ------------------------------------------------------------
+
+def moc_a_second_order(
+    df: pd.DataFrame,
+    x_config: Dict,
+    y_config: Dict,
+    model_params: Dict
+) -> Dict:
+    df = df.copy()
+
+    # ---------- AA ----------
+    for v in list(x_config) + list(y_config):
+        apply_aa(df, v)
+
+    # ---------- PD_BE ----------
+    pd_be = yearly_avg_pd_second_order(
+        df,
+        [f"{v}_AA" for v in x_config],
+        [f"{v}_AA" for v in y_config],
+        np.array([x_config[v]["beta"] for v in x_config]),
+        np.array([y_config[v]["beta"] for v in y_config]),
+        **model_params
+    )
+
+    # ---------- PE + MoC ----------
+    for v, cfg in x_config.items():
+        pe = compute_pe_continuous(df, v, cfg["relation"])
+        apply_moc(df, v, pe, "continuous", relation=cfg["relation"])
+
+    for v, cfg in y_config.items():
+        pe = compute_pe_woe(df, v, cfg["beta"])
+        apply_moc(df, v, pe, "woe", beta=cfg["beta"])
+
+    # ---------- PD_MoC ----------
+    pd_moc = yearly_avg_pd_second_order(
+        df,
+        [f"{v}_MOC" for v in x_config],
+        [f"{v}_MOC" for v in y_config],
+        np.array([x_config[v]["beta"] for v in x_config]),
+        np.array([y_config[v]["beta"] for v in y_config]),
+        **model_params
+    )
+
+    moc_ratio = (pd_moc - pd_be) / pd_be
+
+    return {
+        "PD_BE": pd_be,
+        "PD_MoC": pd_moc,
+        "MoC_Relative": moc_ratio
+    }
+
+
+
+
+
+
+x_config = {
+    "ltv": {"relation": "direct", "beta": 0.4},
+    "dti": {"relation": "direct", "beta": 0.3}
+}
+
+y_config = {
+    "woe_ir": {"beta": -0.5},
+    "woe_pd": {"beta": 0.6}
+}
+
+model_params = {
+    "cons1": -0.8,
+    "cons3": 0.5,
+    "beta2": 1.2,
+    "beta3": 0.9,
+    "cons4": -1.1
+}
+
+result = moc_a_second_order(
+    df=data,
+    x_config=x_config,
+    y_config=y_config,
+    model_params=model_params
+)
+
+
