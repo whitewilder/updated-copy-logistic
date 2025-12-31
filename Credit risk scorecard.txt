@@ -1,1988 +1,216 @@
-"""
-Word Document Editor - Functional Approach
-Comprehensive automation tool for Word document operations
-Author: Assistant
-Version: 2.0
-"""
+# ============================================================
+# MoC-A for Missing Risk Drivers (Continuous + WoE Variables)
+# ============================================================
 
-import os
-import re
-import shutil
-import json
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Tuple, Optional, Any, Callable, Union
-from io import BytesIO
-import warnings
+import numpy as np
+import pandas as pd
+from typing import Dict, List
 
-# Third-party imports
-try:
-    from docx import Document
-    from docx.shared import Inches, Pt, Cm, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_TABLE_ALIGNMENT
-    from docx.enum.style import WD_STYLE_TYPE
-    from docx.oxml.ns import qn, nsmap
-    from docx.oxml import OxmlElement
-    import pandas as pd
-    from openpyxl import Workbook, load_workbook
-    from openpyxl.utils.dataframe import dataframe_to_rows
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-    from PIL import Image
-except ImportError as e:
-    print(f"Missing dependency: {e}")
-    print("Install with: pip install python-docx pandas openpyxl Pillow")
-    raise
+# ------------------------------------------------------------
+# PD Model (replace with production model if required)
+# ------------------------------------------------------------
 
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-
-CONFIG = {
-    'backup_enabled': True,
-    'backup_folder': '_backups',
-    'default_image_width': 4.0,  # inches
-    'table_style': 'Table Grid',
-    'supported_image_formats': {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'},
-    'max_column_width': 50,
-}
-
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-def create_folder_if_not_exists(folder_path: str) -> str:
-    """Create folder if it doesn't exist"""
-    os.makedirs(folder_path, exist_ok=True)
-    return folder_path
-
-
-def get_timestamp() -> str:
-    """Get formatted timestamp"""
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def create_backup_path(file_path: str, backup_folder: Optional[str] = None) -> str:
-    """Create backup file path with timestamp"""
-    directory = os.path.dirname(file_path) or '.'
-    filename = os.path.basename(file_path)
-    name, ext = os.path.splitext(filename)
-    
-    if backup_folder:
-        backup_dir = os.path.join(directory, backup_folder)
-        create_folder_if_not_exists(backup_dir)
-    else:
-        backup_dir = directory
-    
-    return os.path.join(backup_dir, f"{name}_backup_{get_timestamp()}{ext}")
-
-
-def log_action(message: str, level: str = "INFO") -> None:
-    """Log action with timestamp"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
-
-
-def validate_file_exists(file_path: str) -> None:
-    """Validate that file exists"""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-
-def get_docx_files_in_folder(folder_path: str) -> List[str]:
-    """Get all .docx files in folder"""
-    validate_file_exists(folder_path)
-    return [
-        os.path.join(folder_path, f) 
-        for f in os.listdir(folder_path) 
-        if f.endswith('.docx') and not f.startswith('~$')
-    ]
-
-
-# =============================================================================
-# DOCUMENT LOADING/SAVING FUNCTIONS
-# =============================================================================
-
-def load_document(file_path: str) -> Document:
+def pd_model(X: np.ndarray, beta: np.ndarray, intercept: float) -> np.ndarray:
     """
-    Load a Word document from file path
-    
-    Args:
-        file_path: Path to the .docx file
-        
-    Returns:
-        Document object
-        
-    Example:
-        doc = load_document('report.docx')
+    Logistic PD model
     """
-    validate_file_exists(file_path)
-    log_action(f"Loading document: {file_path}")
-    return Document(file_path)
+    z = intercept + np.dot(X, beta)
+    return 1 / (1 + np.exp(-z))
 
 
-def save_document(
-    doc: Document, 
-    output_path: str, 
-    create_backup: bool = True
-) -> str:
+# ------------------------------------------------------------
+# Appropriate Adjustment (AA)
+# ------------------------------------------------------------
+
+def apply_aa(df: pd.DataFrame, var: str) -> float:
     """
-    Save Word document with optional backup
-    
-    Args:
-        doc: Document object
-        output_path: Output file path
-        create_backup: Whether to create backup of existing file
-        
-    Returns:
-        Path to saved document
+    Apply AA using central tendency (mean)
     """
-    if create_backup and os.path.exists(output_path):
-        backup_path = create_backup_path(output_path, CONFIG['backup_folder'])
-        shutil.copy2(output_path, backup_path)
-        log_action(f"Backup created: {backup_path}")
-    
-    # Ensure directory exists
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        create_folder_if_not_exists(output_dir)
-    
-    doc.save(output_path)
-    log_action(f"Document saved: {output_path}")
-    return output_path
+    aa = df[var].mean(skipna=True)
+    df[f"{var}_AA"] = df[var].fillna(aa)
+    return aa
 
 
-def create_new_document() -> Document:
-    """Create a new empty Word document"""
-    log_action("Creating new document")
-    return Document()
+# ------------------------------------------------------------
+# Penalisation (PE) - Continuous Variables
+# ------------------------------------------------------------
 
-
-def copy_document(source_path: str, dest_path: str) -> str:
-    """Copy a document to new location"""
-    validate_file_exists(source_path)
-    shutil.copy2(source_path, dest_path)
-    log_action(f"Document copied: {source_path} -> {dest_path}")
-    return dest_path
-
-
-# =============================================================================
-# DOCUMENT STRUCTURE & INFO FUNCTIONS
-# =============================================================================
-
-def get_document_info(doc: Document) -> Dict[str, Any]:
-    """
-    Get comprehensive document information
-    
-    Returns:
-        Dictionary with document metadata and statistics
-    """
-    core_props = doc.core_properties
-    
-    return {
-        'title': core_props.title,
-        'author': core_props.author,
-        'created': str(core_props.created) if core_props.created else None,
-        'modified': str(core_props.modified) if core_props.modified else None,
-        'last_modified_by': core_props.last_modified_by,
-        'paragraph_count': len(doc.paragraphs),
-        'table_count': len(doc.tables),
-        'section_count': len(doc.sections),
-        'word_count': sum(len(p.text.split()) for p in doc.paragraphs),
-        'character_count': sum(len(p.text) for p in doc.paragraphs),
-    }
-
-
-def get_document_structure(doc: Document) -> Dict[str, Any]:
-    """
-    Get complete document structure overview
-    
-    Returns:
-        Dictionary with headers, tables, images info
-    """
-    return {
-        'headers': extract_headers(doc),
-        'paragraph_count': len(doc.paragraphs),
-        'table_count': len(doc.tables),
-        'image_count': count_images(doc),
-        'section_count': len(doc.sections),
-        'styles_used': list(set(p.style.name for p in doc.paragraphs if p.style)),
-        'table_summaries': [
-            {'index': i, 'rows': len(t.rows), 'cols': len(t.columns) if t.rows else 0}
-            for i, t in enumerate(doc.tables)
-        ]
-    }
-
-
-def print_document_structure(doc: Document) -> None:
-    """Print formatted document structure"""
-    structure = get_document_structure(doc)
-    
-    print("\n" + "=" * 60)
-    print("DOCUMENT STRUCTURE")
-    print("=" * 60)
-    print(f"Paragraphs: {structure['paragraph_count']}")
-    print(f"Tables: {structure['table_count']}")
-    print(f"Images: {structure['image_count']}")
-    print(f"Sections: {structure['section_count']}")
-    
-    if structure['headers']:
-        print("\nHEADERS:")
-        for h in structure['headers']:
-            indent = "  " * (h['level'] - 1)
-            print(f"{indent}[H{h['level']}] {h['text'][:60]}...")
-    
-    if structure['table_summaries']:
-        print("\nTABLES:")
-        for t in structure['table_summaries']:
-            print(f"  Table {t['index']}: {t['rows']} rows x {t['cols']} columns")
-    
-    print("=" * 60 + "\n")
-
-
-# =============================================================================
-# HEADER/PARAGRAPH EXTRACTION FUNCTIONS
-# =============================================================================
-
-def extract_headers(
-    doc: Document, 
-    level: Optional[int] = None,
-    include_text: bool = True
-) -> List[Dict[str, Any]]:
-    """
-    Extract all headers from document
-    
-    Args:
-        doc: Word document
-        level: Specific heading level (1-9), None for all
-        include_text: Whether to include header text
-        
-    Returns:
-        List of header dictionaries
-        
-    Example:
-        headers = extract_headers(doc)
-        h2_headers = extract_headers(doc, level=2)
-    """
-    headers = []
-    
-    for i, para in enumerate(doc.paragraphs):
-        if not para.style:
-            continue
-            
-        style_name = para.style.name
-        if style_name.startswith('Heading'):
-            try:
-                heading_level = int(style_name.replace('Heading ', '').split()[0])
-                if level is None or heading_level == level:
-                    header_info = {
-                        'index': i,
-                        'level': heading_level,
-                        'style': style_name
-                    }
-                    if include_text:
-                        header_info['text'] = para.text
-                    headers.append(header_info)
-            except ValueError:
-                continue
-    
-    return headers
-
-
-def extract_paragraphs(
-    doc: Document,
-    style_filter: Optional[str] = None,
-    text_contains: Optional[str] = None,
-    exclude_empty: bool = True
-) -> List[Dict[str, Any]]:
-    """
-    Extract paragraphs with optional filtering
-    
-    Args:
-        doc: Word document
-        style_filter: Only include paragraphs with this style
-        text_contains: Only include paragraphs containing this text
-        exclude_empty: Exclude empty paragraphs
-        
-    Returns:
-        List of paragraph dictionaries
-    """
-    paragraphs = []
-    
-    for i, para in enumerate(doc.paragraphs):
-        # Apply filters
-        if exclude_empty and not para.text.strip():
-            continue
-        if style_filter and (not para.style or para.style.name != style_filter):
-            continue
-        if text_contains and text_contains.lower() not in para.text.lower():
-            continue
-        
-        paragraphs.append({
-            'index': i,
-            'text': para.text,
-            'style': para.style.name if para.style else 'Normal'
-        })
-    
-    return paragraphs
-
-
-def extract_text_content(doc: Document, include_tables: bool = True) -> str:
-    """
-    Extract all text content from document
-    
-    Args:
-        doc: Word document
-        include_tables: Whether to include table text
-        
-    Returns:
-        Full text content as string
-    """
-    content_parts = []
-    
-    # Paragraphs
-    for para in doc.paragraphs:
-        if para.text.strip():
-            content_parts.append(para.text)
-    
-    # Tables
-    if include_tables:
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = ' | '.join(cell.text.strip() for cell in row.cells)
-                if row_text.strip():
-                    content_parts.append(row_text)
-    
-    return '\n'.join(content_parts)
-
-
-# =============================================================================
-# TABLE EXTRACTION FUNCTIONS
-# =============================================================================
-
-def table_to_dataframe(
-    table, 
-    header_row: int = 0,
-    skip_rows: Optional[List[int]] = None
-) -> pd.DataFrame:
-    """
-    Convert a Word table to pandas DataFrame
-    
-    Args:
-        table: Word table object
-        header_row: Row index to use as header (default 0)
-        skip_rows: List of row indices to skip
-        
-    Returns:
-        pandas DataFrame
-    """
-    skip_rows = skip_rows or []
-    data = []
-    
-    for i, row in enumerate(table.rows):
-        if i in skip_rows:
-            continue
-        row_data = []
-        for cell in row.cells:
-            # Handle merged cells by getting unique text
-            cell_text = cell.text.strip()
-            row_data.append(cell_text)
-        data.append(row_data)
-    
-    if not data:
-        return pd.DataFrame()
-    
-    # Adjust header row index after skipping
-    adjusted_header = header_row - sum(1 for r in skip_rows if r < header_row)
-    
-    if adjusted_header < len(data):
-        headers = data[adjusted_header]
-        # Make headers unique
-        seen = {}
-        unique_headers = []
-        for h in headers:
-            if h in seen:
-                seen[h] += 1
-                unique_headers.append(f"{h}_{seen[h]}")
-            else:
-                seen[h] = 0
-                unique_headers.append(h)
-        
-        body_data = data[adjusted_header + 1:]
-        df = pd.DataFrame(body_data, columns=unique_headers)
-    else:
-        df = pd.DataFrame(data)
-    
-    return df
-
-
-def extract_all_tables(
-    doc: Document,
-    as_dataframes: bool = True
-) -> List[Dict[str, Any]]:
-    """
-    Extract all tables from document
-    
-    Args:
-        doc: Word document
-        as_dataframes: Convert tables to DataFrames
-        
-    Returns:
-        List of table information dictionaries
-        
-    Example:
-        tables = extract_all_tables(doc)
-        for t in tables:
-            print(f"Table {t['index']}: {t['row_count']} rows")
-            print(t['dataframe'])
-    """
-    tables = []
-    
-    for i, table in enumerate(doc.tables):
-        table_info = {
-            'index': i,
-            'row_count': len(table.rows),
-            'column_count': len(table.columns) if table.rows else 0,
-        }
-        
-        if as_dataframes:
-            table_info['dataframe'] = table_to_dataframe(table)
-        else:
-            # Raw data
-            table_info['data'] = [
-                [cell.text.strip() for cell in row.cells]
-                for row in table.rows
-            ]
-        
-        tables.append(table_info)
-    
-    log_action(f"Extracted {len(tables)} tables")
-    return tables
-
-
-def extract_table_by_index(doc: Document, table_index: int) -> pd.DataFrame:
-    """
-    Extract a specific table by index
-    
-    Args:
-        doc: Word document
-        table_index: Index of table to extract
-        
-    Returns:
-        pandas DataFrame
-    """
-    if table_index >= len(doc.tables):
-        raise IndexError(
-            f"Table index {table_index} out of range. "
-            f"Document has {len(doc.tables)} tables."
-        )
-    return table_to_dataframe(doc.tables[table_index])
-
-
-def extract_tables_by_header(
-    doc: Document,
-    header_text: str,
-    case_sensitive: bool = False
-) -> List[Dict[str, Any]]:
-    """
-    Extract tables that appear after a specific header
-    
-    Args:
-        doc: Word document
-        header_text: Header text to search for
-        case_sensitive: Whether search is case sensitive
-        
-    Returns:
-        List of table info with associated header
-    """
-    results = []
-    
-    # Build document element order
-    body = doc.element.body
-    current_header = None
-    
-    for element in body:
-        # Check if paragraph with heading style
-        if element.tag.endswith('p'):
-            for para in doc.paragraphs:
-                if para._element == element:
-                    if para.style and para.style.name.startswith('Heading'):
-                        text = para.text
-                        match = (text == header_text if case_sensitive 
-                                else text.lower() == header_text.lower())
-                        if match or (header_text.lower() in text.lower()):
-                            current_header = text
-                    break
-        
-        # Check if table
-        elif element.tag.endswith('tbl'):
-            if current_header:
-                for i, table in enumerate(doc.tables):
-                    if table._tbl == element:
-                        results.append({
-                            'header': current_header,
-                            'table_index': i,
-                            'dataframe': table_to_dataframe(table)
-                        })
-                        break
-    
-    return results
-
-
-def save_tables_to_excel(
-    tables: List[Dict[str, Any]],
-    output_path: str,
-    one_sheet_per_table: bool = True,
-    include_metadata: bool = True,
-    format_cells: bool = True
-) -> str:
-    """
-    Save extracted tables to Excel file
-    
-    Args:
-        tables: List of table dictionaries from extract_all_tables
-        output_path: Output Excel file path
-        one_sheet_per_table: Each table on separate sheet
-        include_metadata: Add metadata sheet
-        format_cells: Apply cell formatting
-        
-    Returns:
-        Path to saved Excel file
-        
-    Example:
-        tables = extract_all_tables(doc)
-        save_tables_to_excel(tables, 'output/tables.xlsx')
-    """
-    # Ensure output directory exists
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        create_folder_if_not_exists(output_dir)
-    
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        if one_sheet_per_table:
-            for table_info in tables:
-                sheet_name = f"Table_{table_info['index'] + 1}"
-                df = table_info.get('dataframe', pd.DataFrame(table_info.get('data', [])))
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-        else:
-            # All tables in one sheet
-            start_row = 0
-            all_tables_sheet = 'All_Tables'
-            
-            for table_info in tables:
-                df = table_info.get('dataframe', pd.DataFrame(table_info.get('data', [])))
-                
-                # Write table label
-                label_df = pd.DataFrame([[f"=== Table {table_info['index'] + 1} ==="]])
-                label_df.to_excel(
-                    writer, sheet_name=all_tables_sheet, 
-                    startrow=start_row, index=False, header=False
-                )
-                start_row += 1
-                
-                # Write table data
-                df.to_excel(
-                    writer, sheet_name=all_tables_sheet,
-                    startrow=start_row, index=False
-                )
-                start_row += len(df) + 3
-        
-        # Add metadata sheet
-        if include_metadata:
-            metadata = pd.DataFrame([
-                {'Property': 'Extraction Date', 'Value': get_timestamp()},
-                {'Property': 'Total Tables', 'Value': len(tables)},
-                {'Property': 'Total Rows', 
-                 'Value': sum(t.get('row_count', 0) for t in tables)},
-            ])
-            metadata.to_excel(writer, sheet_name='_Metadata', index=False)
-    
-    # Apply formatting
-    if format_cells:
-        _format_excel_file(output_path)
-    
-    log_action(f"Saved {len(tables)} tables to: {output_path}")
-    return output_path
-
-
-def _format_excel_file(file_path: str) -> None:
-    """Apply formatting to Excel file"""
-    wb = load_workbook(file_path)
-    
-    header_font = Font(bold=True)
-    header_fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')
-    thin_border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-    
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        
-        # Format header row
-        for cell in ws[1]:
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = thin_border
-            cell.alignment = Alignment(horizontal='center', wrap_text=True)
-        
-        # Auto-adjust column widths
-        for column in ws.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            
-            for cell in column:
-                try:
-                    if cell.value:
-                        max_length = max(max_length, len(str(cell.value)))
-                except:
-                    pass
-            
-            adjusted_width = min(max_length + 2, CONFIG['max_column_width'])
-            ws.column_dimensions[column_letter].width = adjusted_width
-    
-    wb.save(file_path)
-
-
-def save_table_to_csv(
-    doc: Document,
-    table_index: int,
-    output_path: str,
-    encoding: str = 'utf-8'
-) -> str:
-    """Save a single table to CSV file"""
-    df = extract_table_by_index(doc, table_index)
-    df.to_csv(output_path, index=False, encoding=encoding)
-    log_action(f"Table {table_index} saved to CSV: {output_path}")
-    return output_path
-
-
-# =============================================================================
-# TABLE REPLACEMENT FUNCTIONS
-# =============================================================================
-
-def clear_table(table) -> None:
-    """Clear all content from a table while preserving structure"""
-    for row in table.rows:
-        for cell in row.cells:
-            cell.text = ''
-
-
-def resize_table(table, new_rows: int, new_cols: int) -> None:
-    """Resize table to new dimensions"""
-    current_rows = len(table.rows)
-    current_cols = len(table.columns) if table.rows else 0
-    
-    # Add/remove rows
-    while len(table.rows) < new_rows:
-        table.add_row()
-    
-    while len(table.rows) > new_rows:
-        row = table.rows[-1]
-        tbl = table._tbl
-        tr = row._tr
-        tbl.remove(tr)
-    
-    # Note: Adding/removing columns is more complex in python-docx
-    # For now, we handle column count mismatch in the replacement function
-
-
-def replace_table_with_dataframe(
-    doc: Document,
-    table_index: int,
+def compute_pe_continuous(
     df: pd.DataFrame,
-    preserve_formatting: bool = True,
-    include_header: bool = True
-) -> Document:
+    var: str,
+    relation: str
+) -> float:
     """
-    Replace a table in document with DataFrame data
-    
-    Args:
-        doc: Word document
-        table_index: Index of table to replace
-        df: DataFrame with new data
-        preserve_formatting: Try to keep original table style
-        include_header: Include DataFrame column names as header row
-        
-    Returns:
-        Modified document
-        
-    Example:
-        df = pd.DataFrame({'Name': ['Alice', 'Bob'], 'Score': [95, 87]})
-        doc = replace_table_with_dataframe(doc, 0, df)
+    Penalisation for continuous variables
+
+    relation:
+        'inverse' -> lower X => higher PD
+        'direct'  -> higher X => higher PD
     """
-    if table_index >= len(doc.tables):
-        raise IndexError(
-            f"Table index {table_index} out of range. "
-            f"Document has {len(doc.tables)} tables."
-        )
-    
-    table = doc.tables[table_index]
-    
-    # Store original style
-    original_style = table.style if preserve_formatting else None
-    
-    # Calculate required dimensions
-    num_rows = len(df) + (1 if include_header else 0)
-    num_cols = len(df.columns)
-    
-    # Clear existing table
-    clear_table(table)
-    
-    # Resize if needed
-    while len(table.rows) < num_rows:
-        table.add_row()
-    while len(table.rows) > num_rows:
-        row = table.rows[-1]
-        table._tbl.remove(row._tr)
-    
-    # Fill data
-    row_idx = 0
-    
-    # Header row
-    if include_header:
-        for col_idx, col_name in enumerate(df.columns):
-            if col_idx < len(table.rows[row_idx].cells):
-                table.rows[row_idx].cells[col_idx].text = str(col_name)
-        row_idx += 1
-    
-    # Data rows
-    for _, data_row in df.iterrows():
-        if row_idx >= len(table.rows):
-            break
-        for col_idx, value in enumerate(data_row):
-            if col_idx < len(table.rows[row_idx].cells):
-                cell_value = '' if pd.isna(value) else str(value)
-                table.rows[row_idx].cells[col_idx].text = cell_value
-        row_idx += 1
-    
-    # Restore style
-    if original_style:
-        try:
-            table.style = original_style
-        except:
-            pass
-    
-    log_action(f"Replaced table {table_index} with DataFrame ({len(df)} rows)")
-    return doc
+    x_aa = df[f"{var}_AA"]
+    x_orig = df[var]
+
+    if relation == "inverse":
+        diff = np.maximum(x_aa - x_orig, 0)
+    elif relation == "direct":
+        diff = np.maximum(x_orig - x_aa, 0)
+    else:
+        raise ValueError("relation must be 'inverse' or 'direct'")
+
+    pe = diff[x_orig.notna()].mean()
+    return pe
 
 
-def update_multiple_tables(
-    doc: Document,
-    table_updates: Dict[int, pd.DataFrame]
-) -> Document:
-    """
-    Update multiple tables at once
-    
-    Args:
-        doc: Word document
-        table_updates: Dict mapping table index to DataFrame
-        
-    Returns:
-        Modified document
-        
-    Example:
-        updates = {
-            0: df1,
-            2: df2,
-        }
-        doc = update_multiple_tables(doc, updates)
-    """
-    for table_index in sorted(table_updates.keys()):
-        df = table_updates[table_index]
-        doc = replace_table_with_dataframe(doc, table_index, df)
-    
-    log_action(f"Updated {len(table_updates)} tables")
-    return doc
+# ------------------------------------------------------------
+# Penalisation (PE) - WoE Variables
+# ------------------------------------------------------------
 
-
-def insert_dataframe_as_table(
-    doc: Document,
+def compute_pe_woe(
     df: pd.DataFrame,
-    position: str = 'end',
-    style: str = 'Table Grid',
-    heading: Optional[str] = None
-) -> Document:
+    var: str,
+    beta: float
+) -> float:
     """
-    Insert a new table from DataFrame
-    
-    Args:
-        doc: Word document
-        df: DataFrame to insert
-        position: 'end' to append, 'start' to prepend
-        style: Table style name
-        heading: Optional heading before table
-        
-    Returns:
-        Modified document
+    Penalisation for WoE variables based on beta sign
     """
-    if heading:
-        doc.add_paragraph(heading, style='Heading 2')
-    
-    # Add table
-    table = doc.add_table(rows=1, cols=len(df.columns))
-    table.style = style
-    
-    # Add header row
-    header_cells = table.rows[0].cells
-    for i, col_name in enumerate(df.columns):
-        header_cells[i].text = str(col_name)
-        # Bold header
-        for para in header_cells[i].paragraphs:
-            for run in para.runs:
-                run.bold = True
-    
-    # Add data rows
-    for _, row_data in df.iterrows():
-        row = table.add_row()
-        for i, value in enumerate(row_data):
-            cell_value = '' if pd.isna(value) else str(value)
-            row.cells[i].text = cell_value
-    
-    log_action(f"Inserted new table with {len(df)} rows")
-    return doc
+    w_aa = df[f"{var}_AA"]
+    w_orig = df[var]
 
-
-def update_table_from_excel(
-    doc: Document,
-    excel_path: str,
-    table_mapping: Dict[int, str]
-) -> Document:
-    """
-    Update tables from Excel file
-    
-    Args:
-        doc: Word document
-        excel_path: Path to Excel file
-        table_mapping: Dict mapping table index to sheet name
-        
-    Returns:
-        Modified document
-        
-    Example:
-        mapping = {0: 'Sheet1', 2: 'DataSheet'}
-        doc = update_table_from_excel(doc, 'data.xlsx', mapping)
-    """
-    validate_file_exists(excel_path)
-    
-    for table_index, sheet_name in table_mapping.items():
-        try:
-            df = pd.read_excel(excel_path, sheet_name=sheet_name)
-            doc = replace_table_with_dataframe(doc, table_index, df)
-        except Exception as e:
-            log_action(f"Error updating table {table_index}: {e}", "ERROR")
-    
-    return doc
-
-
-# =============================================================================
-# IMAGE EXTRACTION FUNCTIONS
-# =============================================================================
-
-def count_images(doc: Document) -> int:
-    """Count images in document"""
-    count = 0
-    for rel in doc.part.rels.values():
-        if "image" in rel.reltype:
-            count += 1
-    return count
-
-
-def extract_images(
-    doc: Document,
-    output_folder: str,
-    prefix: str = 'image'
-) -> List[Dict[str, Any]]:
-    """
-    Extract all images from document
-    
-    Args:
-        doc: Word document
-        output_folder: Folder to save images
-        prefix: Prefix for image filenames
-        
-    Returns:
-        List of image info dictionaries
-        
-    Example:
-        images = extract_images(doc, './extracted_images')
-    """
-    create_folder_if_not_exists(output_folder)
-    images = []
-    
-    for rel in doc.part.rels.values():
-        if "image" in rel.reltype:
-            try:
-                image_data = rel.target_part.blob
-                content_type = rel.target_part.content_type
-                
-                # Determine extension
-                ext_map = {
-                    'image/png': '.png',
-                    'image/jpeg': '.jpg',
-                    'image/gif': '.gif',
-                    'image/bmp': '.bmp',
-                    'image/tiff': '.tiff',
-                    'image/x-emf': '.emf',
-                    'image/x-wmf': '.wmf',
-                }
-                ext = ext_map.get(content_type, '.png')
-                
-                image_name = f"{prefix}_{len(images) + 1}{ext}"
-                image_path = os.path.join(output_folder, image_name)
-                
-                with open(image_path, 'wb') as f:
-                    f.write(image_data)
-                
-                # Get image dimensions
-                try:
-                    with Image.open(BytesIO(image_data)) as img:
-                        width, height = img.size
-                except:
-                    width, height = None, None
-                
-                images.append({
-                    'index': len(images),
-                    'rel_id': rel.rId,
-                    'filename': image_name,
-                    'path': image_path,
-                    'content_type': content_type,
-                    'size_bytes': len(image_data),
-                    'width': width,
-                    'height': height
-                })
-                
-            except Exception as e:
-                log_action(f"Error extracting image: {e}", "WARNING")
-    
-    log_action(f"Extracted {len(images)} images to: {output_folder}")
-    return images
-
-
-def extract_images_with_positions(doc: Document) -> List[Dict[str, Any]]:
-    """
-    Get images with their approximate positions in document
-    
-    Returns:
-        List of image position info
-    """
-    positions = []
-    
-    for i, para in enumerate(doc.paragraphs):
-        for run in para.runs:
-            # Check for inline images
-            if run._element.xpath('.//a:blip'):
-                blips = run._element.xpath('.//a:blip')
-                for blip in blips:
-                    embed = blip.get(qn('r:embed'))
-                    if embed:
-                        positions.append({
-                            'paragraph_index': i,
-                            'paragraph_text': para.text[:50] + '...' if len(para.text) > 50 else para.text,
-                            'rel_id': embed,
-                            'type': 'inline'
-                        })
-    
-    return positions
-
-
-def save_images_info_to_excel(
-    images: List[Dict[str, Any]],
-    output_path: str
-) -> str:
-    """Save image information to Excel"""
-    df = pd.DataFrame(images)
-    df.to_excel(output_path, index=False)
-    log_action(f"Image info saved to: {output_path}")
-    return output_path
-
-
-# =============================================================================
-# IMAGE REPLACEMENT FUNCTIONS
-# =============================================================================
-
-def replace_image_by_index(
-    doc: Document,
-    image_index: int,
-    new_image_path: str
-) -> Document:
-    """
-    Replace an image by its index
-    
-    Args:
-        doc: Word document
-        image_index: Index of image to replace
-        new_image_path: Path to new image file
-        
-    Returns:
-        Modified document
-    """
-    validate_file_exists(new_image_path)
-    
-    # Get image relationships
-    image_rels = [
-        rel for rel in doc.part.rels.values() 
-        if "image" in rel.reltype
-    ]
-    
-    if image_index >= len(image_rels):
-        raise IndexError(
-            f"Image index {image_index} out of range. "
-            f"Document has {len(image_rels)} images."
-        )
-    
-    target_rel = image_rels[image_index]
-    
-    # Read new image
-    with open(new_image_path, 'rb') as f:
-        new_image_data = f.read()
-    
-    # Replace image blob
-    target_rel.target_part._blob = new_image_data
-    
-    log_action(f"Replaced image {image_index} with: {new_image_path}")
-    return doc
-
-
-def replace_images_from_folder(
-    doc: Document,
-    folder_path: str,
-    mapping: Optional[Dict[int, str]] = None,
-    match_by_name: bool = False
-) -> Document:
-    """
-    Replace multiple images from a folder
-    
-    Args:
-        doc: Word document
-        folder_path: Folder containing replacement images
-        mapping: Optional dict {image_index: filename}
-        match_by_name: If True, match by name pattern
-        
-    Returns:
-        Modified document
-        
-    Example:
-        # Replace by order
-        doc = replace_images_from_folder(doc, './new_images')
-        
-        # Replace with mapping
-        mapping = {0: 'logo.png', 2: 'chart.jpg'}
-        doc = replace_images_from_folder(doc, './images', mapping)
-    """
-    validate_file_exists(folder_path)
-    
-    # Get image files
-    image_files = sorted([
-        f for f in os.listdir(folder_path)
-        if os.path.splitext(f)[1].lower() in CONFIG['supported_image_formats']
-    ])
-    
-    if not image_files:
-        log_action(f"No image files found in: {folder_path}", "WARNING")
-        return doc
-    
-    replaced_count = 0
-    
-    if mapping:
-        for image_index, filename in mapping.items():
-            image_path = os.path.join(folder_path, filename)
-            if os.path.exists(image_path):
-                try:
-                    doc = replace_image_by_index(doc, image_index, image_path)
-                    replaced_count += 1
-                except IndexError as e:
-                    log_action(str(e), "WARNING")
-            else:
-                log_action(f"Image not found: {image_path}", "WARNING")
+    if beta > 0:
+        diff = np.maximum(w_orig - w_aa, 0)
     else:
-        for i, filename in enumerate(image_files):
-            image_path = os.path.join(folder_path, filename)
-            try:
-                doc = replace_image_by_index(doc, i, image_path)
-                replaced_count += 1
-            except IndexError:
-                log_action(f"No more images to replace at index {i}", "INFO")
-                break
-    
-    log_action(f"Replaced {replaced_count} images from folder")
-    return doc
+        diff = np.maximum(w_aa - w_orig, 0)
+
+    pe = diff[w_orig.notna()].mean()
+    return pe
 
 
-def add_image_to_document(
-    doc: Document,
-    image_path: str,
-    width_inches: Optional[float] = None,
-    height_inches: Optional[float] = None,
-    caption: Optional[str] = None,
-    alignment: str = 'center'
-) -> Document:
+# ------------------------------------------------------------
+# Apply MoC Adjustment
+# ------------------------------------------------------------
+
+def apply_moc(
+    df: pd.DataFrame,
+    var: str,
+    pe: float,
+    var_type: str,
+    relation: str = None,
+    beta: float = None
+) -> None:
     """
-    Add a new image to document
-    
-    Args:
-        doc: Word document
-        image_path: Path to image
-        width_inches: Width in inches
-        height_inches: Height in inches
-        caption: Optional caption below image
-        alignment: 'left', 'center', or 'right'
-        
-    Returns:
-        Modified document
+    Create MoC-adjusted variable
     """
-    validate_file_exists(image_path)
-    
-    # Add paragraph for image
-    para = doc.add_paragraph()
-    
-    # Set alignment
-    align_map = {
-        'left': WD_ALIGN_PARAGRAPH.LEFT,
-        'center': WD_ALIGN_PARAGRAPH.CENTER,
-        'right': WD_ALIGN_PARAGRAPH.RIGHT
-    }
-    para.alignment = align_map.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
-    
-    # Add image
-    run = para.add_run()
-    
-    if width_inches and height_inches:
-        run.add_picture(image_path, width=Inches(width_inches), height=Inches(height_inches))
-    elif width_inches:
-        run.add_picture(image_path, width=Inches(width_inches))
-    elif height_inches:
-        run.add_picture(image_path, height=Inches(height_inches))
-    else:
-        run.add_picture(image_path, width=Inches(CONFIG['default_image_width']))
-    
-    # Add caption
-    if caption:
-        caption_para = doc.add_paragraph(caption)
-        caption_para.alignment = align_map.get(alignment, WD_ALIGN_PARAGRAPH.CENTER)
-        caption_para.runs[0].italic = True
-    
-    log_action(f"Added image: {image_path}")
-    return doc
+    df[f"{var}_MOC"] = df[f"{var}_AA"]
 
+    if var_type == "continuous":
+        if relation == "inverse":
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
+        elif relation == "direct":
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
 
-def add_images_from_folder(
-    doc: Document,
-    folder_path: str,
-    width_inches: Optional[float] = None,
-    add_captions: bool = True,
-    heading: Optional[str] = None
-) -> Document:
-    """
-    Add all images from a folder to document
-    
-    Args:
-        doc: Word document
-        folder_path: Folder containing images
-        width_inches: Width for all images
-        add_captions: Use filename as caption
-        heading: Optional heading before images
-    """
-    validate_file_exists(folder_path)
-    
-    image_files = sorted([
-        f for f in os.listdir(folder_path)
-        if os.path.splitext(f)[1].lower() in CONFIG['supported_image_formats']
-    ])
-    
-    if heading:
-        doc.add_paragraph(heading, style='Heading 2')
-    
-    for filename in image_files:
-        image_path = os.path.join(folder_path, filename)
-        caption = os.path.splitext(filename)[0] if add_captions else None
-        doc = add_image_to_document(
-            doc, image_path, 
-            width_inches=width_inches or CONFIG['default_image_width'],
-            caption=caption
-        )
-    
-    log_action(f"Added {len(image_files)} images from folder")
-    return doc
+    elif var_type == "woe":
+        if beta is None:
+            raise ValueError("beta must be provided for WoE variables")
 
-
-# =============================================================================
-# SEARCH AND REPLACE FUNCTIONS
-# =============================================================================
-
-def find_text(
-    doc: Document,
-    search_text: str,
-    case_sensitive: bool = False,
-    include_tables: bool = True
-) -> List[Dict[str, Any]]:
-    """
-    Find all occurrences of text in document
-    
-    Args:
-        doc: Word document
-        search_text: Text to find
-        case_sensitive: Case sensitive search
-        include_tables: Search in tables too
-        
-    Returns:
-        List of match info dictionaries
-    """
-    results = []
-    search = search_text if case_sensitive else search_text.lower()
-    
-    # Search paragraphs
-    for i, para in enumerate(doc.paragraphs):
-        text = para.text if case_sensitive else para.text.lower()
-        if search in text:
-            # Find position
-            pos = text.find(search)
-            results.append({
-                'type': 'paragraph',
-                'index': i,
-                'position': pos,
-                'text': para.text,
-                'context': _get_context(para.text, pos, len(search_text))
-            })
-    
-    # Search tables
-    if include_tables:
-        for t_idx, table in enumerate(doc.tables):
-            for r_idx, row in enumerate(table.rows):
-                for c_idx, cell in enumerate(row.cells):
-                    text = cell.text if case_sensitive else cell.text.lower()
-                    if search in text:
-                        results.append({
-                            'type': 'table',
-                            'table_index': t_idx,
-                            'row': r_idx,
-                            'column': c_idx,
-                            'text': cell.text
-                        })
-    
-    return results
-
-
-def _get_context(text: str, position: int, length: int, context_size: int = 30) -> str:
-    """Get text context around match"""
-    start = max(0, position - context_size)
-    end = min(len(text), position + length + context_size)
-    
-    prefix = '...' if start > 0 else ''
-    suffix = '...' if end < len(text) else ''
-    
-    return prefix + text[start:end] + suffix
-
-
-def find_and_replace_text(
-    doc: Document,
-    search_text: str,
-    replace_text: str,
-    case_sensitive: bool = False,
-    include_tables: bool = True
-) -> Tuple[Document, int]:
-    """
-    Find and replace text throughout document
-    
-    Args:
-        doc: Word document
-        search_text: Text to find
-        replace_text: Replacement text
-        case_sensitive: Case sensitive search
-        include_tables: Replace in tables too
-        
-    Returns:
-        Tuple of (modified document, replacement count)
-        
-    Example:
-        doc, count = find_and_replace_text(doc, 'old', 'new')
-        print(f"Replaced {count} occurrences")
-    """
-    count = 0
-    
-    # Replace in paragraphs
-    for para in doc.paragraphs:
-        for run in para.runs:
-            if case_sensitive:
-                if search_text in run.text:
-                    run.text = run.text.replace(search_text, replace_text)
-                    count += run.text.count(replace_text)
-            else:
-                if search_text.lower() in run.text.lower():
-                    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
-                    new_text = pattern.sub(replace_text, run.text)
-                    count += len(pattern.findall(run.text))
-                    run.text = new_text
-    
-    # Replace in tables
-    if include_tables:
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if case_sensitive:
-                                if search_text in run.text:
-                                    run.text = run.text.replace(search_text, replace_text)
-                                    count += 1
-                            else:
-                                if search_text.lower() in run.text.lower():
-                                    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
-                                    new_text = pattern.sub(replace_text, run.text)
-                                    count += len(pattern.findall(run.text))
-                                    run.text = new_text
-    
-    log_action(f"Replaced '{search_text}' with '{replace_text}': {count} times")
-    return doc, count
-
-
-def batch_find_replace(
-    doc: Document,
-    replacements: Dict[str, str],
-    case_sensitive: bool = False
-) -> Document:
-    """
-    Perform multiple find/replace operations
-    
-    Args:
-        doc: Word document
-        replacements: Dict of {search: replace}
-        case_sensitive: Case sensitive search
-        
-    Returns:
-        Modified document
-        
-    Example:
-        replacements = {
-            'old_name': 'new_name',
-            '2023': '2024',
-            'Draft': 'Final'
-        }
-        doc = batch_find_replace(doc, replacements)
-    """
-    total_count = 0
-    
-    for search_text, replace_text in replacements.items():
-        doc, count = find_and_replace_text(
-            doc, search_text, replace_text, case_sensitive
-        )
-        total_count += count
-    
-    log_action(f"Total replacements: {total_count}")
-    return doc
-
-
-def replace_with_regex(
-    doc: Document,
-    pattern: str,
-    replacement: str,
-    flags: int = 0
-) -> Tuple[Document, int]:
-    """
-    Replace text using regex pattern
-    
-    Args:
-        doc: Word document
-        pattern: Regex pattern
-        replacement: Replacement string (can use groups like \\1)
-        flags: Regex flags
-        
-    Returns:
-        Tuple of (modified document, replacement count)
-    """
-    count = 0
-    regex = re.compile(pattern, flags)
-    
-    for para in doc.paragraphs:
-        for run in para.runs:
-            if regex.search(run.text):
-                new_text, n = regex.subn(replacement, run.text)
-                run.text = new_text
-                count += n
-    
-    log_action(f"Regex replacement count: {count}")
-    return doc, count
-
-
-# =============================================================================
-# TEMPLATE FUNCTIONS
-# =============================================================================
-
-def fill_template_placeholders(
-    doc: Document,
-    placeholders: Dict[str, Any],
-    prefix: str = '{{',
-    suffix: str = '}}'
-) -> Document:
-    """
-    Fill template placeholders with values
-    
-    Args:
-        doc: Word document (template)
-        placeholders: Dict of {placeholder_name: value}
-        prefix: Placeholder prefix (default '{{')
-        suffix: Placeholder suffix (default '}}')
-        
-    Returns:
-        Filled document
-        
-    Example:
-        template_doc = load_document('template.docx')
-        data = {
-            'name': 'John Doe',
-            'date': '2024-01-15',
-            'amount': '1,500.00'
-        }
-        doc = fill_template_placeholders(template_doc, data)
-    """
-    for key, value in placeholders.items():
-        placeholder = f"{prefix}{key}{suffix}"
-        doc, _ = find_and_replace_text(doc, placeholder, str(value))
-    
-    return doc
-
-
-def get_template_placeholders(
-    doc: Document,
-    prefix: str = '{{',
-    suffix: str = '}}'
-) -> List[str]:
-    """
-    Find all placeholders in template document
-    
-    Returns:
-        List of placeholder names (without prefix/suffix)
-    """
-    pattern = re.escape(prefix) + r'(\w+)' + re.escape(suffix)
-    placeholders = set()
-    
-    for para in doc.paragraphs:
-        matches = re.findall(pattern, para.text)
-        placeholders.update(matches)
-    
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                matches = re.findall(pattern, cell.text)
-                placeholders.update(matches)
-    
-    return sorted(list(placeholders))
-
-
-def create_documents_from_template(
-    template_path: str,
-    data_list: List[Dict[str, Any]],
-    output_folder: str,
-    filename_template: str = 'document_{index}',
-    filename_field: Optional[str] = None
-) -> List[str]:
-    """
-    Generate multiple documents from template
-    
-    Args:
-        template_path: Path to template document
-        data_list: List of data dictionaries
-        output_folder: Output folder for generated documents
-        filename_template: Template for filename (use {index}, {field})
-        filename_field: Field from data to use in filename
-        
-    Returns:
-        List of generated file paths
-        
-    Example:
-        template = 'templates/letter.docx'
-        recipients = [
-            {'name': 'John', 'company': 'ABC Corp'},
-            {'name': 'Jane', 'company': 'XYZ Inc'}
-        ]
-        files = create_documents_from_template(
-            template, recipients, './output', 
-            filename_field='name'
-        )
-    """
-    create_folder_if_not_exists(output_folder)
-    generated_files = []
-    
-    for i, data in enumerate(data_list):
-        # Load fresh template
-        doc = load_document(template_path)
-        
-        # Fill placeholders
-        doc = fill_template_placeholders(doc, data)
-        
-        # Generate filename
-        if filename_field and filename_field in data:
-            # Sanitize filename
-            safe_name = re.sub(r'[^\w\s-]', '', str(data[filename_field]))
-            filename = f"{safe_name}.docx"
+        if beta > 0:
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
         else:
-            filename = filename_template.format(index=i+1) + '.docx'
-        
-        output_path = os.path.join(output_folder, filename)
-        save_document(doc, output_path, create_backup=False)
-        generated_files.append(output_path)
-    
-    log_action(f"Generated {len(generated_files)} documents from template")
-    return generated_files
+            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
+
+    else:
+        raise ValueError("var_type must be 'continuous' or 'woe'")
 
 
-def create_documents_from_excel(
-    template_path: str,
-    excel_path: str,
-    output_folder: str,
-    sheet_name: Union[str, int] = 0,
-    filename_column: Optional[str] = None
-) -> List[str]:
+# ------------------------------------------------------------
+# Year-wise Average PD (LRA compliant)
+# ------------------------------------------------------------
+
+def yearly_avg_pd(
+    df: pd.DataFrame,
+    features: List[str],
+    beta_vec: np.ndarray,
+    intercept: float
+) -> float:
     """
-    Generate documents from template using Excel data
-    
-    Args:
-        template_path: Path to template document
-        excel_path: Path to Excel file with data
-        output_folder: Output folder
-        sheet_name: Sheet to read from Excel
-        filename_column: Column to use for filenames
+    Average PD per year and then across years
     """
-    validate_file_exists(excel_path)
-    
-    df = pd.read_excel(excel_path, sheet_name=sheet_name)
-    data_list = df.to_dict('records')
-    
-    return create_documents_from_template(
-        template_path, data_list, output_folder,
-        filename_field=filename_column
+    yearly_pd = (
+        df.groupby("year")
+          .apply(lambda x: pd_model(x[features].values, beta_vec, intercept).mean())
     )
+    return yearly_pd.mean()
 
 
-# =============================================================================
-# BATCH PROCESSING FUNCTIONS
-# =============================================================================
+# ------------------------------------------------------------
+# Unified MoC-A Engine
+# ------------------------------------------------------------
 
-def process_documents_in_folder(
-    input_folder: str,
-    process_function: Callable[[Document], Document],
-    output_folder: Optional[str] = None,
-    file_pattern: str = '*.docx'
-) -> List[str]:
+def moc_a_missing_values(
+    df: pd.DataFrame,
+    variable_config: Dict,
+    intercept: float
+) -> Dict:
     """
-    Apply a processing function to all documents in folder
-    
-    Args:
-        input_folder: Folder with input documents
-        process_function: Function that modifies and returns document
-        output_folder: Output folder (None = modify in place)
-        file_pattern: File pattern to match
-        
-    Returns:
-        List of processed file paths
-        
-    Example:
-        def add_watermark(doc):
-            doc.add_paragraph("CONFIDENTIAL", style='Heading 1')
-            return doc
-        
-        processed = process_documents_in_folder(
-            './documents', add_watermark, './output'
-        )
-    """
-    from glob import glob
-    
-    validate_file_exists(input_folder)
-    
-    if output_folder:
-        create_folder_if_not_exists(output_folder)
-    
-    pattern = os.path.join(input_folder, file_pattern)
-    docx_files = [f for f in glob(pattern) if not os.path.basename(f).startswith('~$')]
-    
-    processed_files = []
-    
-    for file_path in docx_files:
-        try:
-            doc = load_document(file_path)
-            doc = process_function(doc)
-            
-            filename = os.path.basename(file_path)
-            output_path = os.path.join(output_folder or input_folder, filename)
-            
-            save_document(doc, output_path, create_backup=True)
-            processed_files.append(output_path)
-            
-        except Exception as e:
-            log_action(f"Error processing {file_path}: {e}", "ERROR")
-    
-    log_action(f"Processed {len(processed_files)} documents")
-    return processed_files
+    Unified MoC-A for missing values
 
-
-def extract_all_tables_from_folder(
-    folder_path: str,
-    output_excel: str
-) -> str:
-    """
-    Extract all tables from all documents in folder to Excel
-    """
-    all_tables = []
-    docx_files = get_docx_files_in_folder(folder_path)
-    
-    for file_path in docx_files:
-        filename = os.path.basename(file_path)
-        doc = load_document(file_path)
-        tables = extract_all_tables(doc)
-        
-        for table_info in tables:
-            table_info['source_file'] = filename
-            all_tables.append(table_info)
-    
-    # Save to Excel
-    with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-        for i, table_info in enumerate(all_tables):
-            # Create unique sheet name
-            src = table_info['source_file'][:15]
-            sheet_name = f"{src}_T{table_info['index'] + 1}"[:31]
-            
-            df = table_info['dataframe']
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-    
-    log_action(f"Extracted {len(all_tables)} tables from {len(docx_files)} documents")
-    return output_excel
-
-
-def merge_documents(
-    doc_paths: List[str],
-    output_path: str,
-    add_page_breaks: bool = True
-) -> str:
-    """
-    Merge multiple documents into one
-    
-    Args:
-        doc_paths: List of document paths to merge
-        output_path: Output file path
-        add_page_breaks: Add page break between documents
-    """
-    if not doc_paths:
-        raise ValueError("No documents to merge")
-    
-    # Start with first document
-    merged_doc = load_document(doc_paths[0])
-    
-    # Append remaining documents
-    for doc_path in doc_paths[1:]:
-        if add_page_breaks:
-            merged_doc.add_page_break()
-        
-        source_doc = load_document(doc_path)
-        
-        # Copy paragraphs
-        for para in source_doc.paragraphs:
-            new_para = merged_doc.add_paragraph(para.text)
-            if para.style:
-                new_para.style = para.style.name
-        
-        # Copy tables
-        for table in source_doc.tables:
-            # Add table with same dimensions
-            new_table = merged_doc.add_table(
-                rows=len(table.rows),
-                cols=len(table.columns) if table.rows else 0
-            )
-            
-            for i, row in enumerate(table.rows):
-                for j, cell in enumerate(row.cells):
-                    new_table.rows[i].cells[j].text = cell.text
-    
-    save_document(merged_doc, output_path, create_backup=False)
-    log_action(f"Merged {len(doc_paths)} documents into: {output_path}")
-    return output_path
-
-
-# =============================================================================
-# EXPORT FUNCTIONS
-# =============================================================================
-
-def export_to_markdown(doc: Document, output_path: str) -> str:
-    """Export document to Markdown format"""
-    md_lines = []
-    
-    for para in doc.paragraphs:
-        style_name = para.style.name if para.style else 'Normal'
-        text = para.text
-        
-        if not text.strip():
-            md_lines.append('')
-            continue
-        
-        if style_name.startswith('Heading'):
-            try:
-                level = int(style_name.replace('Heading ', '').split()[0])
-                md_lines.append('#' * level + ' ' + text)
-            except:
-                md_lines.append(text)
-        elif 'List Bullet' in style_name:
-            md_lines.append('- ' + text)
-        elif 'List Number' in style_name:
-            md_lines.append('1. ' + text)
-        else:
-            md_lines.append(text)
-        
-        md_lines.append('')
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(md_lines))
-    
-    log_action(f"Exported to Markdown: {output_path}")
-    return output_path
-
-
-def export_to_json(doc: Document, output_path: str) -> str:
-    """Export document structure to JSON"""
-    structure = {
-        'metadata': get_document_info(doc),
-        'paragraphs': [
-            {
-                'index': i,
-                'text': p.text,
-                'style': p.style.name if p.style else 'Normal'
-            }
-            for i, p in enumerate(doc.paragraphs)
-        ],
-        'tables': [
-            {
-                'index': i,
-                'rows': len(t.rows),
-                'columns': len(t.columns) if t.rows else 0,
-                'data': [
-                    [cell.text for cell in row.cells]
-                    for row in t.rows
-                ]
-            }
-            for i, t in enumerate(doc.tables)
-        ],
-        'headers': extract_headers(doc)
+    variable_config example:
+    {
+        "x1": {"type": "continuous", "relation": "inverse", "beta": 0.4},
+        "x2": {"type": "woe", "beta": -0.3},
+        "x3": {"type": "continuous", "relation": "direct", "beta": 0.2}
     }
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(structure, f, indent=2, ensure_ascii=False, default=str)
-    
-    log_action(f"Exported to JSON: {output_path}")
-    return output_path
-
-
-def export_tables_to_csv(
-    doc: Document,
-    output_folder: str,
-    prefix: str = 'table'
-) -> List[str]:
-    """Export all tables to separate CSV files"""
-    create_folder_if_not_exists(output_folder)
-    files = []
-    
-    tables = extract_all_tables(doc)
-    for table_info in tables:
-        csv_path = os.path.join(
-            output_folder, 
-            f"{prefix}_{table_info['index'] + 1}.csv"
-        )
-        table_info['dataframe'].to_csv(csv_path, index=False)
-        files.append(csv_path)
-    
-    log_action(f"Exported {len(files)} tables to CSV")
-    return files
-
-
-# =============================================================================
-# DOCUMENT COMPARISON FUNCTIONS
-# =============================================================================
-
-def compare_documents(doc1_path: str, doc2_path: str) -> Dict[str, Any]:
     """
-    Compare two documents
-    
-    Returns:
-        Dictionary with differences
-    """
-    doc1 = load_document(doc1_path)
-    doc2 = load_document(doc2_path)
-    
-    # Get text sets
-    texts1 = [p.text.strip() for p in doc1.paragraphs if p.text.strip()]
-    texts2 = [p.text.strip() for p in doc2.paragraphs if p.text.strip()]
-    
-    set1 = set(texts1)
-    set2 = set(texts2)
-    
+
+    df = df.copy()
+
+    # ---------- AA ----------
+    for var in variable_config:
+        apply_aa(df, var)
+
+    aa_features = [f"{v}_AA" for v in variable_config]
+    beta_vec = np.array([variable_config[v]["beta"] for v in variable_config])
+
+    # ---------- PD_BE ----------
+    pd_be = yearly_avg_pd(df, aa_features, beta_vec, intercept)
+
+    # ---------- PE + MoC ----------
+    for var, cfg in variable_config.items():
+        if cfg["type"] == "continuous":
+            pe = compute_pe_continuous(
+                df,
+                var,
+                cfg["relation"]
+            )
+            apply_moc(
+                df,
+                var,
+                pe,
+                var_type="continuous",
+                relation=cfg["relation"]
+            )
+
+        elif cfg["type"] == "woe":
+            pe = compute_pe_woe(
+                df,
+                var,
+                cfg["beta"]
+            )
+            apply_moc(
+                df,
+                var,
+                pe,
+                var_type="woe",
+                beta=cfg["beta"]
+            )
+
+    moc_features = [f"{v}_MOC" for v in variable_config]
+    pd_moc = yearly_avg_pd(df, moc_features, beta_vec, intercept)
+
+    # ---------- Relative MoC ----------
+    moc_ratio = (pd_moc - pd_be) / pd_be
+
     return {
-        'doc1': {
-            'path': doc1_path,
-            'paragraph_count': len(doc1.paragraphs),
-            'table_count': len(doc1.tables),
-        },
-        'doc2': {
-            'path': doc2_path,
-            'paragraph_count': len(doc2.paragraphs),
-            'table_count': len(doc2.tables),
-        },
-        'only_in_doc1': list(set1 - set2),
-        'only_in_doc2': list(set2 - set1),
-        'common': list(set1 & set2),
-        'paragraph_count_diff': len(doc1.paragraphs) - len(doc2.paragraphs),
-        'table_count_diff': len(doc1.tables) - len(doc2.tables),
+        "PD_BE": pd_be,
+        "PD_MoC": pd_moc,
+        "MoC_Relative": moc_ratio
     }
-
-
-# =============================================================================
-# FORMATTING FUNCTIONS
-# =============================================================================
-
-def set_document_margins(
-    doc: Document,
-    top: float = 1,
-    bottom: float = 1,
-    left: float = 1,
-    right: float = 1
-) -> Document:
-    """Set document margins in inches"""
-    for section in doc.sections:
-        section.top_margin = Inches(top)
-        section.bottom_margin = Inches(bottom)
-        section.left_margin = Inches(left)
-        section.right_margin = Inches(right)
-    
-    return doc
-
-
-def add_header_footer(
-    doc: Document,
-    header_text: Optional[str] = None,
-    footer_text: Optional[str] = None
-) -> Document:
-    """Add header and/or footer to all sections"""
-    for section in doc.sections:
-        if header_text:
-            header = section.header
-            if not header.paragraphs:
-                header.add_paragraph()
-            header.paragraphs[0].text = header_text
-            header.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        if footer_text:
-            footer = section.footer
-            if not footer.paragraphs:
-                footer.add_paragraph()
-            footer.paragraphs[0].text = footer_text
-            footer.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    return doc
-
-
-def add_page_numbers(doc: Document) -> Document:
-    """Add page numbers to footer"""
-    for section in doc.sections:
-        footer = section.footer
-        if not footer.paragraphs:
-            footer.add_paragraph()
-        para = footer.paragraphs[0]
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        run = para.add_run()
-        fldChar = OxmlElement('w:fldChar')
-        fldChar.set(qn('w:fldCharType'), 'begin')
-        run._r.append(fldChar)
-        
-        instrText = OxmlElement('w:instrText')
-        instrText.text = "PAGE"
-        run._r.append(instrText)
-        
-        fldChar = OxmlElement('w:fldChar')
-        fldChar.set(qn('w:fldCharType'), 'end')
-        run._r.append(fldChar)
-    
-    return doc
-
-
-# =============================================================================
-# VALIDATION FUNCTIONS  
-# =============================================================================
-
-def validate_document(
-    doc: Document,
-    rules: Dict[str, Any]
-) -> List[str]:
-    """
-    Validate document against rules
-    
-    Args:
-        doc: Word document
-        rules: Validation rules dict:
-            - required_headers: List of required header texts
-            - min_tables: Minimum number of tables
-            - max_paragraphs: Maximum paragraphs allowed
-            - required_placeholders_filled: Check no unfilled {{placeholders}}
-            
-    Returns:
-        List of validation issues (empty if valid)
-    """
-    issues = []
-    
-    # Check required headers
-    if 'required_headers' in rules:
-        headers = [h['text'].lower() for h in extract_headers(doc)]
-        for req in rules['required_headers']:
-            if not any(req.lower() in h for h in headers):
-                issues.append(f"Missing required header: {req}")
-    
-    # Check minimum tables
-    if 'min_tables' in rules:
-        if len(doc.tables) < rules['min_tables']:
-            issues.append(
-                f"Document has {len(doc.tables)} tables, "
-                f"minimum required: {rules['min_tables']}"
-            )
-    
-    # Check maximum paragraphs
-    if 'max_paragraphs' in rules:
-        if len(doc.paragraphs) > rules['max_paragraphs']:
-            issues.append(
-                f"Document has {len(doc.paragraphs)} paragraphs, "
-                f"maximum allowed: {rules['max_paragraphs']}"
-            )
-    
-    # Check for unfilled placeholders
-    if rules.get('required_placeholders_filled'):
-        placeholders = get_template_placeholders(doc)
-        if placeholders:
-            issues.append(
-                f"Unfilled placeholders found: {', '.join(placeholders)}"
-            )
-    
-    return issues
-
-
-# =============================================================================
-# CONVENIENCE/WORKFLOW FUNCTIONS
-# =============================================================================
-
-def quick_extract_and_save(
-    doc_path: str,
-    output_folder: str
-) -> Dict[str, str]:
-    """
-    Quick extraction of all content types to separate files
-    
-    Returns:
-        Dict with paths to all extracted files
-    """
-    create_folder_if_not_exists(output_folder)
-    doc = load_document(doc_path)
-    
-    base_name = os.path.splitext(os.path.basename(doc_path))[0]
-    
-    results = {}
-    
-    # Extract tables
-    tables = 
