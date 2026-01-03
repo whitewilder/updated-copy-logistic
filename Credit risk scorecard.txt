@@ -1,438 +1,350 @@
-# ============================================================
-# MoC-A for Missing Risk Drivers (Continuous + WoE Variables)
-# ============================================================
+import os
+import subprocess
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+import json
 
-import numpy as np
-import pandas as pd
-from typing import Dict, List
-
-# ------------------------------------------------------------
-# PD Model (replace with production model if required)
-# ------------------------------------------------------------
-
-def pd_model(X: np.ndarray, beta: np.ndarray, intercept: float) -> np.ndarray:
-    """
-    Logistic PD model
-    """
-    z = intercept + np.dot(X, beta)
-    return 1 / (1 + np.exp(-z))
-
-
-# ------------------------------------------------------------
-# Appropriate Adjustment (AA)
-# ------------------------------------------------------------
-
-def apply_aa(df: pd.DataFrame, var: str) -> float:
-    """
-    Apply AA using central tendency (mean)
-    """
-    aa = df[var].mean(skipna=True)
-    df[f"{var}_AA"] = df[var].fillna(aa)
-    return aa
-
-
-# ------------------------------------------------------------
-# Penalisation (PE) - Continuous Variables
-# ------------------------------------------------------------
-
-def compute_pe_continuous(
-    df: pd.DataFrame,
-    var: str,
-    relation: str
-) -> float:
-    """
-    Penalisation for continuous variables
-
-    relation:
-        'inverse' -> lower X => higher PD
-        'direct'  -> higher X => higher PD
-    """
-    x_aa = df[f"{var}_AA"]
-    x_orig = df[var]
-
-    if relation == "inverse":
-        diff = np.maximum(x_aa - x_orig, 0)
-    elif relation == "direct":
-        diff = np.maximum(x_orig - x_aa, 0)
+def format_date(date: datetime, format_str: str) -> str:
+    """Format date according to specified format."""
+    day = date.strftime('%d')
+    month = date.strftime('%m')
+    year = date.strftime('%Y')
+    
+    if format_str == 'DD-MM-YYYY':
+        return f"{day}-{month}-{year}"
+    elif format_str == 'MM-DD-YYYY':
+        return f"{month}-{day}-{year}"
+    elif format_str == 'YYYY-MM-DD':
+        return f"{year}-{month}-{day}"
+    elif format_str == 'YYYY_MM_DD':
+        return f"{year}_{month}_{day}"
+    elif format_str == 'DD.MM.YYYY':
+        return f"{day}.{month}.{year}"
     else:
-        raise ValueError("relation must be 'inverse' or 'direct'")
+        return f"{day}-{month}-{year}"
 
-    pe = diff[x_orig.notna()].mean()
-    return pe
+def get_git_commits(days: int, author_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Get git commits from the last N days."""
+    since_date = (datetime.now() - timedelta(days=days)).isoformat()
+    
+    # Build git log command
+    cmd = ['git', 'log', f'--since={since_date}', '--pretty=format:{"hash":"%H","authorName":"%an","authorDate":"%ad","message":"%s"}']
+    
+    if author_filter and author_filter != 'All Authors':
+        cmd.extend(['--author', author_filter])
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        
+        # Parse the JSON-like output (note: we need to handle multi-line output properly)
+        commits = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                try:
+                    commit = json.loads(line)
+                    commits.append(commit)
+                except json.JSONDecodeError:
+                    # Handle any malformed lines
+                    continue
+        
+        return commits
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"Git command failed: {e}")
+    except FileNotFoundError:
+        raise Exception("Git is not installed or not in PATH")
 
+def get_git_diff(commit_hash: str, parent_hash: str) -> List[str]:
+    """Get files changed in a commit."""
+    try:
+        result = subprocess.run(
+            ['git', 'diff', '--name-status', parent_hash, commit_hash],
+            capture_output=True, text=True, check=True
+        )
+        
+        files = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    status = parts[0]
+                    file_path = parts[1]
+                    status_char = {'M': 'M', 'A': 'A', 'D': 'D'}.get(status, '?')
+                    file_name = os.path.basename(file_path)
+                    files.append(f"{status_char} {file_name}")
+        
+        return files
+    except subprocess.CalledProcessError:
+        return []
 
-# ------------------------------------------------------------
-# Penalisation (PE) - WoE Variables
-# ------------------------------------------------------------
+def get_git_parent_hash(commit_hash: str) -> str:
+    """Get parent hash of a commit."""
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', f'{commit_hash}^'],
+            capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return ""
 
-def compute_pe_woe(
-    df: pd.DataFrame,
-    var: str,
-    beta: float
-) -> float:
-    """
-    Penalisation for WoE variables based on beta sign
-    """
-    w_aa = df[f"{var}_AA"]
-    w_orig = df[var]
+def format_commit_details(commit: Dict[str, Any]) -> str:
+    """Format commit details for AI prompt."""
+    try:
+        # Get parent hash
+        parent_hash = get_git_parent_hash(commit['hash'])
+        
+        files_changed = []
+        if parent_hash:
+            files_changed = get_git_diff(commit['hash'], parent_hash)
+        
+        files_summary = ""
+        if files_changed:
+            files_display = files_changed[:20]
+            files_summary = f"\n  Files: {', '.join(files_display)}"
+            if len(files_changed) > 20:
+                files_summary += f" +{len(files_changed) - 20} more"
+        
+        # Parse date
+        try:
+            commit_date = datetime.fromisoformat(commit['authorDate'].replace('Z', '+00:00'))
+            date_str = commit_date.strftime('%Y-%m-%d')
+        except (ValueError, KeyError):
+            date_str = "Unknown date"
+        
+        return f"- **{commit['message']}**\n  Author: {commit.get('authorName', 'Unknown')} | Date: {date_str}{files_summary}"
+    
+    except Exception as e:
+        return f"- **{commit['message']}**\n  Author: {commit.get('authorName', 'Unknown')} | Date: Unknown"
 
-    if beta > 0:
-        diff = np.maximum(w_orig - w_aa, 0)
+def generate_sprint_summary(
+    days: int, 
+    author_filter: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    system_prompt: Optional[str] = None
+) -> str:
+    """Generate a sprint summary from git commits."""
+    # Get commits
+    commits = get_git_commits(days, author_filter)
+    
+    if not commits:
+        raise Exception('No commits found for the selected criteria')
+    
+    # Format commit details
+    commit_details = []
+    for commit in commits[:50]:  # Limit to 50 commits
+        commit_details.append(format_commit_details(commit))
+    
+    commits_text = "\n\n".join(commit_details)
+    
+    # Default system prompt
+    if not system_prompt:
+        system_prompt = """You are a helpful assistant that summarizes sprint progress from git commits.
+        Please provide a concise summary of the work done, organized by category or theme.
+        Include:
+        1. Major features or changes implemented
+        2. Bug fixes and improvements
+        3. Overall progress and any blockers or challenges mentioned
+        4. Recommendations for next steps
+        
+        Format the response in markdown with clear sections."""
+    
+    # Prepare AI prompt
+    prompt = f"{system_prompt}\n\nCommits to summarize:\n{commits_text}"
+    
+    # Note: In Python, you would integrate with an AI service like OpenAI, Anthropic, etc.
+    # For now, we'll return a placeholder with the prompt
+    # In a real implementation, you would call your AI model here
+    
+    return f"# Sprint Summary\n\n## AI Analysis would go here\n\n**Prompt sent to AI:**\n\n{prompt[:500]}..."
+
+def save_summary(
+    summary: str,
+    output_folder: str,
+    project_name: str,
+    days: int,
+    author_filter: str,
+    date_format: str = 'DD-MM-YYYY',
+    file_name_pattern: str = '{project}_Sprint_{date}'
+) -> str:
+    """Save summary to file and return the file path."""
+    # Create output folder if it doesn't exist
+    output_path = Path(output_folder)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Format date
+    now = datetime.now()
+    formatted_date = format_date(now, date_format)
+    
+    # Replace placeholders in file name pattern
+    file_name = file_name_pattern
+    file_name = file_name.replace('{project}', project_name)
+    file_name = file_name.replace('{date}', formatted_date)
+    file_name = file_name.replace('{author}', 'all' if author_filter == 'All Authors' else author_filter)
+    file_name = file_name.replace('{days}', str(days))
+    
+    # Ensure .md extension
+    if not file_name.endswith('.md'):
+        file_name += '.md'
+    
+    # Write file
+    file_path = output_path / file_name
+    file_path.write_text(summary, encoding='utf-8')
+    
+    return str(file_path)
+
+def get_unique_authors(days: int) -> List[str]:
+    """Get unique authors from recent commits."""
+    commits = get_git_commits(days)
+    authors = set()
+    
+    for commit in commits:
+        author = commit.get('authorName')
+        if author:
+            authors.add(author)
+    
+    return sorted(list(authors))
+
+def main():
+    """Main function to run the sprint summary generator."""
+    try:
+        # Configuration (in a real app, these would come from config file or UI)
+        config = {
+            'output_folder': os.path.join(Path.home(), 'Documents', 'Sprint Summaries'),
+            'date_format': 'DD-MM-YYYY',
+            'file_name_pattern': '{project}_Sprint_{date}',
+            'ai_model': None,  # Placeholder for AI model selection
+            'system_prompt': None
+        }
+        
+        # Ask for number of days
+        print("Sprint Summary Generator")
+        print("-" * 30)
+        
+        days_input = input("Number of days to include in summary (default: 14): ").strip()
+        if not days_input:
+            days_input = "14"
+        
+        try:
+            days_ago = int(days_input)
+            if days_ago <= 0:
+                raise ValueError
+        except ValueError:
+            print("Please enter a valid positive number")
+            return
+        
+        # Get unique authors
+        print(f"\nFetching commits from the last {days_ago} days...")
+        authors = get_unique_authors(days_ago)
+        
+        if not authors:
+            print(f"No commits found in the last {days_ago} days")
+            return
+        
+        # Show author selection
+        print("\nSelect author (enter number):")
+        print("1. All Authors")
+        for i, author in enumerate(authors, 2):
+            print(f"{i}. {author}")
+        
+        selection = input("\nYour choice: ").strip()
+        
+        try:
+            choice_num = int(selection)
+            if choice_num == 1:
+                selected_author = "All Authors"
+            elif 2 <= choice_num <= len(authors) + 1:
+                selected_author = authors[choice_num - 2]
+            else:
+                print("Invalid selection")
+                return
+        except ValueError:
+            print("Please enter a valid number")
+            return
+        
+        # Get project name (use current directory name)
+        project_name = os.path.basename(os.getcwd()) or "project"
+        
+        # Generate summary
+        print(f"\nGenerating sprint summary for {selected_author}...")
+        summary = generate_sprint_summary(
+            days=days_ago,
+            author_filter=selected_author,
+            ai_model=config['ai_model'],
+            system_prompt=config['system_prompt']
+        )
+        
+        # Save summary
+        print(f"Saving summary to {config['output_folder']}...")
+        file_path = save_summary(
+            summary=summary,
+            output_folder=config['output_folder'],
+            project_name=project_name,
+            days=days_ago,
+            author_filter=selected_author,
+            date_format=config['date_format'],
+            file_name_pattern=config['file_name_pattern']
+        )
+        
+        print(f"\n✅ Sprint summary successfully created!")
+        print(f"📁 Location: {file_path}")
+        
+        # Ask if user wants to open the file
+        open_file = input("\nOpen the summary file? (y/N): ").strip().lower()
+        if open_file == 'y':
+            try:
+                if os.name == 'nt':  # Windows
+                    os.startfile(file_path)
+                elif os.name == 'posix':  # macOS or Linux
+                    subprocess.run(['open', file_path], capture_output=True)
+                else:
+                    print(f"You can open the file at: {file_path}")
+            except Exception as e:
+                print(f"Could not open file automatically: {e}")
+                print(f"Please open manually: {file_path}")
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+# CLI interface
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Generate sprint summary from git commits')
+    parser.add_argument('--days', type=int, default=14, help='Number of days to include')
+    parser.add_argument('--author', type=str, help='Author to filter by')
+    parser.add_argument('--output', type=str, help='Output folder path')
+    parser.add_argument('--project', type=str, help='Project name')
+    parser.add_argument('--interactive', action='store_true', help='Run in interactive mode')
+    
+    args = parser.parse_args()
+    
+    if args.interactive:
+        main()
     else:
-        diff = np.maximum(w_aa - w_orig, 0)
-
-    pe = diff[w_orig.notna()].mean()
-    return pe
-
-
-# ------------------------------------------------------------
-# Apply MoC Adjustment
-# ------------------------------------------------------------
-
-def apply_moc(
-    df: pd.DataFrame,
-    var: str,
-    pe: float,
-    var_type: str,
-    relation: str = None,
-    beta: float = None
-) -> None:
-    """
-    Create MoC-adjusted variable
-    """
-    df[f"{var}_MOC"] = df[f"{var}_AA"]
-
-    if var_type == "continuous":
-        if relation == "inverse":
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
-        elif relation == "direct":
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
-
-    elif var_type == "woe":
-        if beta is None:
-            raise ValueError("beta must be provided for WoE variables")
-
-        if beta > 0:
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
-        else:
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
-
-    else:
-        raise ValueError("var_type must be 'continuous' or 'woe'")
-
-
-# ------------------------------------------------------------
-# Year-wise Average PD (LRA compliant)
-# ------------------------------------------------------------
-
-def yearly_avg_pd(
-    df: pd.DataFrame,
-    features: List[str],
-    beta_vec: np.ndarray,
-    intercept: float
-) -> float:
-    """
-    Average PD per year and then across years
-    """
-    yearly_pd = (
-        df.groupby("year")
-          .apply(lambda x: pd_model(x[features].values, beta_vec, intercept).mean())
-    )
-    return yearly_pd.mean()
-
-
-# ------------------------------------------------------------
-# Unified MoC-A Engine
-# ------------------------------------------------------------
-
-def moc_a_missing_values(
-    df: pd.DataFrame,
-    variable_config: Dict,
-    intercept: float
-) -> Dict:
-    """
-    Unified MoC-A for missing values
-
-    variable_config example:
-    {
-        "x1": {"type": "continuous", "relation": "inverse", "beta": 0.4},
-        "x2": {"type": "woe", "beta": -0.3},
-        "x3": {"type": "continuous", "relation": "direct", "beta": 0.2}
-    }
-    """
-
-    df = df.copy()
-
-    # ---------- AA ----------
-    for var in variable_config:
-        apply_aa(df, var)
-
-    aa_features = [f"{v}_AA" for v in variable_config]
-    beta_vec = np.array([variable_config[v]["beta"] for v in variable_config])
-
-    # ---------- PD_BE ----------
-    pd_be = yearly_avg_pd(df, aa_features, beta_vec, intercept)
-
-    # ---------- PE + MoC ----------
-    for var, cfg in variable_config.items():
-        if cfg["type"] == "continuous":
-            pe = compute_pe_continuous(
-                df,
-                var,
-                cfg["relation"]
+        # Non-interactive mode
+        try:
+            if not args.project:
+                args.project = os.path.basename(os.getcwd()) or "project"
+            
+            if not args.output:
+                args.output = os.path.join(Path.home(), 'Documents', 'Sprint Summaries')
+            
+            summary = generate_sprint_summary(
+                days=args.days,
+                author_filter=args.author
             )
-            apply_moc(
-                df,
-                var,
-                pe,
-                var_type="continuous",
-                relation=cfg["relation"]
+            
+            file_path = save_summary(
+                summary=summary,
+                output_folder=args.output,
+                project_name=args.project,
+                days=args.days,
+                author_filter=args.author or 'All Authors'
             )
-
-        elif cfg["type"] == "woe":
-            pe = compute_pe_woe(
-                df,
-                var,
-                cfg["beta"]
-            )
-            apply_moc(
-                df,
-                var,
-                pe,
-                var_type="woe",
-                beta=cfg["beta"]
-            )
-
-    moc_features = [f"{v}_MOC" for v in variable_config]
-    pd_moc = yearly_avg_pd(df, moc_features, beta_vec, intercept)
-
-    # ---------- Relative MoC ----------
-    moc_ratio = (pd_moc - pd_be) / pd_be
-
-    return {
-        "PD_BE": pd_be,
-        "PD_MoC": pd_moc,
-        "MoC_Relative": moc_ratio
-    }
-
-
-
-
-
-
-# ============================================================
-# MoC-A for Missing Values with 2nd-Order Logit Structure
-# ============================================================
-
-import numpy as np
-import pandas as pd
-from typing import Dict, List
-
-
-# ------------------------------------------------------------
-# 2nd-Order Logistic PD Model
-# ------------------------------------------------------------
-
-def pd_model_second_order(
-    X: np.ndarray,
-    Y: np.ndarray,
-    beta_x: np.ndarray,
-    beta_y: np.ndarray,
-    cons1: float,
-    cons3: float,
-    beta2: float,
-    beta3: float,
-    cons4: float
-) -> np.ndarray:
-    """
-    score = (cons1 + sum(beta_x * X)) * beta2
-          + beta3 * (cons3 + sum(beta_y * Y))
-          + cons4
-    """
-    block_x = cons1 + np.dot(X, beta_x)
-    block_y = cons3 + np.dot(Y, beta_y)
-
-    score = block_x * beta2 + beta3 * block_y + cons4
-    return 1 / (1 + np.exp(-score))
-
-
-# ------------------------------------------------------------
-# Appropriate Adjustment (AA)
-# ------------------------------------------------------------
-
-def apply_aa(df: pd.DataFrame, var: str) -> None:
-    aa = df[var].mean(skipna=True)
-    df[f"{var}_AA"] = df[var].fillna(aa)
-
-
-# ------------------------------------------------------------
-# Penalisation (PE) – Continuous X variables
-# ------------------------------------------------------------
-
-def compute_pe_continuous(df, var, relation):
-    x_aa = df[f"{var}_AA"]
-    x = df[var]
-
-    if relation == "inverse":
-        diff = np.maximum(x_aa - x, 0)
-    else:  # direct
-        diff = np.maximum(x - x_aa, 0)
-
-    return diff[x.notna()].mean()
-
-
-# ------------------------------------------------------------
-# Penalisation (PE) – WoE Y variables
-# ------------------------------------------------------------
-
-def compute_pe_woe(df, var, beta):
-    w_aa = df[f"{var}_AA"]
-    w = df[var]
-
-    if beta > 0:
-        diff = np.maximum(w - w_aa, 0)
-    else:
-        diff = np.maximum(w_aa - w, 0)
-
-    return diff[w.notna()].mean()
-
-
-# ------------------------------------------------------------
-# Apply MoC to Missing Values
-# ------------------------------------------------------------
-
-def apply_moc(df, var, pe, var_type, relation=None, beta=None):
-    df[f"{var}_MOC"] = df[f"{var}_AA"]
-
-    if var_type == "continuous":
-        if relation == "inverse":
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
-        else:
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
-
-    elif var_type == "woe":
-        if beta > 0:
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] + pe
-        else:
-            df.loc[df[var].isna(), f"{var}_MOC"] = df[f"{var}_AA"] - pe
-
-
-# ------------------------------------------------------------
-# Year-wise Average PD (LRA compliant)
-# ------------------------------------------------------------
-
-def yearly_avg_pd_second_order(
-    df,
-    x_cols,
-    y_cols,
-    beta_x,
-    beta_y,
-    cons1,
-    cons3,
-    beta2,
-    beta3,
-    cons4
-):
-    yearly_pd = (
-        df.groupby("year")
-          .apply(
-              lambda d: pd_model_second_order(
-                  d[x_cols].values,
-                  d[y_cols].values,
-                  beta_x,
-                  beta_y,
-                  cons1,
-                  cons3,
-                  beta2,
-                  beta3,
-                  cons4
-              ).mean()
-          )
-    )
-    return yearly_pd.mean()
-
-
-# ------------------------------------------------------------
-# Unified MoC-A Engine (2nd Order)
-# ------------------------------------------------------------
-
-def moc_a_second_order(
-    df: pd.DataFrame,
-    x_config: Dict,
-    y_config: Dict,
-    model_params: Dict
-) -> Dict:
-    df = df.copy()
-
-    # ---------- AA ----------
-    for v in list(x_config) + list(y_config):
-        apply_aa(df, v)
-
-    # ---------- PD_BE ----------
-    pd_be = yearly_avg_pd_second_order(
-        df,
-        [f"{v}_AA" for v in x_config],
-        [f"{v}_AA" for v in y_config],
-        np.array([x_config[v]["beta"] for v in x_config]),
-        np.array([y_config[v]["beta"] for v in y_config]),
-        **model_params
-    )
-
-    # ---------- PE + MoC ----------
-    for v, cfg in x_config.items():
-        pe = compute_pe_continuous(df, v, cfg["relation"])
-        apply_moc(df, v, pe, "continuous", relation=cfg["relation"])
-
-    for v, cfg in y_config.items():
-        pe = compute_pe_woe(df, v, cfg["beta"])
-        apply_moc(df, v, pe, "woe", beta=cfg["beta"])
-
-    # ---------- PD_MoC ----------
-    pd_moc = yearly_avg_pd_second_order(
-        df,
-        [f"{v}_MOC" for v in x_config],
-        [f"{v}_MOC" for v in y_config],
-        np.array([x_config[v]["beta"] for v in x_config]),
-        np.array([y_config[v]["beta"] for v in y_config]),
-        **model_params
-    )
-
-    moc_ratio = (pd_moc - pd_be) / pd_be
-
-    return {
-        "PD_BE": pd_be,
-        "PD_MoC": pd_moc,
-        "MoC_Relative": moc_ratio
-    }
-
-
-
-
-
-
-x_config = {
-    "ltv": {"relation": "direct", "beta": 0.4},
-    "dti": {"relation": "direct", "beta": 0.3}
-}
-
-y_config = {
-    "woe_ir": {"beta": -0.5},
-    "woe_pd": {"beta": 0.6}
-}
-
-model_params = {
-    "cons1": -0.8,
-    "cons3": 0.5,
-    "beta2": 1.2,
-    "beta3": 0.9,
-    "cons4": -1.1
-}
-
-result = moc_a_second_order(
-    df=data,
-    x_config=x_config,
-    y_config=y_config,
-    model_params=model_params
-)
-
-
+            
+            print(f"Summary saved to: {file_path}")
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            exit(1)
