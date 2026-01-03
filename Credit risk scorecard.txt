@@ -342,9 +342,15 @@ if __name__ == "__main__":
                 days=args.days,
                 author_filter=args.author or 'All Authors'
             )
-            
+
+
             print(f"Summary saved to: {file_path}")
-            
+
+
+
         except Exception as e:
             print(f"Error: {e}")
             exit(1)
+
+python sprint_summary.py --interactive
+python sprint_summary.py --days 14 --author "John Doe" --output "/path/to/output" --project "MyProject"
