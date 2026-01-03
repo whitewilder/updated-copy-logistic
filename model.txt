@@ -1,2800 +1,667 @@
-# Word Document Editor & Automation Tool
+To test your extension before packaging it as a VSIX, you can use the VS Code Extension Development Host. Here's a complete guide to setting up a test environment:
 
-A comprehensive Python tool for automating Word document operations including table/image extraction, DataFrame integration, and more.
+## 1. **Setup Complete Test Environment**
 
-## Project Structure
+Create this project structure:
 
 ```
-word_doc_editor/
-├── word_editor/
-│   ├── __init__.py
-│   ├── core.py              # Main WordDocumentEditor class
-│   ├── table_handler.py     # Table operations
-│   ├── image_handler.py     # Image operations
-│   ├── text_handler.py      # Text operations
-│   └── utils.py             # Utility functions
-├── examples/
-│   └── demo.py              # Usage examples
-├── requirements.txt
+sprint-summary-test/
+├── .vscode/
+│   ├── launch.json          # VS Code debug configuration
+│   ├── tasks.json          # Build tasks
+│   └── settings.json       # Workspace settings
+├── src/
+│   ├── extension.py        # Main extension file
+│   ├── git_utils.py        # Git utilities
+│   ├── copilot_integration.py # Copilot integration
+│   └── __init__.py
+├── test-repo/              # Test git repository
+│   ├── README.md
+│   ├── src/
+│   └── .git/
+├── package.json           # Extension manifest
+├── requirements.txt       # Python dependencies
+├── pytest.ini            # Pytest configuration
 └── README.md
 ```
 
-## Installation
+## 2. **Create Minimal Testable Extension**
 
-```bash
-pip install python-docx pandas openpyxl Pillow lxml
+### **package.json** (Test Version)
+```json
+{
+  "name": "sprint-summary-test",
+  "displayName": "Sprint Summary Test",
+  "version": "0.1.0",
+  "description": "Test version of sprint summary generator",
+  "publisher": "test",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./src/extension.py",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sprintSummary.generate",
+        "title": "Test: Generate Sprint Summary",
+        "category": "Test"
+      },
+      {
+        "command": "sprintSummary.testUnit",
+        "title": "Test: Run Unit Tests",
+        "category": "Test"
+      }
+    ]
+  },
+  "extensionDependencies": ["vscode.git"]
+}
 ```
 
----
-
-## Core Module - `word_editor/core.py`
-
+### **src/extension.py** (Simplified Test Version)
 ```python
-"""
-Word Document Editor - Core Module
-===================================
-Main class for Word document automation.
-"""
-
+import vscode
 import os
-import re
-import shutil
+import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any
-from datetime import datetime
-from copy import deepcopy
-import logging
+import subprocess
+import json
 
-from docx import Document
-from docx.shared import Inches, Pt, Cm, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.style import WD_STYLE_TYPE
-from docx.oxml.ns import qn, nsmap
-from docx.oxml import OxmlElement
-import pandas as pd
+# Create extension instance
+ext = vscode.Extension(name="sprint_summary_test", display_name="Sprint Summary Test", version="0.1.0")
 
-from .table_handler import TableHandler
-from .image_handler import ImageHandler
-from .text_handler import TextHandler
-from .utils import (
-    setup_logging,
-    create_backup,
-    get_paragraph_style_level,
-    sanitize_filename
-)
+def log_message(message: str):
+    """Helper to log messages for debugging."""
+    print(f"[Sprint Summary Test] {message}")
+    # Also write to output channel
+    try:
+        channel = vscode.window.create_output_channel("Sprint Summary Test")
+        channel.append_line(message)
+        channel.show()
+    except:
+        pass
 
-
-class WordDocumentEditor:
-    """
-    Comprehensive Word Document Editor for automation tasks.
-    
-    Features:
-    - Extract/replace tables with DataFrame support
-    - Extract/replace images
-    - Header/paragraph extraction
-    - Text search and replace
-    - Template processing
-    - Style management
-    - And more...
-    
-    Example:
-        >>> editor = WordDocumentEditor("document.docx")
-        >>> tables = editor.extract_all_tables()
-        >>> editor.save_tables_to_excel("output.xlsx")
-    """
-    
-    def __init__(
-        self,
-        file_path: Optional[str] = None,
-        create_new: bool = False,
-        auto_backup: bool = True,
-        log_level: int = logging.INFO
-    ):
-        """
-        Initialize the Word Document Editor.
-        
-        Args:
-            file_path: Path to the Word document (.docx)
-            create_new: If True, creates a new document instead of loading
-            auto_backup: If True, creates backup before modifications
-            log_level: Logging level (default: INFO)
-        """
-        self.logger = setup_logging(log_level)
-        self.file_path = file_path
-        self.auto_backup = auto_backup
-        self._backup_path: Optional[str] = None
-        
-        # Document metadata
-        self.metadata: Dict[str, Any] = {}
-        
-        # Extracted content cache
-        self._tables_cache: Optional[List[pd.DataFrame]] = None
-        self._headers_cache: Optional[List[Dict]] = None
-        self._images_cache: Optional[List[Dict]] = None
-        
-        # Initialize document
-        if create_new or file_path is None:
-            self.document = Document()
-            self.logger.info("Created new document")
-        else:
-            self._load_document(file_path)
-        
-        # Initialize handlers
-        self.table_handler = TableHandler(self)
-        self.image_handler = ImageHandler(self)
-        self.text_handler = TextHandler(self)
-    
-    def _load_document(self, file_path: str) -> None:
-        """Load a Word document from file."""
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Document not found: {file_path}")
-        
-        if not file_path.lower().endswith('.docx'):
-            raise ValueError("Only .docx files are supported")
-        
-        self.document = Document(file_path)
-        self.file_path = file_path
-        self._extract_metadata()
-        self.logger.info(f"Loaded document: {file_path}")
-    
-    def _extract_metadata(self) -> None:
-        """Extract document metadata."""
-        core_props = self.document.core_properties
-        self.metadata = {
-            'title': core_props.title,
-            'author': core_props.author,
-            'subject': core_props.subject,
-            'created': core_props.created,
-            'modified': core_props.modified,
-            'last_modified_by': core_props.last_modified_by,
-            'revision': core_props.revision,
-            'category': core_props.category,
-            'keywords': core_props.keywords,
-        }
-    
-    def create_backup(self) -> str:
-        """Create a backup of the current document."""
-        if self.file_path:
-            self._backup_path = create_backup(self.file_path)
-            self.logger.info(f"Backup created: {self._backup_path}")
-            return self._backup_path
-        return ""
-    
-    def restore_backup(self) -> bool:
-        """Restore document from backup."""
-        if self._backup_path and os.path.exists(self._backup_path):
-            shutil.copy2(self._backup_path, self.file_path)
-            self._load_document(self.file_path)
-            self.logger.info("Document restored from backup")
-            return True
-        return False
-    
-    # ==================== TABLE OPERATIONS ====================
-    
-    def extract_all_tables(
-        self,
-        include_headers: bool = True,
-        as_dataframe: bool = True
-    ) -> List[Union[pd.DataFrame, List[List[str]]]]:
-        """
-        Extract all tables from the document.
-        
-        Args:
-            include_headers: Use first row as column headers
-            as_dataframe: Return as pandas DataFrames (default: True)
-        
-        Returns:
-            List of tables as DataFrames or nested lists
-        """
-        return self.table_handler.extract_all_tables(
-            include_headers=include_headers,
-            as_dataframe=as_dataframe
+async def run_git_command(args: list, cwd: str = None):
+    """Run git command and return output."""
+    try:
+        result = subprocess.run(
+            ['git'] + args,
+            capture_output=True,
+            text=True,
+            cwd=cwd or os.getcwd(),
+            timeout=30
         )
-    
-    def extract_table_by_index(
-        self,
-        index: int,
-        include_headers: bool = True
-    ) -> pd.DataFrame:
-        """Extract a specific table by its index."""
-        return self.table_handler.extract_table_by_index(index, include_headers)
-    
-    def extract_table_by_header(
-        self,
-        header_text: str,
-        search_above: bool = True
-    ) -> Optional[pd.DataFrame]:
-        """Extract table found near a specific header/paragraph."""
-        return self.table_handler.extract_table_by_header(header_text, search_above)
-    
-    def save_tables_to_excel(
-        self,
-        output_path: str,
-        table_indices: Optional[List[int]] = None,
-        sheet_names: Optional[List[str]] = None,
-        include_table_titles: bool = True
-    ) -> str:
-        """
-        Save extracted tables to an Excel file.
-        
-        Args:
-            output_path: Output Excel file path
-            table_indices: Specific table indices to save (None = all)
-            sheet_names: Custom sheet names for each table
-            include_table_titles: Try to find and include table titles
-        
-        Returns:
-            Path to the saved Excel file
-        """
-        return self.table_handler.save_tables_to_excel(
-            output_path=output_path,
-            table_indices=table_indices,
-            sheet_names=sheet_names,
-            include_table_titles=include_table_titles
-        )
-    
-    def replace_table(
-        self,
-        table_index: int,
-        dataframe: pd.DataFrame,
-        preserve_style: bool = True,
-        auto_fit: bool = True
-    ) -> bool:
-        """
-        Replace a table with data from a DataFrame.
-        
-        Args:
-            table_index: Index of the table to replace
-            dataframe: DataFrame containing new table data
-            preserve_style: Try to preserve original table styling
-            auto_fit: Auto-fit column widths
-        
-        Returns:
-            True if successful
-        """
-        return self.table_handler.replace_table(
-            table_index=table_index,
-            dataframe=dataframe,
-            preserve_style=preserve_style,
-            auto_fit=auto_fit
-        )
-    
-    def replace_tables_batch(
-        self,
-        replacements: Dict[int, pd.DataFrame],
-        preserve_style: bool = True
-    ) -> Dict[int, bool]:
-        """
-        Replace multiple tables at once.
-        
-        Args:
-            replacements: Dict mapping table_index to DataFrame
-            preserve_style: Preserve original styling
-        
-        Returns:
-            Dict mapping table_index to success status
-        """
-        return self.table_handler.replace_tables_batch(replacements, preserve_style)
-    
-    def insert_table(
-        self,
-        dataframe: pd.DataFrame,
-        position: str = "end",
-        after_paragraph: Optional[int] = None,
-        style: str = "Table Grid",
-        include_index: bool = False
-    ) -> bool:
-        """
-        Insert a new table from DataFrame.
-        
-        Args:
-            dataframe: DataFrame to insert as table
-            position: "start", "end", or "after_paragraph"
-            after_paragraph: Paragraph index (when position="after_paragraph")
-            style: Table style name
-            include_index: Include DataFrame index as first column
-        
-        Returns:
-            True if successful
-        """
-        return self.table_handler.insert_table(
-            dataframe=dataframe,
-            position=position,
-            after_paragraph=after_paragraph,
-            style=style,
-            include_index=include_index
-        )
-    
-    # ==================== HEADER/PARAGRAPH OPERATIONS ====================
-    
-    def extract_headers(
-        self,
-        levels: Optional[List[int]] = None,
-        include_content: bool = False
-    ) -> List[Dict]:
-        """
-        Extract all headers/headings from the document.
-        
-        Args:
-            levels: Specific heading levels to extract (1-9)
-            include_content: Include content under each header
-        
-        Returns:
-            List of dicts with header info: {level, text, paragraph_index, content}
-        """
-        headers = []
-        
-        for i, para in enumerate(self.document.paragraphs):
-            style_name = para.style.name if para.style else ""
-            level = get_paragraph_style_level(style_name)
-            
-            if level is not None:
-                if levels is None or level in levels:
-                    header_info = {
-                        'level': level,
-                        'text': para.text.strip(),
-                        'paragraph_index': i,
-                        'style': style_name
-                    }
-                    
-                    if include_content:
-                        header_info['content'] = self._get_content_under_header(i, level)
-                    
-                    headers.append(header_info)
-        
-        self._headers_cache = headers
-        self.logger.info(f"Extracted {len(headers)} headers")
-        return headers
-    
-    def _get_content_under_header(
-        self,
-        header_index: int,
-        header_level: int
-    ) -> str:
-        """Get all content under a header until the next same/higher level header."""
-        content_parts = []
-        paragraphs = self.document.paragraphs
-        
-        for i in range(header_index + 1, len(paragraphs)):
-            para = paragraphs[i]
-            style_name = para.style.name if para.style else ""
-            level = get_paragraph_style_level(style_name)
-            
-            # Stop at same or higher level header
-            if level is not None and level <= header_level:
-                break
-            
-            if para.text.strip():
-                content_parts.append(para.text.strip())
-        
-        return "\n".join(content_parts)
-    
-    def get_document_structure(self) -> Dict:
-        """
-        Get the full document structure as a hierarchical dict.
-        
-        Returns:
-            Nested dictionary representing document structure
-        """
-        structure = {
-            'title': self.metadata.get('title', 'Untitled'),
-            'headers': self.extract_headers(include_content=True),
-            'table_count': len(self.document.tables),
-            'paragraph_count': len(self.document.paragraphs),
-            'sections': []
-        }
-        return structure
-    
-    def export_headers_to_excel(
-        self,
-        output_path: str,
-        include_content: bool = True
-    ) -> str:
-        """Export headers and their content to Excel."""
-        headers = self.extract_headers(include_content=include_content)
-        df = pd.DataFrame(headers)
-        df.to_excel(output_path, index=False)
-        self.logger.info(f"Headers exported to: {output_path}")
-        return output_path
-    
-    # ==================== IMAGE OPERATIONS ====================
-    
-    def extract_images(
-        self,
-        output_folder: str,
-        prefix: str = "image"
-    ) -> List[Dict]:
-        """
-        Extract all images from the document.
-        
-        Args:
-            output_folder: Folder to save extracted images
-            prefix: Filename prefix for extracted images
-        
-        Returns:
-            List of dicts with image info
-        """
-        return self.image_handler.extract_images(output_folder, prefix)
-    
-    def replace_image(
-        self,
-        image_index: int,
-        new_image_path: str,
-        maintain_size: bool = True
-    ) -> bool:
-        """
-        Replace an image in the document.
-        
-        Args:
-            image_index: Index of the image to replace
-            new_image_path: Path to the new image
-            maintain_size: Keep original image dimensions
-        
-        Returns:
-            True if successful
-        """
-        return self.image_handler.replace_image(
-            image_index, new_image_path, maintain_size
-        )
-    
-    def replace_images_batch(
-        self,
-        image_folder: str,
-        mapping: Optional[Dict[int, str]] = None,
-        sequential: bool = False
-    ) -> Dict[int, bool]:
-        """
-        Replace multiple images from a folder.
-        
-        Args:
-            image_folder: Folder containing replacement images
-            mapping: Dict mapping image_index to filename
-            sequential: If True, replace images sequentially by order
-        
-        Returns:
-            Dict mapping image_index to success status
-        """
-        return self.image_handler.replace_images_batch(
-            image_folder, mapping, sequential
-        )
-    
-    def insert_image(
-        self,
-        image_path: str,
-        width: Optional[float] = None,
-        height: Optional[float] = None,
-        position: str = "end",
-        paragraph_index: Optional[int] = None
-    ) -> bool:
-        """Insert an image into the document."""
-        return self.image_handler.insert_image(
-            image_path, width, height, position, paragraph_index
-        )
-    
-    # ==================== TEXT OPERATIONS ====================
-    
-    def find_and_replace(
-        self,
-        search_text: str,
-        replace_text: str,
-        case_sensitive: bool = True,
-        whole_word: bool = False
-    ) -> int:
-        """
-        Find and replace text throughout the document.
-        
-        Args:
-            search_text: Text to find
-            replace_text: Replacement text
-            case_sensitive: Case-sensitive search
-            whole_word: Match whole words only
-        
-        Returns:
-            Number of replacements made
-        """
-        return self.text_handler.find_and_replace(
-            search_text, replace_text, case_sensitive, whole_word
-        )
-    
-    def find_and_replace_batch(
-        self,
-        replacements: Dict[str, str],
-        case_sensitive: bool = True
-    ) -> Dict[str, int]:
-        """
-        Perform multiple find/replace operations.
-        
-        Args:
-            replacements: Dict mapping search_text to replace_text
-            case_sensitive: Case-sensitive search
-        
-        Returns:
-            Dict mapping search_text to replacement count
-        """
-        return self.text_handler.find_and_replace_batch(
-            replacements, case_sensitive
-        )
-    
-    def replace_placeholders(
-        self,
-        placeholders: Dict[str, str],
-        delimiter: str = "{{"
-    ) -> Dict[str, int]:
-        """
-        Replace template placeholders (e.g., {{name}}) with values.
-        
-        Args:
-            placeholders: Dict mapping placeholder names to values
-            delimiter: Placeholder delimiter (default: "{{" / "}}")
-        
-        Returns:
-            Dict mapping placeholder to replacement count
-        """
-        return self.text_handler.replace_placeholders(placeholders, delimiter)
-    
-    # ==================== SAVE/EXPORT OPERATIONS ====================
-    
-    def save(self, file_path: Optional[str] = None) -> str:
-        """
-        Save the document.
-        
-        Args:
-            file_path: Output path (uses original path if not specified)
-        
-        Returns:
-            Path to saved file
-        """
-        output_path = file_path or self.file_path
-        
-        if not output_path:
-            raise ValueError("No file path specified")
-        
-        if self.auto_backup and os.path.exists(output_path):
-            self.create_backup()
-        
-        # Clear caches
-        self._tables_cache = None
-        self._headers_cache = None
-        self._images_cache = None
-        
-        self.document.save(output_path)
-        self.logger.info(f"Document saved: {output_path}")
-        return output_path
-    
-    def save_as(self, file_path: str) -> str:
-        """Save document to a new file."""
-        return self.save(file_path)
-    
-    def export_to_pdf(self, output_path: str) -> str:
-        """
-        Export document to PDF (requires LibreOffice or MS Word).
-        
-        Note: This requires external tools to be installed.
-        """
-        # Save current document first
-        temp_docx = self.file_path or "temp_export.docx"
-        self.save(temp_docx)
-        
-        try:
-            # Try using LibreOffice
-            import subprocess
-            subprocess.run([
-                'libreoffice', '--headless', '--convert-to', 'pdf',
-                '--outdir', os.path.dirname(output_path) or '.',
-                temp_docx
-            ], check=True)
-            self.logger.info(f"Exported to PDF: {output_path}")
-            return output_path
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            self.logger.error("PDF export requires LibreOffice installed")
-            raise
-    
-    def get_summary(self) -> Dict:
-        """Get a summary of the document."""
-        return {
-            'file_path': self.file_path,
-            'metadata': self.metadata,
-            'paragraphs': len(self.document.paragraphs),
-            'tables': len(self.document.tables),
-            'sections': len(self.document.sections),
-            'headers': len(self.extract_headers()) if not self._headers_cache else len(self._headers_cache),
-        }
-    
-    def __repr__(self) -> str:
-        return f"WordDocumentEditor('{self.file_path}')"
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None:
-            self.save()
-        return False
-```
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
+    except Exception as e:
+        log_message(f"Git command failed: {e}")
+        return None, str(e), 1
 
----
-
-## Table Handler - `word_editor/table_handler.py`
-
-```python
-"""
-Table Handler Module
-====================
-Handles all table-related operations for Word documents.
-"""
-
-import re
-from typing import Dict, List, Optional, Tuple, Union, Any
-from copy import deepcopy
-
-from docx import Document
-from docx.table import Table, _Cell
-from docx.shared import Inches, Pt, Cm
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-from docx.enum.table import WD_TABLE_ALIGNMENT
-import pandas as pd
-
-
-class TableHandler:
-    """Handles table extraction, modification, and insertion."""
+async def get_test_commits():
+    """Get test commits without filtering."""
+    log_message("Getting test commits...")
     
-    def __init__(self, editor):
-        """
-        Initialize TableHandler.
-        
-        Args:
-            editor: Parent WordDocumentEditor instance
-        """
-        self.editor = editor
-        self.document = editor.document
-        self.logger = editor.logger
+    # Try to get last 5 commits
+    output, error, code = await run_git_command([
+        'log', '--oneline', '-5', '--pretty=format:{"hash":"%H","author":"%an","date":"%ad","message":"%s"}'
+    ])
     
-    @property
-    def tables(self) -> List[Table]:
-        """Get all tables in the document."""
-        return self.document.tables
+    if code != 0 or not output:
+        log_message(f"No commits found or error: {error}")
+        return []
     
-    @property
-    def table_count(self) -> int:
-        """Get the number of tables in the document."""
-        return len(self.tables)
-    
-    def extract_all_tables(
-        self,
-        include_headers: bool = True,
-        as_dataframe: bool = True
-    ) -> List[Union[pd.DataFrame, List[List[str]]]]:
-        """
-        Extract all tables from the document.
-        
-        Args:
-            include_headers: Use first row as column headers
-            as_dataframe: Return as pandas DataFrames
-        
-        Returns:
-            List of tables as DataFrames or nested lists
-        """
-        extracted_tables = []
-        
-        for i, table in enumerate(self.tables):
+    # Parse commits
+    commits = []
+    for line in output.split('\n'):
+        if line:
             try:
-                table_data = self._extract_table_data(table)
-                
-                if as_dataframe:
-                    if include_headers and len(table_data) > 0:
-                        headers = table_data[0]
-                        # Handle duplicate headers
-                        headers = self._make_unique_headers(headers)
-                        df = pd.DataFrame(table_data[1:], columns=headers)
-                    else:
-                        df = pd.DataFrame(table_data)
-                    extracted_tables.append(df)
-                else:
-                    extracted_tables.append(table_data)
-                    
-            except Exception as e:
-                self.logger.error(f"Error extracting table {i}: {e}")
-                if as_dataframe:
-                    extracted_tables.append(pd.DataFrame())
-                else:
-                    extracted_tables.append([])
-        
-        self.logger.info(f"Extracted {len(extracted_tables)} tables")
-        return extracted_tables
+                # Clean JSON
+                line = line.replace('\\"', "'").replace('"', '\\"')
+                commit = json.loads(line)
+                commits.append(commit)
+            except json.JSONDecodeError as e:
+                log_message(f"Failed to parse commit: {e}")
     
-    def _extract_table_data(self, table: Table) -> List[List[str]]:
-        """Extract raw data from a table."""
-        data = []
+    log_message(f"Found {len(commits)} commits")
+    return commits
+
+async def generate_test_summary():
+    """Generate a simple test summary."""
+    try:
+        log_message("Starting test summary generation...")
         
-        for row in table.rows:
-            row_data = []
-            for cell in row.cells:
-                # Handle merged cells
-                cell_text = cell.text.strip()
-                row_data.append(cell_text)
-            data.append(row_data)
-        
-        return data
-    
-    def _make_unique_headers(self, headers: List[str]) -> List[str]:
-        """Make header names unique by appending numbers to duplicates."""
-        seen = {}
-        unique_headers = []
-        
-        for header in headers:
-            if not header:
-                header = "Column"
-            
-            if header in seen:
-                seen[header] += 1
-                unique_headers.append(f"{header}_{seen[header]}")
-            else:
-                seen[header] = 0
-                unique_headers.append(header)
-        
-        return unique_headers
-    
-    def extract_table_by_index(
-        self,
-        index: int,
-        include_headers: bool = True
-    ) -> pd.DataFrame:
-        """
-        Extract a specific table by its index.
-        
-        Args:
-            index: Table index (0-based)
-            include_headers: Use first row as column headers
-        
-        Returns:
-            DataFrame containing table data
-        """
-        if index < 0 or index >= len(self.tables):
-            raise IndexError(f"Table index {index} out of range (0-{len(self.tables)-1})")
-        
-        table = self.tables[index]
-        table_data = self._extract_table_data(table)
-        
-        if include_headers and len(table_data) > 0:
-            headers = self._make_unique_headers(table_data[0])
-            return pd.DataFrame(table_data[1:], columns=headers)
-        
-        return pd.DataFrame(table_data)
-    
-    def extract_table_by_header(
-        self,
-        header_text: str,
-        search_above: bool = True,
-        max_distance: int = 3
-    ) -> Optional[pd.DataFrame]:
-        """
-        Extract table found near a specific header/paragraph.
-        
-        Args:
-            header_text: Text to search for
-            search_above: Search for header above the table
-            max_distance: Maximum paragraphs between header and table
-        
-        Returns:
-            DataFrame if table found, None otherwise
-        """
-        # Find paragraphs containing the header text
-        target_paragraphs = []
-        for i, para in enumerate(self.document.paragraphs):
-            if header_text.lower() in para.text.lower():
-                target_paragraphs.append(i)
-        
-        if not target_paragraphs:
-            self.logger.warning(f"Header '{header_text}' not found")
-            return None
-        
-        # Find tables in the document with their positions
-        table_positions = self._get_table_positions()
-        
-        for target_idx in target_paragraphs:
-            for table_idx, table_pos in table_positions.items():
-                # Check if table is close to the header
-                distance = table_pos - target_idx if search_above else target_idx - table_pos
-                if 0 < distance <= max_distance:
-                    return self.extract_table_by_index(table_idx)
-        
-        self.logger.warning(f"No table found near header '{header_text}'")
-        return None
-    
-    def _get_table_positions(self) -> Dict[int, int]:
-        """
-        Get approximate paragraph positions of tables.
-        
-        Returns:
-            Dict mapping table_index to approximate paragraph position
-        """
-        positions = {}
-        para_count = 0
-        table_idx = 0
-        
-        for element in self.document.element.body:
-            if element.tag.endswith('p'):
-                para_count += 1
-            elif element.tag.endswith('tbl'):
-                positions[table_idx] = para_count
-                table_idx += 1
-        
-        return positions
-    
-    def save_tables_to_excel(
-        self,
-        output_path: str,
-        table_indices: Optional[List[int]] = None,
-        sheet_names: Optional[List[str]] = None,
-        include_table_titles: bool = True
-    ) -> str:
-        """
-        Save extracted tables to an Excel file.
-        
-        Args:
-            output_path: Output Excel file path
-            table_indices: Specific table indices to save (None = all)
-            sheet_names: Custom sheet names for each table
-            include_table_titles: Try to include table titles
-        
-        Returns:
-            Path to the saved Excel file
-        """
-        tables = self.extract_all_tables()
-        
-        if table_indices:
-            tables = [tables[i] for i in table_indices if i < len(tables)]
-        
-        if not tables:
-            self.logger.warning("No tables to export")
-            return ""
-        
-        # Generate sheet names if not provided
-        if sheet_names is None:
-            if include_table_titles:
-                sheet_names = self._generate_table_titles(
-                    table_indices or list(range(len(tables)))
-                )
-            else:
-                sheet_names = [f"Table_{i+1}" for i in range(len(tables))]
-        
-        # Truncate and sanitize sheet names (Excel limit: 31 chars)
-        sheet_names = [
-            self._sanitize_sheet_name(name)[:31] 
-            for name in sheet_names
-        ]
-        
-        # Handle duplicate sheet names
-        sheet_names = self._make_unique_sheet_names(sheet_names)
-        
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            for i, (df, sheet_name) in enumerate(zip(tables, sheet_names)):
-                if not df.empty:
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
-        self.logger.info(f"Tables saved to: {output_path}")
-        return output_path
-    
-    def _generate_table_titles(self, indices: List[int]) -> List[str]:
-        """Generate table titles from preceding paragraphs."""
-        titles = []
-        positions = self._get_table_positions()
-        
-        for idx in indices:
-            if idx in positions:
-                para_idx = positions[idx]
-                # Look for title in preceding paragraphs
-                title = None
-                for i in range(para_idx - 1, max(para_idx - 3, -1), -1):
-                    if i >= 0 and i < len(self.document.paragraphs):
-                        para = self.document.paragraphs[i]
-                        if para.text.strip():
-                            title = para.text.strip()[:50]
-                            break
-                titles.append(title or f"Table_{idx + 1}")
-            else:
-                titles.append(f"Table_{idx + 1}")
-        
-        return titles
-    
-    def _sanitize_sheet_name(self, name: str) -> str:
-        """Sanitize sheet name for Excel compatibility."""
-        # Remove invalid characters
-        invalid_chars = r'[]:*?/\\'
-        for char in invalid_chars:
-            name = name.replace(char, '_')
-        return name.strip()
-    
-    def _make_unique_sheet_names(self, names: List[str]) -> List[str]:
-        """Make sheet names unique."""
-        seen = {}
-        unique_names = []
-        
-        for name in names:
-            if name in seen:
-                seen[name] += 1
-                unique_names.append(f"{name[:28]}_{seen[name]}")
-            else:
-                seen[name] = 0
-                unique_names.append(name)
-        
-        return unique_names
-    
-    def replace_table(
-        self,
-        table_index: int,
-        dataframe: pd.DataFrame,
-        preserve_style: bool = True,
-        auto_fit: bool = True
-    ) -> bool:
-        """
-        Replace a table with data from a DataFrame.
-        
-        Args:
-            table_index: Index of the table to replace
-            dataframe: DataFrame containing new table data
-            preserve_style: Try to preserve original table styling
-            auto_fit: Auto-fit column widths
-        
-        Returns:
-            True if successful
-        """
-        if table_index < 0 or table_index >= len(self.tables):
-            raise IndexError(f"Table index {table_index} out of range")
-        
-        table = self.tables[table_index]
-        
-        # Store original style info if preserving
-        style_info = self._extract_table_style(table) if preserve_style else None
-        
-        # Clear existing rows (keep structure)
-        self._clear_table(table)
-        
-        # Add header row
-        headers = list(dataframe.columns)
-        
-        # Ensure table has enough rows and columns
-        needed_rows = len(dataframe) + 1  # +1 for header
-        needed_cols = len(headers)
-        
-        self._resize_table(table, needed_rows, needed_cols)
-        
-        # Fill header row
-        for j, header in enumerate(headers):
-            cell = table.rows[0].cells[j]
-            cell.text = str(header)
-            if style_info:
-                self._apply_cell_style(cell, style_info.get('header_style', {}))
-        
-        # Fill data rows
-        for i, (_, row) in enumerate(dataframe.iterrows(), start=1):
-            for j, value in enumerate(row):
-                cell = table.rows[i].cells[j]
-                cell.text = str(value) if pd.notna(value) else ""
-                if style_info:
-                    self._apply_cell_style(cell, style_info.get('cell_style', {}))
-        
-        # Apply overall table style
-        if style_info and 'table_style' in style_info:
-            table.style = style_info['table_style']
-        
-        self.logger.info(f"Replaced table {table_index} with DataFrame ({len(dataframe)} rows)")
-        return True
-    
-    def _extract_table_style(self, table: Table) -> Dict:
-        """Extract styling information from a table."""
-        style_info = {
-            'table_style': table.style.name if table.style else None,
-            'header_style': {},
-            'cell_style': {}
-        }
-        
-        # Extract header style from first row if exists
-        if table.rows:
-            first_row = table.rows[0]
-            if first_row.cells:
-                first_cell = first_row.cells[0]
-                if first_cell.paragraphs:
-                    para = first_cell.paragraphs[0]
-                    if para.runs:
-                        run = para.runs[0]
-                        style_info['header_style'] = {
-                            'bold': run.bold,
-                            'font_size': run.font.size,
-                            'font_name': run.font.name
-                        }
-        
-        return style_info
-    
-    def _clear_table(self, table: Table) -> None:
-        """Clear all content from a table while keeping structure."""
-        for row in table.rows:
-            for cell in row.cells:
-                cell.text = ""
-    
-    def _resize_table(
-        self,
-        table: Table,
-        rows: int,
-        cols: int
-    ) -> None:
-        """Resize table to specified dimensions."""
-        # Add/remove rows
-        current_rows = len(table.rows)
-        
-        if rows > current_rows:
-            for _ in range(rows - current_rows):
-                table.add_row()
-        elif rows < current_rows:
-            # Remove excess rows from the end
-            tbl = table._tbl
-            for _ in range(current_rows - rows):
-                tr = tbl.tr_lst[-1]
-                tbl.remove(tr)
-        
-        # Handle columns (more complex due to Word's table structure)
-        current_cols = len(table.columns)
-        
-        if cols > current_cols:
-            for row in table.rows:
-                for _ in range(cols - current_cols):
-                    # Add cell to row
-                    tc = row._tr.add_tc()
-        elif cols < current_cols:
-            # Removing columns is complex; log warning
-            if cols < current_cols:
-                self.logger.warning(
-                    f"Cannot reduce columns from {current_cols} to {cols}. "
-                    "Extra columns will remain."
-                )
-    
-    def _apply_cell_style(self, cell: _Cell, style: Dict) -> None:
-        """Apply styling to a cell."""
-        if not cell.paragraphs:
+        # Get workspace info
+        workspace_folders = vscode.workspace.workspace_folders
+        if not workspace_folders:
+            await vscode.window.show_error_message("No workspace folder open")
             return
         
-        para = cell.paragraphs[0]
-        
-        if not para.runs:
-            para.add_run(cell.text)
-            cell.paragraphs[0].runs[0].text = para.text if para.runs else ""
-        
-        if para.runs:
-            run = para.runs[0]
-            if style.get('bold') is not None:
-                run.bold = style['bold']
-            if style.get('font_size'):
-                run.font.size = style['font_size']
-            if style.get('font_name'):
-                run.font.name = style['font_name']
-    
-    def replace_tables_batch(
-        self,
-        replacements: Dict[int, pd.DataFrame],
-        preserve_style: bool = True
-    ) -> Dict[int, bool]:
-        """
-        Replace multiple tables at once.
-        
-        Args:
-            replacements: Dict mapping table_index to DataFrame
-            preserve_style: Preserve original styling
-        
-        Returns:
-            Dict mapping table_index to success status
-        """
-        results = {}
-        
-        for table_index, dataframe in replacements.items():
-            try:
-                results[table_index] = self.replace_table(
-                    table_index, dataframe, preserve_style
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to replace table {table_index}: {e}")
-                results[table_index] = False
-        
-        return results
-    
-    def insert_table(
-        self,
-        dataframe: pd.DataFrame,
-        position: str = "end",
-        after_paragraph: Optional[int] = None,
-        style: str = "Table Grid",
-        include_index: bool = False
-    ) -> bool:
-        """
-        Insert a new table from DataFrame.
-        
-        Args:
-            dataframe: DataFrame to insert as table
-            position: "start", "end", or "after_paragraph"
-            after_paragraph: Paragraph index (when position="after_paragraph")
-            style: Table style name
-            include_index: Include DataFrame index as first column
-        
-        Returns:
-            True if successful
-        """
-        if include_index:
-            dataframe = dataframe.reset_index()
-        
-        rows = len(dataframe) + 1  # +1 for header
-        cols = len(dataframe.columns)
-        
-        # Create table
-        if position == "end":
-            table = self.document.add_table(rows=rows, cols=cols)
-        elif position == "start":
-            # Insert at start is complex; add at end and move
-            table = self.document.add_table(rows=rows, cols=cols)
-            # Move to start (implementation depends on needs)
-        elif position == "after_paragraph" and after_paragraph is not None:
-            # Insert after specific paragraph
-            para = self.document.paragraphs[after_paragraph]
-            table = self.document.add_table(rows=rows, cols=cols)
-            # Note: Proper positioning requires XML manipulation
-            self.logger.warning(
-                "Position 'after_paragraph' adds to end. "
-                "Use XML manipulation for precise positioning."
-            )
-        else:
-            table = self.document.add_table(rows=rows, cols=cols)
-        
-        # Set style
-        try:
-            table.style = style
-        except KeyError:
-            self.logger.warning(f"Style '{style}' not found. Using default.")
-        
-        # Fill header row
-        headers = list(dataframe.columns)
-        for j, header in enumerate(headers):
-            cell = table.rows[0].cells[j]
-            cell.text = str(header)
-            # Make header bold
-            if cell.paragraphs and cell.paragraphs[0].runs:
-                cell.paragraphs[0].runs[0].bold = True
-        
-        # Fill data rows
-        for i, (_, row) in enumerate(dataframe.iterrows(), start=1):
-            for j, value in enumerate(row):
-                cell = table.rows[i].cells[j]
-                cell.text = str(value) if pd.notna(value) else ""
-        
-        self.logger.info(f"Inserted table with {len(dataframe)} rows")
-        return True
-    
-    def delete_table(self, table_index: int) -> bool:
-        """
-        Delete a table from the document.
-        
-        Args:
-            table_index: Index of the table to delete
-        
-        Returns:
-            True if successful
-        """
-        if table_index < 0 or table_index >= len(self.tables):
-            raise IndexError(f"Table index {table_index} out of range")
-        
-        table = self.tables[table_index]
-        tbl = table._tbl
-        tbl.getparent().remove(tbl)
-        
-        self.logger.info(f"Deleted table {table_index}")
-        return True
-    
-    def get_table_info(self, table_index: int) -> Dict:
-        """Get detailed information about a table."""
-        if table_index < 0 or table_index >= len(self.tables):
-            raise IndexError(f"Table index {table_index} out of range")
-        
-        table = self.tables[table_index]
-        
-        return {
-            'index': table_index,
-            'rows': len(table.rows),
-            'columns': len(table.columns),
-            'style': table.style.name if table.style else None,
-            'alignment': table.alignment,
-        }
-```
-
----
-
-## Image Handler - `word_editor/image_handler.py`
-
-```python
-"""
-Image Handler Module
-====================
-Handles all image-related operations for Word documents.
-"""
-
-import os
-import io
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
-from PIL import Image
-
-from docx import Document
-from docx.shared import Inches, Pt, Cm, Emu
-from docx.oxml.ns import qn
-from docx.parts.image import ImagePart
-
-
-class ImageHandler:
-    """Handles image extraction, replacement, and insertion."""
-    
-    SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}
-    
-    def __init__(self, editor):
-        """
-        Initialize ImageHandler.
-        
-        Args:
-            editor: Parent WordDocumentEditor instance
-        """
-        self.editor = editor
-        self.document = editor.document
-        self.logger = editor.logger
-        self._image_rels: Optional[List[Dict]] = None
-    
-    def _get_image_relationships(self) -> List[Dict]:
-        """Get all image relationships in the document."""
-        images = []
-        
-        for rel_id, rel in self.document.part.rels.items():
-            if "image" in rel.reltype:
-                try:
-                    image_part = rel.target_part
-                    images.append({
-                        'rel_id': rel_id,
-                        'relationship': rel,
-                        'content_type': image_part.content_type,
-                        'blob': image_part.blob,
-                        'partname': str(image_part.partname)
-                    })
-                except Exception as e:
-                    self.logger.warning(f"Could not access image {rel_id}: {e}")
-        
-        self._image_rels = images
-        return images
-    
-    def get_image_count(self) -> int:
-        """Get the number of images in the document."""
-        return len(self._get_image_relationships())
-    
-    def extract_images(
-        self,
-        output_folder: str,
-        prefix: str = "image",
-        format: Optional[str] = None
-    ) -> List[Dict]:
-        """
-        Extract all images from the document.
-        
-        Args:
-            output_folder: Folder to save extracted images
-            prefix: Filename prefix for extracted images
-            format: Convert to format (e.g., 'png', 'jpg'). None keeps original.
-        
-        Returns:
-            List of dicts with image info
-        """
-        os.makedirs(output_folder, exist_ok=True)
-        
-        images = self._get_image_relationships()
-        extracted = []
-        
-        for i, img_info in enumerate(images):
-            try:
-                # Determine file extension
-                content_type = img_info['content_type']
-                ext = self._content_type_to_extension(content_type)
-                
-                if format:
-                    ext = f".{format.lower().lstrip('.')}"
-                
-                filename = f"{prefix}_{i + 1}{ext}"
-                filepath = os.path.join(output_folder, filename)
-                
-                # Save image
-                image_data = img_info['blob']
-                
-                if format:
-                    # Convert format using PIL
-                    image = Image.open(io.BytesIO(image_data))
-                    if format.lower() in ('jpg', 'jpeg'):
-                        # Convert to RGB if necessary (for JPEG)
-                        if image.mode in ('RGBA', 'P'):
-                            image = image.convert('RGB')
-                    image.save(filepath)
-                else:
-                    with open(filepath, 'wb') as f:
-                        f.write(image_data)
-                
-                # Get image dimensions
-                image = Image.open(io.BytesIO(image_data))
-                width, height = image.size
-                
-                extracted.append({
-                    'index': i,
-                    'filename': filename,
-                    'path': filepath,
-                    'width': width,
-                    'height': height,
-                    'format': ext.lstrip('.'),
-                    'content_type': content_type,
-                    'size_bytes': len(image_data)
-                })
-                
-                self.logger.info(f"Extracted: {filename}")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to extract image {i}: {e}")
-                extracted.append({
-                    'index': i,
-                    'error': str(e)
-                })
-        
-        self.logger.info(f"Extracted {len(extracted)} images to: {output_folder}")
-        return extracted
-    
-    def _content_type_to_extension(self, content_type: str) -> str:
-        """Convert MIME content type to file extension."""
-        type_map = {
-            'image/png': '.png',
-            'image/jpeg': '.jpg',
-            'image/gif': '.gif',
-            'image/bmp': '.bmp',
-            'image/tiff': '.tiff',
-            'image/webp': '.webp',
-            'image/x-emf': '.emf',
-            'image/x-wmf': '.wmf',
-        }
-        return type_map.get(content_type, '.png')
-    
-    def replace_image(
-        self,
-        image_index: int,
-        new_image_path: str,
-        maintain_size: bool = True,
-        width: Optional[float] = None,
-        height: Optional[float] = None
-    ) -> bool:
-        """
-        Replace an image in the document.
-        
-        Args:
-            image_index: Index of the image to replace
-            new_image_path: Path to the new image
-            maintain_size: Keep original image dimensions
-            width: New width in inches (if not maintaining size)
-            height: New height in inches (if not maintaining size)
-        
-        Returns:
-            True if successful
-        """
-        if not os.path.exists(new_image_path):
-            raise FileNotFoundError(f"Image not found: {new_image_path}")
-        
-        images = self._get_image_relationships()
-        
-        if image_index < 0 or image_index >= len(images):
-            raise IndexError(f"Image index {image_index} out of range (0-{len(images)-1})")
-        
-        img_info = images[image_index]
-        rel = img_info['relationship']
-        
-        # Get original image size if maintaining
-        original_size = None
-        if maintain_size:
-            original_image = Image.open(io.BytesIO(img_info['blob']))
-            original_size = original_image.size
-        
-        # Read new image
-        with open(new_image_path, 'rb') as f:
-            new_image_data = f.read()
-        
-        # Resize if needed
-        if maintain_size and original_size:
-            new_image = Image.open(io.BytesIO(new_image_data))
-            new_image = new_image.resize(original_size, Image.Resampling.LANCZOS)
-            
-            # Convert back to bytes
-            img_buffer = io.BytesIO()
-            img_format = Path(new_image_path).suffix.lstrip('.').upper()
-            if img_format == 'JPG':
-                img_format = 'JPEG'
-            if new_image.mode == 'RGBA' and img_format == 'JPEG':
-                new_image = new_image.convert('RGB')
-            new_image.save(img_buffer, format=img_format)
-            new_image_data = img_buffer.getvalue()
-        
-        # Replace the image blob in the relationship
-        rel.target_part._blob = new_image_data
-        
-        self.logger.info(f"Replaced image {image_index} with: {new_image_path}")
-        return True
-    
-    def replace_images_batch(
-        self,
-        image_folder: str,
-        mapping: Optional[Dict[int, str]] = None,
-        sequential: bool = False,
-        maintain_size: bool = True
-    ) -> Dict[int, bool]:
-        """
-        Replace multiple images from a folder.
-        
-        Args:
-            image_folder: Folder containing replacement images
-            mapping: Dict mapping image_index to filename
-            sequential: If True, replace images sequentially by sorted filenames
-            maintain_size: Keep original image dimensions
-        
-        Returns:
-            Dict mapping image_index to success status
-        """
-        if not os.path.isdir(image_folder):
-            raise NotADirectoryError(f"Folder not found: {image_folder}")
-        
-        results = {}
-        
-        # Get image files from folder
-        image_files = [
-            f for f in os.listdir(image_folder)
-            if Path(f).suffix.lower() in self.SUPPORTED_FORMATS
-        ]
-        image_files.sort()
-        
-        if not mapping and sequential:
-            # Create sequential mapping
-            mapping = {i: f for i, f in enumerate(image_files)}
-        elif not mapping:
-            self.logger.warning("No mapping provided and sequential=False. Nothing to replace.")
-            return results
-        
-        for image_index, filename in mapping.items():
-            try:
-                image_path = os.path.join(image_folder, filename)
-                results[image_index] = self.replace_image(
-                    image_index, image_path, maintain_size
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to replace image {image_index}: {e}")
-                results[image_index] = False
-        
-        return results
-    
-    def insert_image(
-        self,
-        image_path: str,
-        width: Optional[float] = None,
-        height: Optional[float] = None,
-        position: str = "end",
-        paragraph_index: Optional[int] = None,
-        alignment: str = "center"
-    ) -> bool:
-        """
-        Insert an image into the document.
-        
-        Args:
-            image_path: Path to the image file
-            width: Width in inches (None for original)
-            height: Height in inches (None for original)
-            position: "start", "end", or "after_paragraph"
-            paragraph_index: Paragraph index (when position="after_paragraph")
-            alignment: "left", "center", or "right"
-        
-        Returns:
-            True if successful
-        """
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
-        
-        # Determine width/height
-        img_width = Inches(width) if width else None
-        img_height = Inches(height) if height else None
-        
-        # Add paragraph for image
-        if position == "end":
-            para = self.document.add_paragraph()
-        elif position == "start":
-            # Insert at the beginning
-            para = self.document.paragraphs[0].insert_paragraph_before("")
-        elif position == "after_paragraph" and paragraph_index is not None:
-            if paragraph_index >= len(self.document.paragraphs):
-                para = self.document.add_paragraph()
-            else:
-                para = self.document.paragraphs[paragraph_index + 1].insert_paragraph_before("")
-        else:
-            para = self.document.add_paragraph()
-        
-        # Set alignment
-        alignment_map = {
-            'left': 0,  # WD_ALIGN_PARAGRAPH.LEFT
-            'center': 1,  # WD_ALIGN_PARAGRAPH.CENTER
-            'right': 2,  # WD_ALIGN_PARAGRAPH.RIGHT
-        }
-        para.alignment = alignment_map.get(alignment.lower(), 1)
-        
-        # Add image
-        run = para.add_run()
-        run.add_picture(image_path, width=img_width, height=img_height)
-        
-        self.logger.info(f"Inserted image: {image_path}")
-        return True
-    
-    def extract_charts(
-        self,
-        output_folder: str,
-        prefix: str = "chart"
-    ) -> List[Dict]:
-        """
-        Extract charts from the document.
-        
-        Note: Charts are embedded differently than images.
-        This extracts them as images if possible.
-        
-        Args:
-            output_folder: Folder to save extracted charts
-            prefix: Filename prefix for extracted charts
-        
-        Returns:
-            List of dicts with chart info
-        """
-        # Charts in Word are typically embedded as EMF or other formats
-        # They may also be embedded via relationships
-        
-        os.makedirs(output_folder, exist_ok=True)
-        charts = []
-        
-        # Look for chart parts in the document
-        for rel_id, rel in self.document.part.rels.items():
-            if "chart" in rel.reltype.lower():
-                try:
-                    chart_part = rel.target_part
-                    filename = f"{prefix}_{len(charts) + 1}.xml"
-                    filepath = os.path.join(output_folder, filename)
-                    
-                    with open(filepath, 'wb') as f:
-                        f.write(chart_part.blob)
-                    
-                    charts.append({
-                        'index': len(charts),
-                        'filename': filename,
-                        'path': filepath,
-                        'rel_id': rel_id
-                    })
-                    
-                except Exception as e:
-                    self.logger.warning(f"Could not extract chart {rel_id}: {e}")
-        
-        # Also extract EMF/WMF images which are often charts
-        images = self._get_image_relationships()
-        for i, img_info in enumerate(images):
-            if 'emf' in img_info['content_type'] or 'wmf' in img_info['content_type']:
-                ext = '.emf' if 'emf' in img_info['content_type'] else '.wmf'
-                filename = f"{prefix}_img_{len(charts) + 1}{ext}"
-                filepath = os.path.join(output_folder, filename)
-                
-                with open(filepath, 'wb') as f:
-                    f.write(img_info['blob'])
-                
-                charts.append({
-                    'index': len(charts),
-                    'filename': filename,
-                    'path': filepath,
-                    'type': 'embedded_image',
-                    'image_index': i
-                })
-        
-        self.logger.info(f"Extracted {len(charts)} charts to: {output_folder}")
-        return charts
-    
-    def get_image_info(self, image_index: int) -> Dict:
-        """Get detailed information about an image."""
-        images = self._get_image_relationships()
-        
-        if image_index < 0 or image_index >= len(images):
-            raise IndexError(f"Image index {image_index} out of range")
-        
-        img_info = images[image_index]
-        
-        # Get dimensions
-        image = Image.open(io.BytesIO(img_info['blob']))
-        width, height = image.size
-        
-        return {
-            'index': image_index,
-            'width': width,
-            'height': height,
-            'format': image.format,
-            'mode': image.mode,
-            'content_type': img_info['content_type'],
-            'size_bytes': len(img_info['blob']),
-            'partname': img_info['partname']
-        }
-```
-
----
-
-## Text Handler - `word_editor/text_handler.py`
-
-```python
-"""
-Text Handler Module
-===================
-Handles text-related operations for Word documents.
-"""
-
-import re
-from typing import Dict, List, Optional, Tuple, Union
-
-from docx import Document
-from docx.shared import Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-
-
-class TextHandler:
-    """Handles text search, replace, and manipulation."""
-    
-    def __init__(self, editor):
-        """
-        Initialize TextHandler.
-        
-        Args:
-            editor: Parent WordDocumentEditor instance
-        """
-        self.editor = editor
-        self.document = editor.document
-        self.logger = editor.logger
-    
-    def find_and_replace(
-        self,
-        search_text: str,
-        replace_text: str,
-        case_sensitive: bool = True,
-        whole_word: bool = False,
-        include_tables: bool = True,
-        include_headers: bool = True,
-        include_footers: bool = True
-    ) -> int:
-        """
-        Find and replace text throughout the document.
-        
-        Args:
-            search_text: Text to find
-            replace_text: Replacement text
-            case_sensitive: Case-sensitive search
-            whole_word: Match whole words only
-            include_tables: Search in tables
-            include_headers: Search in headers
-            include_footers: Search in footers
-        
-        Returns:
-            Number of replacements made
-        """
-        count = 0
-        
-        # Build regex pattern
-        pattern = self._build_search_pattern(
-            search_text, case_sensitive, whole_word
+        workspace = workspace_folders[0]
+        workspace_path = workspace.uri.fs_path
+        
+        log_message(f"Workspace path: {workspace_path}")
+        
+        # Check if it's a git repo
+        output, error, code = await run_git_command(['status'], workspace_path)
+        if code != 0:
+            await vscode.window.show_warning_message("Not a git repository. Creating test summary with mock data.")
+            return await create_mock_summary()
+        
+        # Get commits
+        commits = await get_test_commits()
+        
+        if not commits:
+            await vscode.window.show_warning_message("No commits found. Using mock data.")
+            return await create_mock_summary()
+        
+        # Create simple summary
+        summary_lines = ["# Sprint Summary Test", "", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+        summary_lines.append(f"Repository: {os.path.basename(workspace_path)}")
+        summary_lines.append(f"Total commits: {len(commits)}")
+        summary_lines.append("")
+        summary_lines.append("## Recent Commits:")
+        
+        for commit in commits[:10]:  # Show first 10
+            message = commit.get('message', 'No message')
+            author = commit.get('author', 'Unknown')
+            summary_lines.append(f"- {message} ({author})")
+        
+        summary = "\n".join(summary_lines)
+        
+        # Save to temp file
+        temp_dir = Path.home() / ".sprint-summary-test"
+        temp_dir.mkdir(exist_ok=True)
+        
+        temp_file = temp_dir / f"test_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        temp_file.write_text(summary, encoding='utf-8')
+        
+        log_message(f"Summary saved to: {temp_file}")
+        
+        # Show success
+        choice = await vscode.window.show_information_message(
+            f"Test summary generated successfully!\nSaved to: {temp_file}",
+            "Open File",
+            "Show in Explorer",
+            "View Content"
         )
         
-        # Replace in paragraphs
-        count += self._replace_in_paragraphs(pattern, replace_text)
-        
-        # Replace in tables
-        if include_tables:
-            count += self._replace_in_tables(pattern, replace_text)
-        
-        # Replace in headers/footers
-        if include_headers or include_footers:
-            count += self._replace_in_headers_footers(
-                pattern, replace_text, include_headers, include_footers
+        if choice == "Open File":
+            doc = await vscode.workspace.open_text_document(str(temp_file))
+            await vscode.window.show_text_document(doc)
+        elif choice == "Show in Explorer":
+            vscode.env.open_external(vscode.Uri.file(str(temp_dir)))
+        elif choice == "View Content":
+            await vscode.window.show_quick_pick(
+                summary_lines,
+                place_holder="Summary Content",
+                can_pick_many=False
             )
         
-        self.logger.info(f"Replaced '{search_text}' with '{replace_text}' ({count} times)")
-        return count
-    
-    def _build_search_pattern(
-        self,
-        search_text: str,
-        case_sensitive: bool,
-        whole_word: bool
-    ) -> re.Pattern:
-        """Build regex pattern for search."""
-        # Escape special regex characters
-        escaped = re.escape(search_text)
+        return summary
         
-        if whole_word:
-            pattern = rf'\b{escaped}\b'
-        else:
-            pattern = escaped
-        
-        flags = 0 if case_sensitive else re.IGNORECASE
-        return re.compile(pattern, flags)
-    
-    def _replace_in_paragraphs(
-        self,
-        pattern: re.Pattern,
-        replace_text: str
-    ) -> int:
-        """Replace text in document paragraphs."""
-        count = 0
-        
-        for para in self.document.paragraphs:
-            for run in para.runs:
-                if pattern.search(run.text):
-                    original_text = run.text
-                    run.text = pattern.sub(replace_text, run.text)
-                    count += len(pattern.findall(original_text))
-        
-        return count
-    
-    def _replace_in_tables(
-        self,
-        pattern: re.Pattern,
-        replace_text: str
-    ) -> int:
-        """Replace text in document tables."""
-        count = 0
-        
-        for table in self.document.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if pattern.search(run.text):
-                                original_text = run.text
-                                run.text = pattern.sub(replace_text, run.text)
-                                count += len(pattern.findall(original_text))
-        
-        return count
-    
-    def _replace_in_headers_footers(
-        self,
-        pattern: re.Pattern,
-        replace_text: str,
-        include_headers: bool,
-        include_footers: bool
-    ) -> int:
-        """Replace text in headers and footers."""
-        count = 0
-        
-        for section in self.document.sections:
-            # Headers
-            if include_headers:
-                for para in section.header.paragraphs:
-                    for run in para.runs:
-                        if pattern.search(run.text):
-                            original_text = run.text
-                            run.text = pattern.sub(replace_text, run.text)
-                            count += len(pattern.findall(original_text))
-            
-            # Footers
-            if include_footers:
-                for para in section.footer.paragraphs:
-                    for run in para.runs:
-                        if pattern.search(run.text):
-                            original_text = run.text
-                            run.text = pattern.sub(replace_text, run.text)
-                            count += len(pattern.findall(original_text))
-        
-        return count
-    
-    def find_and_replace_batch(
-        self,
-        replacements: Dict[str, str],
-        case_sensitive: bool = True
-    ) -> Dict[str, int]:
-        """
-        Perform multiple find/replace operations.
-        
-        Args:
-            replacements: Dict mapping search_text to replace_text
-            case_sensitive: Case-sensitive search
-        
-        Returns:
-            Dict mapping search_text to replacement count
-        """
-        results = {}
-        
-        for search_text, replace_text in replacements.items():
-            results[search_text] = self.find_and_replace(
-                search_text, replace_text, case_sensitive
-            )
-        
-        return results
-    
-    def replace_placeholders(
-        self,
-        placeholders: Dict[str, str],
-        delimiter: str = "{{"
-    ) -> Dict[str, int]:
-        """
-        Replace template placeholders with values.
-        
-        Args:
-            placeholders: Dict mapping placeholder names to values
-            delimiter: Placeholder delimiter style
-        
-        Returns:
-            Dict mapping placeholder to replacement count
-        
-        Example:
-            >>> editor.replace_placeholders({
-            ...     'name': 'John Doe',
-            ...     'date': '2024-01-15'
-            ... })
-            # Replaces {{name}} with 'John Doe', {{date}} with '2024-01-15'
-        """
-        results = {}
-        
-        # Determine closing delimiter
-        delimiter_map = {
-            '{{': '}}',
-            '<<': '>>',
-            '${': '}',
-            '[[': ']]',
-            '<%': '%>',
-        }
-        close_delim = delimiter_map.get(delimiter, delimiter[::-1])
-        
-        for key, value in placeholders.items():
-            search_text = f"{delimiter}{key}{close_delim}"
-            results[key] = self.find_and_replace(
-                search_text, str(value), case_sensitive=True
-            )
-        
-        return results
-    
-    def find_text(
-        self,
-        search_text: str,
-        case_sensitive: bool = True,
-        whole_word: bool = False
-    ) -> List[Dict]:
-        """
-        Find all occurrences of text in the document.
-        
-        Args:
-            search_text: Text to find
-            case_sensitive: Case-sensitive search
-            whole_word: Match whole words only
-        
-        Returns:
-            List of dicts with location info
-        """
-        pattern = self._build_search_pattern(
-            search_text, case_sensitive, whole_word
-        )
-        
-        occurrences = []
-        
-        # Search paragraphs
-        for i, para in enumerate(self.document.paragraphs):
-            matches = list(pattern.finditer(para.text))
-            for match in matches:
-                occurrences.append({
-                    'location': 'paragraph',
-                    'paragraph_index': i,
-                    'text': match.group(),
-                    'start': match.start(),
-                    'end': match.end(),
-                    'context': para.text
-                })
-        
-        # Search tables
-        for table_idx, table in enumerate(self.document.tables):
-            for row_idx, row in enumerate(table.rows):
-                for cell_idx, cell in enumerate(row.cells):
-                    matches = list(pattern.finditer(cell.text))
-                    for match in matches:
-                        occurrences.append({
-                            'location': 'table',
-                            'table_index': table_idx,
-                            'row': row_idx,
-                            'cell': cell_idx,
-                            'text': match.group(),
-                            'start': match.start(),
-                            'end': match.end(),
-                            'context': cell.text
-                        })
-        
-        self.logger.info(f"Found {len(occurrences)} occurrences of '{search_text}'")
-        return occurrences
-    
-    def add_paragraph(
-        self,
-        text: str,
-        style: Optional[str] = None,
-        position: str = "end",
-        before_paragraph: Optional[int] = None,
-        bold: bool = False,
-        italic: bool = False,
-        font_size: Optional[int] = None,
-        font_name: Optional[str] = None,
-        alignment: str = "left"
-    ) -> bool:
-        """
-        Add a paragraph to the document.
-        
-        Args:
-            text: Paragraph text
-            style: Paragraph style name
-            position: "start", "end", or "before"
-            before_paragraph: Paragraph index (when position="before")
-            bold: Make text bold
-            italic: Make text italic
-            font_size: Font size in points
-            font_name: Font name
-            alignment: "left", "center", "right", "justify"
-        
-        Returns:
-            True if successful
-        """
-        if position == "before" and before_paragraph is not None:
-            para = self.document.paragraphs[before_paragraph].insert_paragraph_before(text)
-        else:
-            para = self.document.add_paragraph(text)
-        
-        # Apply style
-        if style:
-            try:
-                para.style = style
-            except KeyError:
-                self.logger.warning(f"Style '{style}' not found")
-        
-        # Apply alignment
-        alignment_map = {
-            'left': WD_ALIGN_PARAGRAPH.LEFT,
-            'center': WD_ALIGN_PARAGRAPH.CENTER,
-            'right': WD_ALIGN_PARAGRAPH.RIGHT,
-            'justify': WD_ALIGN_PARAGRAPH.JUSTIFY,
-        }
-        para.alignment = alignment_map.get(alignment.lower(), WD_ALIGN_PARAGRAPH.LEFT)
-        
-        # Apply formatting to runs
-        for run in para.runs:
-            if bold:
-                run.bold = True
-            if italic:
-                run.italic = True
-            if font_size:
-                run.font.size = Pt(font_size)
-            if font_name:
-                run.font.name = font_name
-        
-        return True
-    
-    def extract_all_text(
-        self,
-        include_tables: bool = True,
-        include_headers_footers: bool = True
-    ) -> str:
-        """
-        Extract all text from the document.
-        
-        Args:
-            include_tables: Include text from tables
-            include_headers_footers: Include header/footer text
-        
-        Returns:
-            Full document text
-        """
-        text_parts = []
-        
-        # Main content
-        for para in self.document.paragraphs:
-            text_parts.append(para.text)
-        
-        # Tables
-        if include_tables:
-            for table in self.document.tables:
-                for row in table.rows:
-                    row_text = [cell.text for cell in row.cells]
-                    text_parts.append('\t'.join(row_text))
-        
-        # Headers/Footers
-        if include_headers_footers:
-            for section in self.document.sections:
-                for para in section.header.paragraphs:
-                    text_parts.append(f"[Header] {para.text}")
-                for para in section.footer.paragraphs:
-                    text_parts.append(f"[Footer] {para.text}")
-        
-        return '\n'.join(text_parts)
-    
-    def get_word_count(self) -> Dict[str, int]:
-        """Get word count statistics."""
-        text = self.extract_all_text(include_headers_footers=False)
-        words = text.split()
-        
-        return {
-            'total_words': len(words),
-            'total_characters': len(text),
-            'characters_no_spaces': len(text.replace(' ', '').replace('\n', '')),
-            'paragraphs': len(self.document.paragraphs),
-            'lines': text.count('\n') + 1
-        }
-```
-
----
-
-## Utilities - `word_editor/utils.py`
-
-```python
-"""
-Utility Functions
-=================
-Helper functions for the Word Document Editor.
-"""
-
-import os
-import re
-import shutil
-import logging
-from datetime import datetime
-from typing import Optional
-
-
-def setup_logging(level: int = logging.INFO) -> logging.Logger:
-    """
-    Set up logging configuration.
-    
-    Args:
-        level: Logging level
-    
-    Returns:
-        Configured logger
-    """
-    logger = logging.getLogger('WordDocumentEditor')
-    logger.setLevel(level)
-    
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setLevel(level)
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-    
-    return logger
-
-
-def create_backup(file_path: str, backup_folder: Optional[str] = None) -> str:
-    """
-    Create a backup of a file.
-    
-    Args:
-        file_path: Path to the file to backup
-        backup_folder: Folder for backup (default: same as file)
-    
-    Returns:
-        Path to the backup file
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-    
-    # Generate backup filename
-    base_name = os.path.basename(file_path)
-    name, ext = os.path.splitext(base_name)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_name = f"{name}_backup_{timestamp}{ext}"
-    
-    # Determine backup location
-    if backup_folder:
-        os.makedirs(backup_folder, exist_ok=True)
-        backup_path = os.path.join(backup_folder, backup_name)
-    else:
-        backup_path = os.path.join(os.path.dirname(file_path), backup_name)
-    
-    shutil.copy2(file_path, backup_path)
-    return backup_path
-
-
-def get_paragraph_style_level(style_name: str) -> Optional[int]:
-    """
-    Extract heading level from a paragraph style name.
-    
-    Args:
-        style_name: Name of the paragraph style
-    
-    Returns:
-        Heading level (1-9) or None if not a heading
-    """
-    if not style_name:
+    except Exception as e:
+        log_message(f"Error in generate_test_summary: {str(e)}")
+        await vscode.window.show_error_message(f"Test failed: {str(e)}")
         return None
+
+async def create_mock_summary():
+    """Create a mock summary for testing."""
+    mock_summary = """# Sprint Summary Test (Mock Data)
+
+## Overview
+This is a test summary generated with mock data.
+
+## Test Commits
+1. feat: Added new feature module
+2. fix: Resolved issue with data parsing
+3. docs: Updated README documentation
+4. chore: Updated dependencies
+5. test: Added unit tests
+
+## Notes
+- This summary was generated with mock data
+- Real implementation would use actual git commits
+- AI summarization would be added with Copilot integration
+
+## Next Steps
+1. Ensure git repository is initialized
+2. Make some test commits
+3. Run the extension again"""
     
-    # Match various heading style patterns
-    patterns = [
-        r'Heading\s*(\d)',  # "Heading 1", "Heading 2", etc.
-        r'heading\s*(\d)',
-        r'H(\d)',
-        r'Title',
-    ]
+    temp_dir = Path.home() / ".sprint-summary-test"
+    temp_dir.mkdir(exist_ok=True)
     
-    for pattern in patterns:
-        match = re.match(pattern, style_name, re.IGNORECASE)
-        if match:
-            if 'Title' in pattern:
-                return 0  # Title is level 0
-            return int(match.group(1))
+    temp_file = temp_dir / "mock_summary.md"
+    temp_file.write_text(mock_summary, encoding='utf-8')
     
-    return None
+    return mock_summary
 
+@ext.command()
+async def test_generate():
+    """Test command to generate summary."""
+    await generate_test_summary()
 
-def sanitize_filename(filename: str, max_length: int = 255) -> str:
-    """
-    Sanitize a string for use as a filename.
+@ext.command()
+async def test_unit():
+    """Run unit tests."""
+    import sys
+    import subprocess as sp
     
-    Args:
-        filename: Original filename
-        max_length: Maximum length
+    # Run pytest on test directory
+    result = sp.run([sys.executable, "-m", "pytest", "test/", "-v"], 
+                   capture_output=True, text=True)
     
-    Returns:
-        Sanitized filename
-    """
-    # Remove invalid characters
-    invalid_chars = r'[<>:"/\\|?*\x00-\x1f]'
-    sanitized = re.sub(invalid_chars, '_', filename)
+    # Show test results
+    output = result.stdout or result.stderr or "No test output"
     
-    # Remove leading/trailing spaces and dots
-    sanitized = sanitized.strip(' .')
-    
-    # Truncate if necessary
-    if len(sanitized) > max_length:
-        name, ext = os.path.splitext(sanitized)
-        max_name_length = max_length - len(ext)
-        sanitized = name[:max_name_length] + ext
-    
-    return sanitized or "unnamed"
-
-
-def inches_to_cm(inches: float) -> float:
-    """Convert inches to centimeters."""
-    return inches * 2.54
-
-
-def cm_to_inches(cm: float) -> float:
-    """Convert centimeters to inches."""
-    return cm / 2.54
-
-
-def pt_to_px(points: float, dpi: int = 96) -> float:
-    """Convert points to pixels."""
-    return points * dpi / 72
-
-
-def px_to_pt(pixels: float, dpi: int = 96) -> float:
-    """Convert pixels to points."""
-    return pixels * 72 / dpi
-```
-
----
-
-## Package Init - `word_editor/__init__.py`
-
-```python
-"""
-Word Document Editor Package
-============================
-A comprehensive Python tool for automating Word document operations.
-"""
-
-from .core import WordDocumentEditor
-from .table_handler import TableHandler
-from .image_handler import ImageHandler
-from .text_handler import TextHandler
-from .utils import (
-    setup_logging,
-    create_backup,
-    get_paragraph_style_level,
-    sanitize_filename,
-    inches_to_cm,
-    cm_to_inches,
-)
-
-__version__ = '1.0.0'
-__author__ = 'Your Name'
-__all__ = [
-    'WordDocumentEditor',
-    'TableHandler',
-    'ImageHandler',
-    'TextHandler',
-    'setup_logging',
-    'create_backup',
-    'get_paragraph_style_level',
-    'sanitize_filename',
-    'inches_to_cm',
-    'cm_to_inches',
-]
-```
-
----
-
-## Demo/Example Usage - `examples/demo.py`
-
-```python
-"""
-Word Document Editor - Demo Script
-==================================
-Demonstrates the various features of the Word Document Editor.
-"""
-
-import os
-import sys
-from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import pandas as pd
-from word_editor import WordDocumentEditor
-
-
-def demo_extract_tables():
-    """Demo: Extract tables from a Word document."""
-    print("\n" + "="*60)
-    print("DEMO: Extract Tables")
-    print("="*60)
-    
-    # Create editor instance
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Extract all tables
-    tables = editor.extract_all_tables()
-    
-    print(f"Found {len(tables)} tables:")
-    for i, df in enumerate(tables):
-        print(f"\nTable {i + 1}:")
-        print(df.head())
-    
-    # Save tables to Excel
-    output_path = editor.save_tables_to_excel("extracted_tables.xlsx")
-    print(f"\nTables saved to: {output_path}")
-    
-    return editor
-
-
-def demo_replace_tables():
-    """Demo: Replace tables with DataFrame data."""
-    print("\n" + "="*60)
-    print("DEMO: Replace Tables")
-    print("="*60)
-    
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Create new data
-    new_data = pd.DataFrame({
-        'Product': ['Widget A', 'Widget B', 'Widget C'],
-        'Price': [19.99, 29.99, 39.99],
-        'Quantity': [100, 50, 75],
-        'Total': [1999.00, 1499.50, 2999.25]
-    })
-    
-    # Replace first table
-    editor.replace_table(0, new_data)
-    
-    # Save updated document
-    editor.save("updated_document.docx")
-    print("Table replaced and document saved!")
-    
-    return editor
-
-
-def demo_batch_replace():
-    """Demo: Replace multiple tables at once."""
-    print("\n" + "="*60)
-    print("DEMO: Batch Replace Tables")
-    print("="*60)
-    
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Create multiple DataFrames
-    replacements = {
-        0: pd.DataFrame({
-            'Name': ['Alice', 'Bob', 'Charlie'],
-            'Score': [95, 87, 92]
-        }),
-        1: pd.DataFrame({
-            'Quarter': ['Q1', 'Q2', 'Q3', 'Q4'],
-            'Revenue': [100000, 120000, 115000, 145000]
-        })
-    }
-    
-    # Batch replace
-    results = editor.replace_tables_batch(replacements)
-    print(f"Replacement results: {results}")
-    
-    editor.save("batch_updated.docx")
-    return editor
-
-
-def demo_extract_headers():
-    """Demo: Extract document headers/structure."""
-    print("\n" + "="*60)
-    print("DEMO: Extract Headers")
-    print("="*60)
-    
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Extract all headers
-    headers = editor.extract_headers(include_content=True)
-    
-    print(f"Found {len(headers)} headers:")
-    for h in headers:
-        print(f"  Level {h['level']}: {h['text'][:50]}...")
-    
-    # Export to Excel
-    editor.export_headers_to_excel("document_structure.xlsx")
-    
-    return editor
-
-
-def demo_extract_images():
-    """Demo: Extract images from document."""
-    print("\n" + "="*60)
-    print("DEMO: Extract Images")
-    print("="*60)
-    
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Extract images
-    images = editor.extract_images(
-        output_folder="extracted_images",
-        prefix="doc_image"
+    await vscode.window.show_quick_pick(
+        output.split('\n'),
+        place_holder="Test Results",
+        can_pick_many=False
     )
-    
-    print(f"Extracted {len(images)} images:")
-    for img in images:
-        if 'error' not in img:
-            print(f"  - {img['filename']} ({img['width']}x{img['height']})")
-    
-    return editor
 
-
-def demo_replace_images():
-    """Demo: Replace images in document."""
-    print("\n" + "="*60)
-    print("DEMO: Replace Images")
-    print("="*60)
+def activate(context):
+    """Activate the test extension."""
+    log_message("Test extension activated!")
     
-    editor = WordDocumentEditor("sample_document.docx")
+    # Register commands
+    context.subscriptions.extend([
+        vscode.commands.register_command('sprintSummary.generate', test_generate),
+        vscode.commands.register_command('sprintSummary.testUnit', test_unit)
+    ])
     
-    # Replace single image
-    # editor.replace_image(0, "new_image.png", maintain_size=True)
-    
-    # Batch replace from folder
-    results = editor.replace_images_batch(
-        image_folder="replacement_images",
-        sequential=True,
-        maintain_size=True
+    # Create status bar item for easy access
+    status_bar = vscode.window.create_status_bar_item(
+        vscode.StatusBarAlignment.Right, 
+        100
     )
+    status_bar.text = "$(test-view-icon) Test Summary"
+    status_bar.tooltip = "Click to generate test sprint summary"
+    status_bar.command = "sprintSummary.generate"
+    status_bar.show()
+    context.subscriptions.append(status_bar)
     
-    print(f"Replacement results: {results}")
-    
-    editor.save("images_replaced.docx")
-    return editor
-
-
-def demo_find_replace():
-    """Demo: Find and replace text."""
-    print("\n" + "="*60)
-    print("DEMO: Find and Replace")
-    print("="*60)
-    
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Simple find and replace
-    count = editor.find_and_replace(
-        "old company name",
-        "New Company Inc."
+    # Show welcome message
+    vscode.window.show_information_message(
+        "Sprint Summary Test Extension is active! Use command palette or status bar icon."
     )
-    print(f"Replaced {count} occurrences")
-    
-    # Batch replace
-    replacements = {
-        "2023": "2024",
-        "draft": "final",
-        "placeholder": "actual content"
-    }
-    results = editor.find_and_replace_batch(replacements)
-    print(f"Batch results: {results}")
-    
-    editor.save("text_replaced.docx")
-    return editor
 
-
-def demo_template_placeholders():
-    """Demo: Replace template placeholders."""
-    print("\n" + "="*60)
-    print("DEMO: Template Placeholders")
-    print("="*60)
-    
-    editor = WordDocumentEditor("template.docx")
-    
-    # Define placeholder values
-    data = {
-        'company_name': 'Acme Corporation',
-        'date': '2024-01-15',
-        'author': 'John Smith',
-        'project_name': 'Project Alpha',
-        'total_amount': '$50,000.00'
-    }
-    
-    # Replace placeholders ({{key}} format)
-    results = editor.replace_placeholders(data, delimiter="{{")
-    print(f"Placeholder results: {results}")
-    
-    editor.save("filled_template.docx")
-    return editor
-
-
-def demo_create_document():
-    """Demo: Create a new document from scratch."""
-    print("\n" + "="*60)
-    print("DEMO: Create Document")
-    print("="*60)
-    
-    # Create new document
-    editor = WordDocumentEditor(create_new=True)
-    
-    # Add title
-    editor.text_handler.add_paragraph(
-        "Monthly Sales Report",
-        style="Title",
-        alignment="center"
-    )
-    
-    # Add subtitle
-    editor.text_handler.add_paragraph(
-        "January 2024",
-        style="Subtitle",
-        alignment="center"
-    )
-    
-    # Add section header
-    editor.text_handler.add_paragraph(
-        "Executive Summary",
-        style="Heading 1"
-    )
-    
-    # Add content
-    editor.text_handler.add_paragraph(
-        "This report summarizes the sales performance for January 2024. "
-        "Overall, we exceeded our targets by 15%."
-    )
-    
-    # Add table
-    sales_data = pd.DataFrame({
-        'Region': ['North', 'South', 'East', 'West'],
-        'Target': [100000, 80000, 90000, 110000],
-        'Actual': [115000, 85000, 92000, 125000],
-        'Variance': ['15%', '6%', '2%', '14%']
-    })
-    
-    editor.insert_table(sales_data, style="Table Grid")
-    
-    # Save
-    editor.save("new_report.docx")
-    print("New document created: new_report.docx")
-    
-    return editor
-
-
-def demo_document_summary():
-    """Demo: Get document summary."""
-    print("\n" + "="*60)
-    print("DEMO: Document Summary")
-    print("="*60)
-    
-    editor = WordDocumentEditor("sample_document.docx")
-    
-    # Get summary
-    summary = editor.get_summary()
-    print("Document Summary:")
-    for key, value in summary.items():
-        print(f"  {key}: {value}")
-    
-    # Get word count
-    word_count = editor.text_handler.get_word_count()
-    print("\nWord Count:")
-    for key, value in word_count.items():
-        print(f"  {key}: {value}")
-    
-    return editor
-
-
-def demo_context_manager():
-    """Demo: Using context manager for automatic save."""
-    print("\n" + "="*60)
-    print("DEMO: Context Manager")
-    print("="*60)
-    
-    # Using with statement ensures document is saved automatically
-    with WordDocumentEditor("sample_document.docx") as editor:
-        editor.find_and_replace("old", "new")
-        # Changes are automatically saved when exiting the block
-    
-    print("Document automatically saved on exit")
-
-
-def demo_full_workflow():
-    """Demo: Complete workflow example."""
-    print("\n" + "="*60)
-    print("DEMO: Full Workflow")
-    print("="*60)
-    
-    # 1. Open document
-    editor = WordDocumentEditor("quarterly_report.docx", auto_backup=True)
-    print("1. Document opened")
-    
-    # 2. Extract current tables for reference
-    original_tables = editor.extract_all_tables()
-    editor.save_tables_to_excel("original_data.xlsx")
-    print(f"2. Extracted {len(original_tables)} tables")
-    
-    # 3. Get new data (e.g., from database, API, etc.)
-    new_financial_data = pd.DataFrame({
-        'Category': ['Revenue', 'Expenses', 'Profit'],
-        'Q1': [150000, 100000, 50000],
-        'Q2': [165000, 105000, 60000],
-        'Q3': [180000, 110000, 70000],
-        'Q4': [200000, 115000, 85000]
-    })
-    
-    new_employee_data = pd.DataFrame({
-        'Department': ['Sales', 'Engineering', 'Marketing', 'Support'],
-        'Headcount': [25, 40, 15, 20],
-        'Budget': [500000, 800000, 300000, 400000]
-    })
-    
-    # 4. Replace tables with new data
-    editor.replace_tables_batch({
-        0: new_financial_data,
-        1: new_employee_data
-    })
-    print("3. Tables updated with new data")
-    
-    # 5. Update text placeholders
-    editor.replace_placeholders({
-        'quarter': 'Q4 2024',
-        'prepared_by': 'Analytics Team',
-        'date': '2024-01-15'
-    })
-    print("4. Placeholders replaced")
-    
-    # 6. Extract and update images
-    editor.extract_images("backup_images")
-    editor.replace_images_batch(
-        "new_charts",
-        sequential=True,
-        maintain_size=True
-    )
-    print("5. Images updated")
-    
-    # 7. Find and replace company references
-    editor.find_and_replace_batch({
-        'FY2023': 'FY2024',
-        'preliminary': 'final'
-    })
-    print("6. Text updates completed")
-    
-    # 8. Save final document
-    editor.save("quarterly_report_final.docx")
-    print("7. Document saved")
-    
-    # 9. Generate summary
-    summary = editor.get_summary()
-    print(f"\nFinal document summary:")
-    print(f"  - Tables: {summary['tables']}")
-    print(f"  - Paragraphs: {summary['paragraphs']}")
-    
-    return editor
-
-
-def create_sample_document():
-    """Create a sample document for testing."""
-    editor = WordDocumentEditor(create_new=True)
-    
-    # Title
-    editor.text_handler.add_paragraph("Sample Document", style="Title")
-    
-    # Introduction
-    editor.text_handler.add_paragraph("Introduction", style="Heading 1")
-    editor.text_handler.add_paragraph(
-        "This is a sample document with {{placeholder}} values. "
-        "Created in 2023 for testing purposes."
-    )
-    
-    # Table section
-    editor.text_handler.add_paragraph("Data Tables", style="Heading 1")
-    editor.text_handler.add_paragraph("Sales Data", style="Heading 2")
-    
-    df1 = pd.DataFrame({
-        'Product': ['A', 'B', 'C'],
-        'Sales': [100, 200, 150],
-        'Revenue': [1000, 2000, 1500]
-    })
-    editor.insert_table(df1)
-    
-    editor.text_handler.add_paragraph("Employee Data", style="Heading 2")
-    df2 = pd.DataFrame({
-        'Name': ['Alice', 'Bob'],
-        'Department': ['Sales', 'Engineering'],
-        'Years': [5, 3]
-    })
-    editor.insert_table(df2)
-    
-    # Conclusion
-    editor.text_handler.add_paragraph("Conclusion", style="Heading 1")
-    editor.text_handler.add_paragraph(
-        "This document demonstrates the capabilities of the Word Document Editor. "
-        "The old company name will be replaced."
-    )
-    
-    editor.save("sample_document.docx")
-    print("Sample document created: sample_document.docx")
-
+def deactivate():
+    """Deactivate the extension."""
+    log_message("Test extension deactivated")
 
 if __name__ == "__main__":
-    # Create sample document first
-    create_sample_document()
+    ext.run(activate=activate, deactivate=deactivate)
+```
+
+## 3. **.vscode/launch.json** (Debug Configuration)
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Extension",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "${workspaceFolder}/test-repo"  # Open test repo automatically
+            ],
+            "outFiles": ["${workspaceFolder}/**/*.py"]
+        },
+        {
+            "name": "Run Extension Tests",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "--extensionTestsPath=${workspaceFolder}/test"
+            ]
+        }
+    ]
+}
+```
+
+## 4. **.vscode/tasks.json** (Build Tasks)
+```json
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "npm: install",
+            "type": "shell",
+            "command": "npm install",
+            "problemMatcher": []
+        },
+        {
+            "label": "Create Test Git Repo",
+            "type": "shell",
+            "command": "./scripts/setup-test-repo.sh",
+            "problemMatcher": []
+        }
+    ]
+}
+```
+
+## 5. **Create Test Git Repository**
+
+Create a script to set up a test repo:
+
+**scripts/setup-test-repo.sh**
+```bash
+#!/bin/bash
+
+# Create test repository
+mkdir -p test-repo
+cd test-repo
+
+# Initialize git repo
+git init
+
+# Create some files
+echo "# Test Project" > README.md
+mkdir src
+echo "print('Hello World')" > src/main.py
+echo "# Configuration" > config.yaml
+
+# Make some commits
+git add .
+git commit -m "Initial commit: Project setup"
+
+# Make more commits
+echo "# Documentation" >> README.md
+git add README.md
+git commit -m "docs: Update README"
+
+echo "def new_feature():" >> src/main.py
+echo "    return 'New feature'" >> src/main.py
+git add src/main.py
+git commit -m "feat: Add new feature"
+
+echo "bug_fix = True" >> src/main.py
+git add src/main.py
+git commit -m "fix: Resolve bug"
+
+echo "test: true" >> config.yaml
+git add config.yaml
+git commit -m "test: Add test config"
+
+echo "Test repository created with 5 commits"
+git log --oneline
+```
+
+**Make it executable:**
+```bash
+chmod +x scripts/setup-test-repo.sh
+```
+
+## 6. **Create Unit Tests**
+
+**test/test_extension.py**
+```python
+import pytest
+import tempfile
+import os
+from pathlib import Path
+from datetime import datetime
+import subprocess
+import json
+
+from src.extension import format_date, log_message
+
+def test_format_date():
+    """Test date formatting."""
+    test_date = datetime(2024, 1, 15)
     
-    # Run demos
-    print("\n" + "="*60)
-    print("WORD DOCUMENT EDITOR - DEMO")
-    print("="*60)
+    assert format_date(test_date, 'DD-MM-YYYY') == '15-01-2024'
+    assert format_date(test_date, 'MM-DD-YYYY') == '01-15-2024'
+    assert format_date(test_date, 'YYYY-MM-DD') == '2024-01-15'
+    assert format_date(test_date, 'YYYY_MM_DD') == '2024_01_15'
+    assert format_date(test_date, 'DD.MM.YYYY') == '15.01.2024'
+    assert format_date(test_date, 'UNKNOWN') == '15-01-2024'  # Default
+
+def test_log_message(capsys):
+    """Test logging function."""
+    log_message("Test message")
+    captured = capsys.readouterr()
+    assert "Test message" in captured.out
+
+def test_git_command():
+    """Test git command execution."""
+    # Create temp directory and initialize git
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Initialize git repo
+        subprocess.run(['git', 'init'], cwd=tmpdir, capture_output=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], 
+                      cwd=tmpdir, capture_output=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test User'], 
+                      cwd=tmpdir, capture_output=True)
+        
+        # Create and commit a file
+        test_file = Path(tmpdir) / 'test.txt'
+        test_file.write_text('Test content')
+        
+        subprocess.run(['git', 'add', '.'], cwd=tmpdir, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'Test commit'], 
+                      cwd=tmpdir, capture_output=True)
+        
+        # Test getting log
+        result = subprocess.run(
+            ['git', 'log', '--oneline', '-1'],
+            cwd=tmpdir,
+            capture_output=True,
+            text=True
+        )
+        
+        assert result.returncode == 0
+        assert 'Test commit' in result.stdout
+
+@pytest.mark.asyncio
+async def test_mock_summary():
+    """Test mock summary generation."""
+    from src.extension import create_mock_summary
     
-    # Choose which demos to run
-    demos = [
-        ("Extract Tables", demo_extract_tables),
-        ("Document Summary", demo_document_summary),
-        ("Extract Headers", demo_extract_headers),
-        ("Find and Replace", demo_find_replace),
-        ("Create Document", demo_create_document),
+    summary = await create_mock_summary()
+    
+    assert isinstance(summary, str)
+    assert 'Sprint Summary Test' in summary
+    assert 'Mock Data' in summary
+    
+    # Check if file was created
+    test_file = Path.home() / ".sprint-summary-test" / "mock_summary.md"
+    assert test_file.exists()
+    
+    # Cleanup
+    test_file.unlink()
+
+if __name__ == '__main__':
+    pytest.main(['-v'])
+```
+
+## 7. **Installation and Testing Steps**
+
+### **Step 1: Setup the Environment**
+```bash
+# 1. Create project directory
+mkdir sprint-summary-test
+cd sprint-summary-test
+
+# 2. Initialize npm (for VS Code extension)
+npm init -y
+
+# 3. Create virtual environment
+python -m venv venv
+
+# 4. Activate virtual environment
+# On Windows:
+venv\Scripts\activate
+# On Mac/Linux:
+source venv/bin/activate
+
+# 5. Install dependencies
+pip install vscode-python pytest
+
+# 6. Create the project structure
+mkdir -p src test .vscode scripts test-repo
+```
+
+### **Step 2: Copy all the files**
+Copy the files created above into their respective directories.
+
+### **Step 3: Create test repository**
+```bash
+# Run the setup script
+./scripts/setup-test-repo.sh
+```
+
+### **Step 4: Open in VS Code and Debug**
+```bash
+code .
+```
+
+### **Step 5: Start Debugging**
+1. Press `F5` or click "Run and Debug" in VS Code
+2. Select "Run Extension" configuration
+3. A new VS Code window will open (Extension Development Host)
+
+### **Step 6: Test Commands in Development Host**
+In the new VS Code window:
+1. Open Command Palette (`Ctrl+Shift+P`)
+2. Type "Test: Generate Sprint Summary"
+3. Run the command
+4. Check the output in the "Sprint Summary Test" output channel
+
+### **Step 7: Run Unit Tests**
+```bash
+# In terminal with virtual environment activated
+python -m pytest test/ -v
+```
+
+Or from Command Palette: "Test: Run Unit Tests"
+
+## 8. **Testing Workflow**
+
+### **Manual Testing Checklist:**
+```python
+# test_workflow.py - Manual test script
+import os
+import sys
+
+def run_manual_tests():
+    print("=== Manual Testing Checklist ===\n")
+    
+    tests = [
+        ("Extension loads", check_extension_loads),
+        ("Commands registered", check_commands),
+        ("Git integration works", check_git_integration),
+        ("Summary generation", check_summary_generation),
+        ("File creation", check_file_creation),
+        ("Error handling", check_error_handling)
     ]
     
-    for name, func in demos:
+    for test_name, test_func in tests:
+        print(f"Testing: {test_name}")
         try:
-            func()
-        except FileNotFoundError as e:
-            print(f"\nSkipping {name}: {e}")
+            result = test_func()
+            print(f"  ✅ {result}")
         except Exception as e:
-            print(f"\nError in {name}: {e}")
-    
-    print("\n" + "="*60)
-    print("DEMO COMPLETE")
-    print("="*60)
+            print(f"  ❌ Failed: {e}")
+        print()
+
+def check_extension_loads():
+    return "Extension loads in VS Code"
+
+def check_commands():
+    return "Commands appear in command palette"
+
+def check_git_integration():
+    import subprocess
+    result = subprocess.run(['git', '--version'], capture_output=True)
+    if result.returncode == 0:
+        return f"Git available: {result.stdout.decode().strip()}"
+    return "Git not available"
+
+def check_summary_generation():
+    return "Can generate summary from test repo"
+
+def check_file_creation():
+    test_file = os.path.expanduser("~/.sprint-summary-test/test.md")
+    with open(test_file, 'w') as f:
+        f.write("Test")
+    if os.path.exists(test_file):
+        os.remove(test_file)
+        return "Can create files"
+    return "File creation failed"
+
+def check_error_handling():
+    return "Error messages are displayed appropriately"
+
+if __name__ == "__main__":
+    run_manual_tests()
 ```
 
----
+## 9. **Debug Output Channel**
 
-## Requirements - `requirements.txt`
-
-```
-python-docx>=0.8.11
-pandas>=1.5.0
-openpyxl>=3.1.0
-Pillow>=9.0.0
-lxml>=4.9.0
-```
-
----
-
-## Quick Start Guide
+Create a dedicated debug view:
 
 ```python
-# Quick Start Examples
+# src/debug.py
+import vscode
 
-from word_editor import WordDocumentEditor
-import pandas as pd
+class Debugger:
+    def __init__(self):
+        self.channel = None
+    
+    def get_channel(self):
+        if not self.channel:
+            self.channel = vscode.window.create_output_channel("Sprint Summary Debug")
+        return self.channel
+    
+    def log(self, message: str):
+        channel = self.get_channel()
+        channel.append_line(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    
+    def show(self):
+        self.get_channel().show()
+    
+    def clear(self):
+        if self.channel:
+            self.channel.clear()
 
-# ============================================
-# 1. EXTRACT TABLES AND SAVE TO EXCEL
-# ============================================
-editor = WordDocumentEditor("report.docx")
-
-# Extract all tables
-tables = editor.extract_all_tables()
-
-# Save to Excel (each table on separate sheet)
-editor.save_tables_to_excel("extracted_data.xlsx")
-
-
-# ============================================
-# 2. REPLACE TABLE WITH DATAFRAME
-# ============================================
-# Create new data
-new_data = pd.DataFrame({
-    'Month': ['Jan', 'Feb', 'Mar'],
-    'Sales': [10000, 12000, 15000],
-    'Growth': ['10%', '20%', '25%']
-})
-
-# Replace first table (index 0)
-editor.replace_table(0, new_data, preserve_style=True)
-editor.save("updated_report.docx")
-
-
-# ============================================
-# 3. BATCH REPLACE MULTIPLE TABLES
-# ============================================
-replacements = {
-    0: sales_dataframe,
-    1: expenses_dataframe,
-    2: summary_dataframe
-}
-editor.replace_tables_batch(replacements)
-editor.save()
-
-
-# ============================================
-# 4. EXTRACT AND REPLACE IMAGES
-# ============================================
-# Extract all images
-images = editor.extract_images("output_images/")
-
-# Replace images from folder
-editor.replace_images_batch(
-    "new_images/",
-    sequential=True,       # Match by order
-    maintain_size=True     # Keep original dimensions
-)
-editor.save()
-
-
-# ============================================
-# 5. TEMPLATE PROCESSING
-# ============================================
-editor = WordDocumentEditor("template.docx")
-
-# Replace {{placeholders}}
-editor.replace_placeholders({
-    'client_name': 'Acme Corp',
-    'project_date': '2024-01-15',
-    'total_amount': '$50,000'
-})
-
-editor.save("final_document.docx")
-
-
-# ============================================
-# 6. DOCUMENT STRUCTURE ANALYSIS
-# ============================================
-# Get all headers
-headers = editor.extract_headers(include_content=True)
-
-# Get document summary
-summary = editor.get_summary()
-print(f"Tables: {summary['tables']}")
-print(f"Paragraphs: {summary['paragraphs']}")
-
-# Export structure to Excel
-editor.export_headers_to_excel("structure.xlsx")
+debugger = Debugger()
 ```
 
----
+## 10. **Quick Test from Terminal**
 
-This comprehensive solution provides:
+```bash
+# Test the core functionality without VS Code
+python -c "
+from datetime import datetime
+from src.extension import format_date
 
-1. **Table Operations**: Extract, replace, insert, delete tables with DataFrame support
-2. **Image Operations**: Extract, replace, insert images with size control
-3. **Text Operations**: Find/replace, placeholders, paragraph management
-4. **Header Extraction**: Document structure analysis
-5. **Excel Integration**: Save/load data to/from Excel
-6. **Backup System**: Automatic backups before modifications
-7. **Batch Operations**: Process multiple items at once
-8. **Context Manager**: Automatic save on exit
-9. **Logging**: Full operation logging
-10. **Error Handling**: Comprehensive error handling throughout
+# Quick date formatting test
+test_date = datetime(2024, 1, 15)
+print(f'Date formatting test: {format_date(test_date, \"YYYY-MM-DD\")}')
+
+# Test git command execution
+import subprocess
+try:
+    result = subprocess.run(['git', '--version'], capture_output=True, text=True)
+    print(f'Git version: {result.stdout.strip()}')
+except:
+    print('Git not available')
+
+print('\\nBasic tests completed.')
+"
+```
+
+This setup allows you to:
+1. **Test in isolation** without affecting your main VS Code
+2. **Debug easily** with breakpoints and step-through
+3. **Run unit tests** to verify functionality
+4. **See real-time logs** in output channels
+5. **Test with actual git repository**
+6. **Iterate quickly** without packaging
+
+Once you confirm everything works in the development host, you can proceed to package it as a VSIX for distribution.
