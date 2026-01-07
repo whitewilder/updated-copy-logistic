@@ -1,667 +1,587 @@
-To test your extension before packaging it as a VSIX, you can use the VS Code Extension Development Host. Here's a complete guide to setting up a test environment:
+# Simplified AI Batch Processor Extension
 
-## 1. **Setup Complete Test Environment**
-
-Create this project structure:
+## Project Structure
 
 ```
-sprint-summary-test/
-├── .vscode/
-│   ├── launch.json          # VS Code debug configuration
-│   ├── tasks.json          # Build tasks
-│   └── settings.json       # Workspace settings
+ai-batch-processor/
 ├── src/
-│   ├── extension.py        # Main extension file
-│   ├── git_utils.py        # Git utilities
-│   ├── copilot_integration.py # Copilot integration
-│   └── __init__.py
-├── test-repo/              # Test git repository
-│   ├── README.md
-│   ├── src/
-│   └── .git/
-├── package.json           # Extension manifest
-├── requirements.txt       # Python dependencies
-├── pytest.ini            # Pytest configuration
-└── README.md
+│   └── extension.ts
+├── package.json
+├── tsconfig.json
+└── .vscodeignore
 ```
 
-## 2. **Create Minimal Testable Extension**
+## 1. package.json
 
-### **package.json** (Test Version)
 ```json
 {
-  "name": "sprint-summary-test",
-  "displayName": "Sprint Summary Test",
-  "version": "0.1.0",
-  "description": "Test version of sprint summary generator",
-  "publisher": "test",
+  "name": "ai-batch-processor",
+  "displayName": "AI Batch Processor",
+  "description": "Process CSV tasks with AI and generate documents",
+  "version": "1.0.0",
+  "publisher": "your-name",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
-  "main": "./src/extension.py",
+  "main": "./out/extension.js",
+  "activationEvents": [],
   "contributes": {
     "commands": [
       {
-        "command": "sprintSummary.generate",
-        "title": "Test: Generate Sprint Summary",
-        "category": "Test"
+        "command": "aiBatch.processCsv",
+        "title": "AI Batch: Process CSV with AI"
       },
       {
-        "command": "sprintSummary.testUnit",
-        "title": "Test: Run Unit Tests",
-        "category": "Test"
+        "command": "aiBatch.generateDocument",
+        "title": "AI Batch: Generate Document from Results"
+      },
+      {
+        "command": "aiBatch.selectAiModel",
+        "title": "AI Batch: Select AI Model"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AI Batch Processor",
+      "properties": {
+        "aiBatch.aiModel": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred AI model family"
+        },
+        "aiBatch.delayBetweenRequests": {
+          "type": "number",
+          "default": 200,
+          "description": "Delay between AI requests (ms)"
+        }
+      }
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "aiBatch.processCsv",
+          "when": "resourceExtname == .csv",
+          "group": "aiBatch@1"
+        }
+      ]
+    }
   },
-  "extensionDependencies": ["vscode.git"]
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^14.x",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.0.0"
+  }
 }
 ```
 
-### **src/extension.py** (Simplified Test Version)
-```python
-import vscode
-import os
-import asyncio
-from datetime import datetime, timedelta
-from pathlib import Path
-import subprocess
-import json
+## 2. extension.ts
 
-# Create extension instance
-ext = vscode.Extension(name="sprint_summary_test", display_name="Sprint Summary Test", version="0.1.0")
+```typescript
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 
-def log_message(message: str):
-    """Helper to log messages for debugging."""
-    print(f"[Sprint Summary Test] {message}")
-    # Also write to output channel
-    try:
-        channel = vscode.window.create_output_channel("Sprint Summary Test")
-        channel.append_line(message)
-        channel.show()
-    except:
-        pass
+// ============================================================================
+// TYPES
+// ============================================================================
 
-async def run_git_command(args: list, cwd: str = None):
-    """Run git command and return output."""
-    try:
-        result = subprocess.run(
-            ['git'] + args,
-            capture_output=True,
-            text=True,
-            cwd=cwd or os.getcwd(),
-            timeout=30
-        )
-        return result.stdout.strip(), result.stderr.strip(), result.returncode
-    except Exception as e:
-        log_message(f"Git command failed: {e}")
-        return None, str(e), 1
+interface Task {
+    id: number;
+    input: string;
+    context: string;
+    result: string;
+    rawRow: string[];
+}
 
-async def get_test_commits():
-    """Get test commits without filtering."""
-    log_message("Getting test commits...")
+// ============================================================================
+// CSV PARSER - Handles commas, quotes, and newlines in fields
+// ============================================================================
+
+function parseCSVLine(line: string): string[] {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        const nextChar = line[i + 1];
+
+        if (char === '"' && inQuotes && nextChar === '"') {
+            // Escaped quote
+            current += '"';
+            i++;
+        } else if (char === '"') {
+            // Toggle quote mode
+            inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+            // Field separator
+            result.push(current);
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    result.push(current);
+    return result;
+}
+
+function parseCSV(content: string): { header: string[]; tasks: Task[] } {
+    // Split by newlines but handle quoted fields with newlines
+    const rows: string[] = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (const char of content) {
+        if (char === '"') {
+            inQuotes = !inQuotes;
+            current += char;
+        } else if ((char === '\n' || char === '\r') && !inQuotes) {
+            if (current.trim()) {
+                rows.push(current);
+            }
+            current = '';
+        } else if (char !== '\r') {
+            current += char;
+        }
+    }
+    if (current.trim()) {
+        rows.push(current);
+    }
+
+    if (rows.length < 1) {
+        throw new Error('CSV file is empty');
+    }
+
+    const header = parseCSVLine(rows[0]).map(h => h.trim().toLowerCase());
     
-    # Try to get last 5 commits
-    output, error, code = await run_git_command([
-        'log', '--oneline', '-5', '--pretty=format:{"hash":"%H","author":"%an","date":"%ad","message":"%s"}'
-    ])
-    
-    if code != 0 or not output:
-        log_message(f"No commits found or error: {error}")
-        return []
-    
-    # Parse commits
-    commits = []
-    for line in output.split('\n'):
-        if line:
-            try:
-                # Clean JSON
-                line = line.replace('\\"', "'").replace('"', '\\"')
-                commit = json.loads(line)
-                commits.append(commit)
-            except json.JSONDecodeError as e:
-                log_message(f"Failed to parse commit: {e}")
-    
-    log_message(f"Found {len(commits)} commits")
-    return commits
+    // Find column indices
+    const inputIdx = header.findIndex(h => 
+        ['input', 'search', 'query', 'prompt', 'question'].includes(h)
+    );
+    const contextIdx = header.findIndex(h => 
+        ['context', 'background'].includes(h)
+    );
+    const resultIdx = header.findIndex(h => 
+        ['result', 'output', 'answer'].includes(h)
+    );
 
-async def generate_test_summary():
-    """Generate a simple test summary."""
-    try:
-        log_message("Starting test summary generation...")
-        
-        # Get workspace info
-        workspace_folders = vscode.workspace.workspace_folders
-        if not workspace_folders:
-            await vscode.window.show_error_message("No workspace folder open")
-            return
-        
-        workspace = workspace_folders[0]
-        workspace_path = workspace.uri.fs_path
-        
-        log_message(f"Workspace path: {workspace_path}")
-        
-        # Check if it's a git repo
-        output, error, code = await run_git_command(['status'], workspace_path)
-        if code != 0:
-            await vscode.window.show_warning_message("Not a git repository. Creating test summary with mock data.")
-            return await create_mock_summary()
-        
-        # Get commits
-        commits = await get_test_commits()
-        
-        if not commits:
-            await vscode.window.show_warning_message("No commits found. Using mock data.")
-            return await create_mock_summary()
-        
-        # Create simple summary
-        summary_lines = ["# Sprint Summary Test", "", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
-        summary_lines.append(f"Repository: {os.path.basename(workspace_path)}")
-        summary_lines.append(f"Total commits: {len(commits)}")
-        summary_lines.append("")
-        summary_lines.append("## Recent Commits:")
-        
-        for commit in commits[:10]:  # Show first 10
-            message = commit.get('message', 'No message')
-            author = commit.get('author', 'Unknown')
-            summary_lines.append(f"- {message} ({author})")
-        
-        summary = "\n".join(summary_lines)
-        
-        # Save to temp file
-        temp_dir = Path.home() / ".sprint-summary-test"
-        temp_dir.mkdir(exist_ok=True)
-        
-        temp_file = temp_dir / f"test_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        temp_file.write_text(summary, encoding='utf-8')
-        
-        log_message(f"Summary saved to: {temp_file}")
-        
-        # Show success
-        choice = await vscode.window.show_information_message(
-            f"Test summary generated successfully!\nSaved to: {temp_file}",
-            "Open File",
-            "Show in Explorer",
-            "View Content"
-        )
-        
-        if choice == "Open File":
-            doc = await vscode.workspace.open_text_document(str(temp_file))
-            await vscode.window.show_text_document(doc)
-        elif choice == "Show in Explorer":
-            vscode.env.open_external(vscode.Uri.file(str(temp_dir)))
-        elif choice == "View Content":
-            await vscode.window.show_quick_pick(
-                summary_lines,
-                place_holder="Summary Content",
-                can_pick_many=False
-            )
-        
-        return summary
-        
-    except Exception as e:
-        log_message(f"Error in generate_test_summary: {str(e)}")
-        await vscode.window.show_error_message(f"Test failed: {str(e)}")
-        return None
+    if (inputIdx === -1) {
+        throw new Error('CSV must have "input", "search", "query", "prompt", or "question" column');
+    }
 
-async def create_mock_summary():
-    """Create a mock summary for testing."""
-    mock_summary = """# Sprint Summary Test (Mock Data)
+    const tasks: Task[] = [];
+    for (let i = 1; i < rows.length; i++) {
+        const row = parseCSVLine(rows[i]);
+        const input = row[inputIdx]?.trim() || '';
+        
+        if (input) {
+            tasks.push({
+                id: i,
+                input,
+                context: contextIdx !== -1 ? row[contextIdx]?.trim() || '' : '',
+                result: resultIdx !== -1 ? row[resultIdx]?.trim() || '' : '',
+                rawRow: row
+            });
+        }
+    }
 
-## Overview
-This is a test summary generated with mock data.
+    return { header: parseCSVLine(rows[0]), tasks };
+}
 
-## Test Commits
-1. feat: Added new feature module
-2. fix: Resolved issue with data parsing
-3. docs: Updated README documentation
-4. chore: Updated dependencies
-5. test: Added unit tests
+function escapeCSVField(value: string): string {
+    // If field contains comma, quote, or newline, wrap in quotes
+    if (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r')) {
+        return `"${value.replace(/"/g, '""')}"`;
+    }
+    return value;
+}
 
-## Notes
-- This summary was generated with mock data
-- Real implementation would use actual git commits
-- AI summarization would be added with Copilot integration
+function toCSV(header: string[], tasks: Task[]): string {
+    const headerLower = header.map(h => h.trim().toLowerCase());
+    const resultIdx = headerLower.findIndex(h => 
+        ['result', 'output', 'answer'].includes(h)
+    );
 
-## Next Steps
-1. Ensure git repository is initialized
-2. Make some test commits
-3. Run the extension again"""
+    const lines: string[] = [];
     
-    temp_dir = Path.home() / ".sprint-summary-test"
-    temp_dir.mkdir(exist_ok=True)
-    
-    temp_file = temp_dir / "mock_summary.md"
-    temp_file.write_text(mock_summary, encoding='utf-8')
-    
-    return mock_summary
+    // Add result column if not exists
+    const finalHeader = resultIdx === -1 ? [...header, 'result'] : header;
+    lines.push(finalHeader.map(escapeCSVField).join(','));
 
-@ext.command()
-async def test_generate():
-    """Test command to generate summary."""
-    await generate_test_summary()
+    for (const task of tasks) {
+        const row = [...task.rawRow];
+        
+        // Ensure row has enough columns
+        while (row.length < finalHeader.length) {
+            row.push('');
+        }
 
-@ext.command()
-async def test_unit():
-    """Run unit tests."""
-    import sys
-    import subprocess as sp
-    
-    # Run pytest on test directory
-    result = sp.run([sys.executable, "-m", "pytest", "test/", "-v"], 
-                   capture_output=True, text=True)
-    
-    # Show test results
-    output = result.stdout or result.stderr or "No test output"
-    
-    await vscode.window.show_quick_pick(
-        output.split('\n'),
-        place_holder="Test Results",
-        can_pick_many=False
-    )
+        // Set result
+        if (resultIdx !== -1) {
+            row[resultIdx] = task.result;
+        } else {
+            row[row.length - 1] = task.result;
+        }
 
-def activate(context):
-    """Activate the test extension."""
-    log_message("Test extension activated!")
-    
-    # Register commands
-    context.subscriptions.extend([
-        vscode.commands.register_command('sprintSummary.generate', test_generate),
-        vscode.commands.register_command('sprintSummary.testUnit', test_unit)
-    ])
-    
-    # Create status bar item for easy access
-    status_bar = vscode.window.create_status_bar_item(
-        vscode.StatusBarAlignment.Right, 
-        100
-    )
-    status_bar.text = "$(test-view-icon) Test Summary"
-    status_bar.tooltip = "Click to generate test sprint summary"
-    status_bar.command = "sprintSummary.generate"
-    status_bar.show()
-    context.subscriptions.append(status_bar)
-    
-    # Show welcome message
-    vscode.window.show_information_message(
-        "Sprint Summary Test Extension is active! Use command palette or status bar icon."
-    )
+        lines.push(row.map(escapeCSVField).join(','));
+    }
 
-def deactivate():
-    """Deactivate the extension."""
-    log_message("Test extension deactivated")
+    return lines.join('\r\n');
+}
 
-if __name__ == "__main__":
-    ext.run(activate=activate, deactivate=deactivate)
+// ============================================================================
+// AI MODEL MANAGER
+// ============================================================================
+
+async function getAIModel(): Promise<any> {
+    const config = vscode.workspace.getConfiguration('aiBatch');
+    const preferredModel = config.get<string>('aiModel');
+
+    // @ts-ignore
+    let models: any[];
+    if (preferredModel) {
+        // @ts-ignore
+        models = await vscode.lm.selectChatModels({ family: preferredModel });
+    } else {
+        // @ts-ignore
+        models = await vscode.lm.selectChatModels();
+    }
+
+    if (!models || models.length === 0) {
+        throw new Error('No AI models available. Ensure GitHub Copilot is configured.');
+    }
+
+    return models[0];
+}
+
+async function sendAIRequest(model: any, prompt: string): Promise<string> {
+    // @ts-ignore
+    const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+    const response = await model.sendRequest(
+        messages, 
+        {}, 
+        new vscode.CancellationTokenSource().token
+    );
+
+    let result = '';
+    // @ts-ignore
+    for await (const fragment of response.text) {
+        result += fragment;
+    }
+    return result.trim();
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getUniqueFilePath(basePath: string, suffix: string, ext: string): string {
+    const dir = path.dirname(basePath);
+    const base = path.basename(basePath, ext);
+    let outPath = path.join(dir, `${base}${suffix}${ext}`);
+    let count = 1;
+
+    while (fs.existsSync(outPath)) {
+        outPath = path.join(dir, `${base}${suffix}_${count}${ext}`);
+        count++;
+    }
+    return outPath;
+}
+
+// ============================================================================
+// COMMANDS
+// ============================================================================
+
+async function processCsvCommand(uri?: vscode.Uri): Promise<void> {
+    try {
+        // Get file
+        let fileUri: vscode.Uri;
+        if (uri) {
+            fileUri = uri;
+        } else {
+            const uris = await vscode.window.showOpenDialog({
+                canSelectFiles: true,
+                canSelectMany: false,
+                filters: { 'CSV Files': ['csv'] },
+                openLabel: 'Select CSV'
+            });
+            if (!uris || uris.length === 0) return;
+            fileUri = uris[0];
+        }
+
+        // Read and parse CSV
+        const buffer = await vscode.workspace.fs.readFile(fileUri);
+        const content = Buffer.from(buffer).toString('utf8');
+        const { header, tasks } = parseCSV(content);
+
+        if (tasks.length === 0) {
+            vscode.window.showWarningMessage('No tasks found in CSV');
+            return;
+        }
+
+        vscode.window.showInformationMessage(`Found ${tasks.length} tasks`);
+
+        // Optional global context
+        const globalContext = await vscode.window.showInputBox({
+            prompt: 'Enter global context for all tasks (optional)',
+            placeHolder: 'e.g., "You are a helpful assistant..."'
+        }) || '';
+
+        // Get AI model
+        const model = await getAIModel();
+        const config = vscode.workspace.getConfiguration('aiBatch');
+        const delayMs = config.get<number>('delayBetweenRequests') || 200;
+
+        // Process with progress
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Processing CSV',
+            cancellable: true
+        }, async (progress, token) => {
+            for (let i = 0; i < tasks.length; i++) {
+                if (token.isCancellationRequested) {
+                    throw new Error('Cancelled');
+                }
+
+                const task = tasks[i];
+                progress.report({ 
+                    message: `Task ${i + 1}/${tasks.length}`,
+                    increment: 100 / tasks.length 
+                });
+
+                try {
+                    const prompt = globalContext 
+                        ? `Context: ${globalContext}\n\n${task.context ? `Additional Context: ${task.context}\n\n` : ''}Query: ${task.input}`
+                        : `${task.context ? `Context: ${task.context}\n\n` : ''}Query: ${task.input}`;
+                    
+                    task.result = await sendAIRequest(model, prompt);
+                } catch (err) {
+                    task.result = `ERROR: ${err}`;
+                }
+
+                if (i < tasks.length - 1) {
+                    await delay(delayMs);
+                }
+            }
+        });
+
+        // Save results
+        const outputPath = getUniqueFilePath(fileUri.fsPath, '_ai_result', '.csv');
+        const outputContent = toCSV(header, tasks);
+        fs.writeFileSync(outputPath, outputContent, 'utf8');
+
+        vscode.window.showInformationMessage(`Saved: ${path.basename(outputPath)}`);
+
+        // Open result file
+        const doc = await vscode.workspace.openTextDocument(outputPath);
+        await vscode.window.showTextDocument(doc);
+
+    } catch (error) {
+        vscode.window.showErrorMessage(`Error: ${error}`);
+    }
+}
+
+async function generateDocumentCommand(): Promise<void> {
+    try {
+        // Select results file
+        const uris = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectMany: false,
+            filters: { 'CSV Files': ['csv'] },
+            openLabel: 'Select Results CSV'
+        });
+        if (!uris || uris.length === 0) return;
+
+        const buffer = await vscode.workspace.fs.readFile(uris[0]);
+        const content = Buffer.from(buffer).toString('utf8');
+        const { tasks } = parseCSV(content);
+
+        if (tasks.length === 0) {
+            vscode.window.showWarningMessage('No tasks with results found');
+            return;
+        }
+
+        // Get document context
+        const context = await vscode.window.showInputBox({
+            prompt: 'Enter document context/purpose',
+            placeHolder: 'e.g., "Q4 Sales Analysis Report"'
+        });
+        if (!context) return;
+
+        // Select template
+        const template = await vscode.window.showQuickPick([
+            { label: 'Summary', value: 'summary' },
+            { label: 'Detailed Report', value: 'report' },
+            { label: 'Analysis', value: 'analysis' }
+        ], { placeHolder: 'Select document type' });
+        if (!template) return;
+
+        // Build prompt
+        const resultsList = tasks
+            .filter(t => t.result && !t.result.startsWith('ERROR'))
+            .map((t, i) => `${i + 1}. Input: ${t.input}\n   Result: ${t.result}`)
+            .join('\n\n');
+
+        const prompts: Record<string, string> = {
+            summary: `Create an executive summary based on:\n\nContext: ${context}\n\nResults:\n${resultsList}\n\nProvide: Overview, Key Findings, Recommendations.`,
+            report: `Create a detailed report based on:\n\nContext: ${context}\n\nResults:\n${resultsList}\n\nInclude: Introduction, Methodology, Findings, Conclusion.`,
+            analysis: `Analyze these results:\n\nContext: ${context}\n\nResults:\n${resultsList}\n\nProvide: Patterns, Insights, Correlations, Actionable Items.`
+        };
+
+        // Generate document
+        const model = await getAIModel();
+        const document = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Generating Document',
+            cancellable: false
+        }, async () => {
+            return await sendAIRequest(model, prompts[template.value]);
+        });
+
+        // Create final document
+        const finalDoc = `# ${template.label}: ${context}
+
+**Generated:** ${new Date().toLocaleString()}  
+**Source:** ${path.basename(uris[0].fsPath)}  
+**Tasks:** ${tasks.length}
+
+---
+
+${document}
+`;
+
+        // Save
+        const outputPath = getUniqueFilePath(uris[0].fsPath, '_document', '.md');
+        fs.writeFileSync(outputPath, finalDoc, 'utf8');
+
+        vscode.window.showInformationMessage(`Document saved: ${path.basename(outputPath)}`);
+
+        const doc = await vscode.workspace.openTextDocument(outputPath);
+        await vscode.window.showTextDocument(doc);
+
+    } catch (error) {
+        vscode.window.showErrorMessage(`Error: ${error}`);
+    }
+}
+
+async function selectAiModelCommand(): Promise<void> {
+    try {
+        // @ts-ignore
+        const models = await vscode.lm.selectChatModels();
+
+        if (!models || models.length === 0) {
+            vscode.window.showErrorMessage('No AI models available');
+            return;
+        }
+
+        const config = vscode.workspace.getConfiguration('aiBatch');
+        const current = config.get<string>('aiModel') || '';
+
+        const items = [
+            {
+                label: '$(sparkle) Default',
+                description: 'Auto-select best model',
+                value: ''
+            },
+            ...models.map((m: any) => ({
+                label: m.family,
+                description: m.name,
+                value: m.family
+            }))
+        ];
+
+        const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: `Current: ${current || 'Default'}`
+        });
+
+        if (selected) {
+            await config.update('aiModel', selected.value, vscode.ConfigurationTarget.Global);
+            vscode.window.showInformationMessage(`Model set to: ${selected.label}`);
+        }
+    } catch (error) {
+        vscode.window.showErrorMessage(`Error: ${error}`);
+    }
+}
+
+// ============================================================================
+// ACTIVATION
+// ============================================================================
+
+export function activate(context: vscode.ExtensionContext): void {
+    context.subscriptions.push(
+        vscode.commands.registerCommand('aiBatch.processCsv', processCsvCommand),
+        vscode.commands.registerCommand('aiBatch.generateDocument', generateDocumentCommand),
+        vscode.commands.registerCommand('aiBatch.selectAiModel', selectAiModelCommand)
+    );
+
+    console.log('AI Batch Processor activated');
+}
+
+export function deactivate(): void {}
 ```
 
-## 3. **.vscode/launch.json** (Debug Configuration)
+## 3. tsconfig.json
+
 ```json
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Run Extension",
-            "type": "extensionHost",
-            "request": "launch",
-            "args": [
-                "--extensionDevelopmentPath=${workspaceFolder}",
-                "${workspaceFolder}/test-repo"  # Open test repo automatically
-            ],
-            "outFiles": ["${workspaceFolder}/**/*.py"]
-        },
-        {
-            "name": "Run Extension Tests",
-            "type": "extensionHost",
-            "request": "launch",
-            "args": [
-                "--extensionDevelopmentPath=${workspaceFolder}",
-                "--extensionTestsPath=${workspaceFolder}/test"
-            ]
-        }
-    ]
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2020",
+    "outDir": "out",
+    "lib": ["ES2020"],
+    "sourceMap": true,
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "exclude": ["node_modules"]
 }
 ```
 
-## 4. **.vscode/tasks.json** (Build Tasks)
-```json
-{
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "npm: install",
-            "type": "shell",
-            "command": "npm install",
-            "problemMatcher": []
-        },
-        {
-            "label": "Create Test Git Repo",
-            "type": "shell",
-            "command": "./scripts/setup-test-repo.sh",
-            "problemMatcher": []
-        }
-    ]
-}
+## 4. Sample CSV (sample_tasks.csv)
+
+```csv
+id,input,context,result
+1,"What is AI?","Technology overview",
+2,"Explain cloud computing, its benefits, and challenges","Enterprise IT",
+3,"How to ""properly"" handle errors?","Software development",
+4,"Compare React, Vue, and Angular","Frontend frameworks",
+5,"Best practices for API design","Backend development",
 ```
 
-## 5. **Create Test Git Repository**
+## Usage
 
-Create a script to set up a test repo:
+1. **Build:**
+   ```bash
+   npm install
+   npm run compile
+   ```
 
-**scripts/setup-test-repo.sh**
-```bash
-#!/bin/bash
+2. **Test:** Press `F5` in VS Code
 
-# Create test repository
-mkdir -p test-repo
-cd test-repo
+3. **Commands (Ctrl+Shift+P):**
+   - `AI Batch: Process CSV with AI` - Process CSV file
+   - `AI Batch: Generate Document from Results` - Create document from processed CSV
+   - `AI Batch: Select AI Model` - Choose AI model
 
-# Initialize git repo
-git init
+4. **Right-click on CSV file** → `AI Batch: Process CSV with AI`
 
-# Create some files
-echo "# Test Project" > README.md
-mkdir src
-echo "print('Hello World')" > src/main.py
-echo "# Configuration" > config.yaml
+## Key Features
 
-# Make some commits
-git add .
-git commit -m "Initial commit: Project setup"
-
-# Make more commits
-echo "# Documentation" >> README.md
-git add README.md
-git commit -m "docs: Update README"
-
-echo "def new_feature():" >> src/main.py
-echo "    return 'New feature'" >> src/main.py
-git add src/main.py
-git commit -m "feat: Add new feature"
-
-echo "bug_fix = True" >> src/main.py
-git add src/main.py
-git commit -m "fix: Resolve bug"
-
-echo "test: true" >> config.yaml
-git add config.yaml
-git commit -m "test: Add test config"
-
-echo "Test repository created with 5 commits"
-git log --oneline
-```
-
-**Make it executable:**
-```bash
-chmod +x scripts/setup-test-repo.sh
-```
-
-## 6. **Create Unit Tests**
-
-**test/test_extension.py**
-```python
-import pytest
-import tempfile
-import os
-from pathlib import Path
-from datetime import datetime
-import subprocess
-import json
-
-from src.extension import format_date, log_message
-
-def test_format_date():
-    """Test date formatting."""
-    test_date = datetime(2024, 1, 15)
-    
-    assert format_date(test_date, 'DD-MM-YYYY') == '15-01-2024'
-    assert format_date(test_date, 'MM-DD-YYYY') == '01-15-2024'
-    assert format_date(test_date, 'YYYY-MM-DD') == '2024-01-15'
-    assert format_date(test_date, 'YYYY_MM_DD') == '2024_01_15'
-    assert format_date(test_date, 'DD.MM.YYYY') == '15.01.2024'
-    assert format_date(test_date, 'UNKNOWN') == '15-01-2024'  # Default
-
-def test_log_message(capsys):
-    """Test logging function."""
-    log_message("Test message")
-    captured = capsys.readouterr()
-    assert "Test message" in captured.out
-
-def test_git_command():
-    """Test git command execution."""
-    # Create temp directory and initialize git
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Initialize git repo
-        subprocess.run(['git', 'init'], cwd=tmpdir, capture_output=True)
-        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], 
-                      cwd=tmpdir, capture_output=True)
-        subprocess.run(['git', 'config', 'user.name', 'Test User'], 
-                      cwd=tmpdir, capture_output=True)
-        
-        # Create and commit a file
-        test_file = Path(tmpdir) / 'test.txt'
-        test_file.write_text('Test content')
-        
-        subprocess.run(['git', 'add', '.'], cwd=tmpdir, capture_output=True)
-        subprocess.run(['git', 'commit', '-m', 'Test commit'], 
-                      cwd=tmpdir, capture_output=True)
-        
-        # Test getting log
-        result = subprocess.run(
-            ['git', 'log', '--oneline', '-1'],
-            cwd=tmpdir,
-            capture_output=True,
-            text=True
-        )
-        
-        assert result.returncode == 0
-        assert 'Test commit' in result.stdout
-
-@pytest.mark.asyncio
-async def test_mock_summary():
-    """Test mock summary generation."""
-    from src.extension import create_mock_summary
-    
-    summary = await create_mock_summary()
-    
-    assert isinstance(summary, str)
-    assert 'Sprint Summary Test' in summary
-    assert 'Mock Data' in summary
-    
-    # Check if file was created
-    test_file = Path.home() / ".sprint-summary-test" / "mock_summary.md"
-    assert test_file.exists()
-    
-    # Cleanup
-    test_file.unlink()
-
-if __name__ == '__main__':
-    pytest.main(['-v'])
-```
-
-## 7. **Installation and Testing Steps**
-
-### **Step 1: Setup the Environment**
-```bash
-# 1. Create project directory
-mkdir sprint-summary-test
-cd sprint-summary-test
-
-# 2. Initialize npm (for VS Code extension)
-npm init -y
-
-# 3. Create virtual environment
-python -m venv venv
-
-# 4. Activate virtual environment
-# On Windows:
-venv\Scripts\activate
-# On Mac/Linux:
-source venv/bin/activate
-
-# 5. Install dependencies
-pip install vscode-python pytest
-
-# 6. Create the project structure
-mkdir -p src test .vscode scripts test-repo
-```
-
-### **Step 2: Copy all the files**
-Copy the files created above into their respective directories.
-
-### **Step 3: Create test repository**
-```bash
-# Run the setup script
-./scripts/setup-test-repo.sh
-```
-
-### **Step 4: Open in VS Code and Debug**
-```bash
-code .
-```
-
-### **Step 5: Start Debugging**
-1. Press `F5` or click "Run and Debug" in VS Code
-2. Select "Run Extension" configuration
-3. A new VS Code window will open (Extension Development Host)
-
-### **Step 6: Test Commands in Development Host**
-In the new VS Code window:
-1. Open Command Palette (`Ctrl+Shift+P`)
-2. Type "Test: Generate Sprint Summary"
-3. Run the command
-4. Check the output in the "Sprint Summary Test" output channel
-
-### **Step 7: Run Unit Tests**
-```bash
-# In terminal with virtual environment activated
-python -m pytest test/ -v
-```
-
-Or from Command Palette: "Test: Run Unit Tests"
-
-## 8. **Testing Workflow**
-
-### **Manual Testing Checklist:**
-```python
-# test_workflow.py - Manual test script
-import os
-import sys
-
-def run_manual_tests():
-    print("=== Manual Testing Checklist ===\n")
-    
-    tests = [
-        ("Extension loads", check_extension_loads),
-        ("Commands registered", check_commands),
-        ("Git integration works", check_git_integration),
-        ("Summary generation", check_summary_generation),
-        ("File creation", check_file_creation),
-        ("Error handling", check_error_handling)
-    ]
-    
-    for test_name, test_func in tests:
-        print(f"Testing: {test_name}")
-        try:
-            result = test_func()
-            print(f"  ✅ {result}")
-        except Exception as e:
-            print(f"  ❌ Failed: {e}")
-        print()
-
-def check_extension_loads():
-    return "Extension loads in VS Code"
-
-def check_commands():
-    return "Commands appear in command palette"
-
-def check_git_integration():
-    import subprocess
-    result = subprocess.run(['git', '--version'], capture_output=True)
-    if result.returncode == 0:
-        return f"Git available: {result.stdout.decode().strip()}"
-    return "Git not available"
-
-def check_summary_generation():
-    return "Can generate summary from test repo"
-
-def check_file_creation():
-    test_file = os.path.expanduser("~/.sprint-summary-test/test.md")
-    with open(test_file, 'w') as f:
-        f.write("Test")
-    if os.path.exists(test_file):
-        os.remove(test_file)
-        return "Can create files"
-    return "File creation failed"
-
-def check_error_handling():
-    return "Error messages are displayed appropriately"
-
-if __name__ == "__main__":
-    run_manual_tests()
-```
-
-## 9. **Debug Output Channel**
-
-Create a dedicated debug view:
-
-```python
-# src/debug.py
-import vscode
-
-class Debugger:
-    def __init__(self):
-        self.channel = None
-    
-    def get_channel(self):
-        if not self.channel:
-            self.channel = vscode.window.create_output_channel("Sprint Summary Debug")
-        return self.channel
-    
-    def log(self, message: str):
-        channel = self.get_channel()
-        channel.append_line(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-    
-    def show(self):
-        self.get_channel().show()
-    
-    def clear(self):
-        if self.channel:
-            self.channel.clear()
-
-debugger = Debugger()
-```
-
-## 10. **Quick Test from Terminal**
-
-```bash
-# Test the core functionality without VS Code
-python -c "
-from datetime import datetime
-from src.extension import format_date
-
-# Quick date formatting test
-test_date = datetime(2024, 1, 15)
-print(f'Date formatting test: {format_date(test_date, \"YYYY-MM-DD\")}')
-
-# Test git command execution
-import subprocess
-try:
-    result = subprocess.run(['git', '--version'], capture_output=True, text=True)
-    print(f'Git version: {result.stdout.strip()}')
-except:
-    print('Git not available')
-
-print('\\nBasic tests completed.')
-"
-```
-
-This setup allows you to:
-1. **Test in isolation** without affecting your main VS Code
-2. **Debug easily** with breakpoints and step-through
-3. **Run unit tests** to verify functionality
-4. **See real-time logs** in output channels
-5. **Test with actual git repository**
-6. **Iterate quickly** without packaging
-
-Once you confirm everything works in the development host, you can proceed to package it as a VSIX for distribution.
+- ✅ Handles commas in fields (proper CSV quoting)
+- ✅ Handles quotes in fields (escaped as `""`)
+- ✅ Handles newlines in fields
+- ✅ Progress indicator with cancellation
+- ✅ Auto-generates unique output filenames
+- ✅ Document generation from results
+- ✅ Right-click context menu for CSV files
