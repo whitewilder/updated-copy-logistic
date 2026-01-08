@@ -1,1367 +1,1071 @@
-# Word Document Editor - Functional Automation Tool
 
-This comprehensive tool provides all the functionality you requested in a functional programming style.
+# Advanced Name Matching Function in Python
 
-## Installation
-
-```bash
-pip install python-docx pandas openpyxl Pillow xlsxwriter tabulate
-```
-
-## Complete Code
+Here's a comprehensive, production-ready name matching solution using multiple algorithms and ensemble scoring:
 
 ```python
 """
-Word Document Editor - Functional Automation Tool
-================================================
-A comprehensive tool for extracting, modifying, and automating Word document operations.
+Advanced Name Matching System
+=============================
+A robust name matching solution using multiple algorithms and ensemble scoring.
 """
 
-import os
-import re
-import shutil
-from io import BytesIO
-from typing import Dict, List, Tuple, Optional, Any, Callable
-from pathlib import Path
-from datetime import datetime
-
-from docx import Document
-from docx.shared import Inches, Pt, Cm
-from docx.table import Table
-from docx.text.paragraph import Paragraph
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
 import pandas as pd
-from PIL import Image
+import numpy as np
+import re
+from typing import Tuple, List, Dict, Optional, Union
+from dataclasses import dataclass, field
+from collections import defaultdict
+from difflib import SequenceMatcher
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+import unicodedata
+
+# =============================================================================
+# OPTIONAL IMPORTS - System works with or without these
+# =============================================================================
+
+try:
+    from rapidfuzz import fuzz as rfuzz
+    from rapidfuzz.distance import Levenshtein, JaroWinkler
+    RAPIDFUZZ_AVAILABLE = True
+except ImportError:
+    RAPIDFUZZ_AVAILABLE = False
+    warnings.warn("rapidfuzz not installed. Install with: pip install rapidfuzz")
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    warnings.warn("sklearn not installed. TF-IDF matching disabled.")
+
+try:
+    import jellyfish
+    JELLYFISH_AVAILABLE = True
+except ImportError:
+    JELLYFISH_AVAILABLE = False
 
 
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION & DATA CLASSES
 # =============================================================================
 
-DEFAULT_CONFIG = {
-    "image_output_folder": "./extracted_images",
-    "excel_output_folder": "./extracted_excel",
-    "backup_folder": "./backups",
-    "temp_folder": "./temp",
-    "supported_image_formats": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff"],
-    "heading_styles": ["Heading 1", "Heading 2", "Heading 3", "Heading 4", 
-                       "Heading 5", "Heading 6", "Title", "Subtitle"],
-}
+@dataclass
+class MatchConfig:
+    """Configuration for name matching"""
+    min_confidence_threshold: float = 0.0
+    use_preprocessing: bool = True
+    use_phonetic: bool = True
+    use_tfidf: bool = True
+    use_ngrams: bool = True
+    parallel_processing: bool = True
+    max_workers: int = 4
+    top_n_matches: int = 1
+    weights: Dict[str, float] = field(default_factory=lambda: {
+        'exact': 1.0,
+        'ratio': 0.15,
+        'partial_ratio': 0.10,
+        'token_sort': 0.20,
+        'token_set': 0.20,
+        'jaro_winkler': 0.15,
+        'tfidf': 0.10,
+        'phonetic': 0.05,
+        'ngram': 0.05
+    })
+
+
+@dataclass
+class MatchResult:
+    """Result of a name match"""
+    query_name: str
+    matched_name: str
+    matched_value: any
+    confidence_score: float
+    match_details: Dict[str, float]
+    match_type: str
 
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# NAME PREPROCESSOR
 # =============================================================================
 
-def ensure_directory(path: str) -> str:
-    """Create directory if it doesn't exist."""
-    Path(path).mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def create_backup(doc_path: str, backup_folder: str = None) -> str:
-    """Create a backup of the document before modification."""
-    backup_folder = backup_folder or DEFAULT_CONFIG["backup_folder"]
-    ensure_directory(backup_folder)
+class NamePreprocessor:
+    """Advanced name preprocessing and normalization"""
     
-    filename = Path(doc_path).stem
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"{filename}_backup_{timestamp}.docx"
-    backup_path = os.path.join(backup_folder, backup_name)
-    
-    shutil.copy2(doc_path, backup_path)
-    print(f"✅ Backup created: {backup_path}")
-    return backup_path
-
-
-def load_document(doc_path: str) -> Document:
-    """Load a Word document."""
-    if not os.path.exists(doc_path):
-        raise FileNotFoundError(f"Document not found: {doc_path}")
-    return Document(doc_path)
-
-
-def save_document(doc: Document, output_path: str) -> str:
-    """Save the document to specified path."""
-    ensure_directory(os.path.dirname(output_path) or ".")
-    doc.save(output_path)
-    print(f"✅ Document saved: {output_path}")
-    return output_path
-
-
-# =============================================================================
-# TABLE EXTRACTION FUNCTIONS
-# =============================================================================
-
-def extract_table_to_dataframe(table: Table) -> pd.DataFrame:
-    """Convert a single Word table to pandas DataFrame."""
-    data = []
-    for row in table.rows:
-        row_data = []
-        for cell in row.cells:
-            # Get text and clean it
-            text = cell.text.strip()
-            row_data.append(text)
-        data.append(row_data)
-    
-    if len(data) > 0:
-        # Use first row as header if it looks like headers
-        df = pd.DataFrame(data[1:], columns=data[0]) if len(data) > 1 else pd.DataFrame(data)
-        return df
-    return pd.DataFrame()
-
-
-def extract_table_to_dataframe_no_header(table: Table) -> pd.DataFrame:
-    """Convert a single Word table to pandas DataFrame without assuming headers."""
-    data = []
-    for row in table.rows:
-        row_data = [cell.text.strip() for cell in row.cells]
-        data.append(row_data)
-    return pd.DataFrame(data)
-
-
-def extract_all_tables(doc_path: str, with_headers: bool = True) -> List[Dict[str, Any]]:
-    """
-    Extract all tables from a Word document.
-    
-    Returns:
-        List of dictionaries containing table info and DataFrame
-    """
-    doc = load_document(doc_path)
-    tables_data = []
-    
-    for idx, table in enumerate(doc.tables):
-        # Get preceding heading if exists
-        preceding_heading = get_preceding_heading(doc, table)
+    # Common business suffixes and their standardized forms
+    BUSINESS_SUFFIXES = {
+        # Limited variations
+        r'\bltd\.?\b': 'limited',
+        r'\blimited\b': 'limited',
+        r'\bltda\.?\b': 'limited',
         
-        if with_headers:
-            df = extract_table_to_dataframe(table)
-        else:
-            df = extract_table_to_dataframe_no_header(table)
+        # Corporation variations
+        r'\bcorp\.?\b': 'corporation',
+        r'\bcorporation\b': 'corporation',
         
-        table_info = {
-            "index": idx,
-            "preceding_heading": preceding_heading,
-            "rows": len(table.rows),
-            "columns": len(table.columns),
-            "dataframe": df,
-        }
-        tables_data.append(table_info)
-        print(f"📊 Extracted Table {idx + 1}: {len(df)} rows x {len(df.columns)} columns")
-    
-    print(f"\n✅ Total tables extracted: {len(tables_data)}")
-    return tables_data
-
-
-def get_preceding_heading(doc: Document, table: Table) -> Optional[str]:
-    """Get the heading that precedes a table."""
-    # Get all block elements in document order
-    body = doc.element.body
-    table_element = table._tbl
-    
-    preceding_heading = None
-    for element in body:
-        if element == table_element:
-            break
-        if element.tag.endswith('p'):
-            # Check if it's a paragraph
-            for para in doc.paragraphs:
-                if para._element == element:
-                    if para.style and para.style.name in DEFAULT_CONFIG["heading_styles"]:
-                        preceding_heading = para.text
-                    break
-    
-    return preceding_heading
-
-
-def extract_tables_by_heading(doc_path: str, heading_text: str) -> List[pd.DataFrame]:
-    """Extract tables that follow a specific heading."""
-    all_tables = extract_all_tables(doc_path)
-    matching_tables = [
-        t["dataframe"] for t in all_tables 
-        if t["preceding_heading"] and heading_text.lower() in t["preceding_heading"].lower()
-    ]
-    return matching_tables
-
-
-def save_tables_to_excel(tables_data: List[Dict[str, Any]], output_path: str, 
-                         separate_sheets: bool = True) -> str:
-    """
-    Save extracted tables to Excel file.
-    
-    Args:
-        tables_data: List of table dictionaries from extract_all_tables
-        output_path: Path for output Excel file
-        separate_sheets: If True, each table goes to separate sheet
-    """
-    ensure_directory(os.path.dirname(output_path) or ".")
-    
-    with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-        if separate_sheets:
-            for table_info in tables_data:
-                idx = table_info["index"]
-                heading = table_info["preceding_heading"] or f"Table_{idx + 1}"
-                # Clean sheet name (Excel has 31 char limit and special char restrictions)
-                sheet_name = re.sub(r'[\\/*?:\[\]]', '', heading)[:31]
-                # Make unique if duplicate
-                base_name = sheet_name
-                counter = 1
-                existing_sheets = [t.get("sheet_name", "") for t in tables_data[:idx]]
-                while sheet_name in existing_sheets:
-                    sheet_name = f"{base_name[:28]}_{counter}"
-                    counter += 1
-                
-                table_info["sheet_name"] = sheet_name
-                table_info["dataframe"].to_excel(writer, sheet_name=sheet_name, index=False)
-        else:
-            # All tables in one sheet
-            combined_df = pd.DataFrame()
-            for table_info in tables_data:
-                df = table_info["dataframe"]
-                # Add separator row
-                separator = pd.DataFrame([[f"=== Table {table_info['index'] + 1}: {table_info['preceding_heading'] or 'Untitled'} ==="]])
-                combined_df = pd.concat([combined_df, separator, df, pd.DataFrame([[""]])], ignore_index=True)
-            combined_df.to_excel(writer, sheet_name="All_Tables", index=False, header=False)
-    
-    print(f"✅ Tables saved to Excel: {output_path}")
-    return output_path
-
-
-def extract_and_save_tables(doc_path: str, excel_path: str = None) -> Tuple[List[Dict], str]:
-    """
-    Convenience function: Extract all tables and save to Excel.
-    """
-    if not excel_path:
-        doc_name = Path(doc_path).stem
-        excel_path = os.path.join(DEFAULT_CONFIG["excel_output_folder"], f"{doc_name}_tables.xlsx")
-    
-    tables_data = extract_all_tables(doc_path)
-    output_path = save_tables_to_excel(tables_data, excel_path)
-    
-    return tables_data, output_path
-
-
-# =============================================================================
-# HEADING/PARAGRAPH EXTRACTION FUNCTIONS
-# =============================================================================
-
-def extract_all_headings(doc_path: str, 
-                         heading_levels: List[str] = None) -> List[Dict[str, Any]]:
-    """
-    Extract all headings from document.
-    
-    Args:
-        doc_path: Path to Word document
-        heading_levels: List of heading styles to extract (e.g., ["Heading 1", "Heading 2"])
-    """
-    doc = load_document(doc_path)
-    heading_levels = heading_levels or DEFAULT_CONFIG["heading_styles"]
-    
-    headings = []
-    for idx, para in enumerate(doc.paragraphs):
-        if para.style and para.style.name in heading_levels:
-            heading_info = {
-                "index": idx,
-                "level": para.style.name,
-                "text": para.text.strip(),
-                "paragraph_index": idx,
-            }
-            headings.append(heading_info)
-    
-    print(f"✅ Extracted {len(headings)} headings")
-    return headings
-
-
-def extract_heading_2_paragraphs(doc_path: str) -> List[Dict[str, Any]]:
-    """Extract all Heading 2 style paragraphs specifically."""
-    return extract_all_headings(doc_path, heading_levels=["Heading 2"])
-
-
-def extract_content_under_heading(doc_path: str, heading_text: str, 
-                                   include_subheadings: bool = True) -> Dict[str, Any]:
-    """
-    Extract all content (paragraphs, tables) under a specific heading.
-    """
-    doc = load_document(doc_path)
-    content = {
-        "heading": heading_text,
-        "paragraphs": [],
-        "tables": [],
-        "found": False
+        # Incorporated variations
+        r'\binc\.?\b': 'incorporated',
+        r'\bincorporated\b': 'incorporated',
+        
+        # Company variations
+        r'\bco\.?\b': 'company',
+        r'\bcompany\b': 'company',
+        r'\bcie\.?\b': 'company',
+        
+        # Public Limited Company
+        r'\bplc\.?\b': 'plc',
+        r'\bp\.l\.c\.?\b': 'plc',
+        
+        # Limited Liability
+        r'\bllc\.?\b': 'llc',
+        r'\bl\.l\.c\.?\b': 'llc',
+        r'\bllp\.?\b': 'llp',
+        
+        # Private Limited
+        r'\bpvt\.?\b': 'private',
+        r'\bprivate\b': 'private',
+        r'\bpty\.?\b': 'proprietary',
+        
+        # International
+        r'\bintl\.?\b': 'international',
+        r'\binternational\b': 'international',
+        r'\bint\'l\.?\b': 'international',
+        
+        # Group/Holdings
+        r'\bgrp\.?\b': 'group',
+        r'\bgroup\b': 'group',
+        r'\bhldgs\.?\b': 'holdings',
+        r'\bholdings\b': 'holdings',
+        
+        # Services/Solutions
+        r'\bsvcs\.?\b': 'services',
+        r'\bservices\b': 'services',
+        r'\bsolutions\b': 'solutions',
+        r'\bsols\.?\b': 'solutions',
+        
+        # Industries/Manufacturing
+        r'\binds\.?\b': 'industries',
+        r'\bindustries\b': 'industries',
+        r'\bmfg\.?\b': 'manufacturing',
+        r'\bmanufacturing\b': 'manufacturing',
+        
+        # Associates/Partners
+        r'\bassoc\.?\b': 'associates',
+        r'\bassociates\b': 'associates',
+        r'\bpartners\b': 'partners',
+        
+        # And variations
+        r'\b&\b': 'and',
+        r'\band\b': 'and',
+        
+        # Brothers/Sons
+        r'\bbros\.?\b': 'brothers',
+        r'\bbrothers\b': 'brothers',
+        r'\bsons\b': 'sons',
+        
+        # National/Global
+        r'\bnatl\.?\b': 'national',
+        r'\bnational\b': 'national',
+        r'\bglobal\b': 'global',
+        
+        # Technologies
+        r'\btech\.?\b': 'technologies',
+        r'\btechnologies\b': 'technologies',
+        r'\btechnology\b': 'technology',
+        
+        # Systems
+        r'\bsys\.?\b': 'systems',
+        r'\bsystems\b': 'systems',
     }
     
-    capturing = False
-    current_heading_level = None
-    
-    # Track tables by their position
-    table_positions = {}
-    for idx, table in enumerate(doc.tables):
-        table_positions[id(table._tbl)] = idx
-    
-    body = doc.element.body
-    
-    for element in body:
-        if element.tag.endswith('p'):
-            for para in doc.paragraphs:
-                if para._element == element:
-                    if para.style and para.style.name in DEFAULT_CONFIG["heading_styles"]:
-                        if heading_text.lower() in para.text.lower():
-                            capturing = True
-                            current_heading_level = para.style.name
-                            content["found"] = True
-                        elif capturing:
-                            # Check if we should stop capturing
-                            if not include_subheadings:
-                                capturing = False
-                            else:
-                                # Stop at same or higher level heading
-                                para_level = get_heading_level_number(para.style.name)
-                                current_level = get_heading_level_number(current_heading_level)
-                                if para_level <= current_level:
-                                    capturing = False
-                    elif capturing:
-                        content["paragraphs"].append(para.text)
-                    break
-        elif element.tag.endswith('tbl') and capturing:
-            for table in doc.tables:
-                if table._tbl == element:
-                    content["tables"].append(extract_table_to_dataframe(table))
-                    break
-    
-    return content
-
-
-def get_heading_level_number(style_name: str) -> int:
-    """Convert heading style name to numeric level."""
-    if "Heading" in style_name:
-        try:
-            return int(style_name.split()[-1])
-        except:
-            return 0
-    return 0
-
-
-def save_headings_to_excel(headings: List[Dict], output_path: str) -> str:
-    """Save extracted headings to Excel."""
-    df = pd.DataFrame(headings)
-    ensure_directory(os.path.dirname(output_path) or ".")
-    df.to_excel(output_path, index=False)
-    print(f"✅ Headings saved to: {output_path}")
-    return output_path
-
-
-# =============================================================================
-# TABLE REPLACEMENT FUNCTIONS
-# =============================================================================
-
-def replace_table_by_index(doc_path: str, table_index: int, 
-                           new_df: pd.DataFrame, output_path: str = None,
-                           preserve_style: bool = True) -> str:
-    """
-    Replace a specific table in the document with a new DataFrame.
-    
-    Args:
-        doc_path: Path to Word document
-        table_index: Index of table to replace (0-based)
-        new_df: Pandas DataFrame with new data
-        output_path: Output path (if None, overwrites original)
-        preserve_style: Try to preserve original table styling
-    """
-    create_backup(doc_path)
-    doc = load_document(doc_path)
-    
-    if table_index >= len(doc.tables):
-        raise IndexError(f"Table index {table_index} out of range. Document has {len(doc.tables)} tables.")
-    
-    old_table = doc.tables[table_index]
-    
-    # Get original style info if preserving
-    original_style = None
-    if preserve_style:
-        original_style = get_table_style_info(old_table)
-    
-    # Clear existing table content
-    clear_table(old_table)
-    
-    # Resize table if needed
-    resize_table(old_table, len(new_df) + 1, len(new_df.columns))  # +1 for header
-    
-    # Fill with new data
-    fill_table_from_dataframe(old_table, new_df)
-    
-    # Apply original style if preserved
-    if original_style:
-        apply_table_style(old_table, original_style)
-    
-    output_path = output_path or doc_path
-    save_document(doc, output_path)
-    print(f"✅ Table {table_index} replaced successfully")
-    
-    return output_path
-
-
-def replace_tables_by_heading(doc_path: str, heading_text: str, 
-                              new_df: pd.DataFrame, output_path: str = None) -> str:
-    """Replace all tables under a specific heading."""
-    tables_data = extract_all_tables(doc_path)
-    matching_indices = [
-        t["index"] for t in tables_data 
-        if t["preceding_heading"] and heading_text.lower() in t["preceding_heading"].lower()
-    ]
-    
-    if not matching_indices:
-        print(f"⚠️ No tables found under heading containing: {heading_text}")
-        return doc_path
-    
-    current_path = doc_path
-    for idx in matching_indices:
-        current_path = replace_table_by_index(current_path, idx, new_df, output_path)
-    
-    return current_path
-
-
-def replace_multiple_tables(doc_path: str, 
-                            replacements: Dict[int, pd.DataFrame],
-                            output_path: str = None) -> str:
-    """
-    Replace multiple tables at once.
-    
-    Args:
-        doc_path: Path to Word document
-        replacements: Dictionary mapping table indices to DataFrames
-        output_path: Output path
-    """
-    create_backup(doc_path)
-    doc = load_document(doc_path)
-    
-    for table_idx, new_df in replacements.items():
-        if table_idx >= len(doc.tables):
-            print(f"⚠️ Skipping table index {table_idx} - out of range")
-            continue
-        
-        old_table = doc.tables[table_idx]
-        original_style = get_table_style_info(old_table)
-        
-        clear_table(old_table)
-        resize_table(old_table, len(new_df) + 1, len(new_df.columns))
-        fill_table_from_dataframe(old_table, new_df)
-        apply_table_style(old_table, original_style)
-        
-        print(f"✅ Table {table_idx} replaced")
-    
-    output_path = output_path or doc_path
-    save_document(doc, output_path)
-    
-    return output_path
-
-
-def clear_table(table: Table):
-    """Remove all rows from a table except the first one."""
-    while len(table.rows) > 1:
-        tr = table.rows[-1]._tr
-        table._tbl.remove(tr)
-    
-    # Clear first row cells
-    for cell in table.rows[0].cells:
-        cell.text = ""
-
-
-def resize_table(table: Table, rows: int, cols: int):
-    """Resize table to specified dimensions."""
-    # Add columns if needed
-    current_cols = len(table.columns)
-    if cols > current_cols:
-        for row in table.rows:
-            for _ in range(cols - current_cols):
-                new_cell = OxmlElement('w:tc')
-                row._tr.append(new_cell)
-    
-    # Add rows if needed
-    current_rows = len(table.rows)
-    for _ in range(rows - current_rows):
-        table.add_row()
-
-
-def fill_table_from_dataframe(table: Table, df: pd.DataFrame):
-    """Fill table with DataFrame content."""
-    # Fill header row
-    for col_idx, col_name in enumerate(df.columns):
-        if col_idx < len(table.rows[0].cells):
-            table.rows[0].cells[col_idx].text = str(col_name)
-    
-    # Fill data rows
-    for row_idx, row_data in df.iterrows():
-        table_row_idx = row_idx + 1  # Offset for header
-        if table_row_idx < len(table.rows):
-            for col_idx, value in enumerate(row_data):
-                if col_idx < len(table.rows[table_row_idx].cells):
-                    table.rows[table_row_idx].cells[col_idx].text = str(value) if pd.notna(value) else ""
-
-
-def get_table_style_info(table: Table) -> Dict[str, Any]:
-    """Extract styling information from a table."""
-    style_info = {
-        "style": table.style.name if table.style else None,
-        "alignment": table.alignment,
+    # Words to potentially remove for matching
+    NOISE_WORDS = {
+        'the', 'a', 'an', 'of', 'for', 'to', 'in', 'on', 'at', 'by'
     }
-    return style_info
-
-
-def apply_table_style(table: Table, style_info: Dict[str, Any]):
-    """Apply styling to a table."""
-    if style_info.get("style"):
-        try:
-            table.style = style_info["style"]
-        except:
-            pass
-    if style_info.get("alignment"):
-        table.alignment = style_info["alignment"]
+    
+    # Common character replacements
+    CHAR_REPLACEMENTS = {
+        ''': "'",
+        ''': "'",
+        '"': '"',
+        '"': '"',
+        '–': '-',
+        '—': '-',
+        '…': '...',
+    }
+    
+    def __init__(self, remove_noise_words: bool = False):
+        self.remove_noise_words = remove_noise_words
+        
+    @lru_cache(maxsize=10000)
+    def preprocess(self, name: str) -> str:
+        """Full preprocessing pipeline"""
+        if not name or not isinstance(name, str):
+            return ""
+        
+        # Step 1: Normalize unicode
+        result = self._normalize_unicode(name)
+        
+        # Step 2: Replace special characters
+        result = self._replace_special_chars(result)
+        
+        # Step 3: Lowercase
+        result = result.lower()
+        
+        # Step 4: Standardize business suffixes
+        result = self._standardize_suffixes(result)
+        
+        # Step 5: Remove punctuation (keep alphanumeric and spaces)
+        result = re.sub(r'[^\w\s]', ' ', result)
+        
+        # Step 6: Normalize whitespace
+        result = ' '.join(result.split())
+        
+        # Step 7: Remove noise words if enabled
+        if self.remove_noise_words:
+            result = self._remove_noise(result)
+        
+        return result.strip()
+    
+    @lru_cache(maxsize=10000)
+    def preprocess_aggressive(self, name: str) -> str:
+        """More aggressive preprocessing for difficult matches"""
+        result = self.preprocess(name)
+        
+        # Remove all business suffixes for comparison
+        suffix_patterns = [
+            r'\b(limited|ltd|corporation|corp|incorporated|inc|company|co|plc|llc|llp|pvt|private|pty)\b',
+            r'\b(group|holdings|services|solutions|industries|manufacturing|associates|partners)\b',
+            r'\b(international|national|global|technologies|technology|systems)\b'
+        ]
+        
+        for pattern in suffix_patterns:
+            result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+        
+        # Remove noise words
+        result = self._remove_noise(result)
+        
+        # Remove numbers
+        result = re.sub(r'\d+', '', result)
+        
+        # Normalize whitespace again
+        result = ' '.join(result.split())
+        
+        return result.strip()
+    
+    def _normalize_unicode(self, text: str) -> str:
+        """Normalize unicode characters"""
+        return unicodedata.normalize('NFKD', text)
+    
+    def _replace_special_chars(self, text: str) -> str:
+        """Replace special characters with standard equivalents"""
+        for old, new in self.CHAR_REPLACEMENTS.items():
+            text = text.replace(old, new)
+        return text
+    
+    def _standardize_suffixes(self, text: str) -> str:
+        """Standardize business suffixes"""
+        for pattern, replacement in self.BUSINESS_SUFFIXES.items():
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+    
+    def _remove_noise(self, text: str) -> str:
+        """Remove common noise words"""
+        words = text.split()
+        return ' '.join(w for w in words if w.lower() not in self.NOISE_WORDS)
+    
+    def get_tokens(self, name: str) -> List[str]:
+        """Get sorted tokens from name"""
+        processed = self.preprocess(name)
+        return sorted(processed.split())
+    
+    def get_initials(self, name: str) -> str:
+        """Get initials from name"""
+        tokens = self.get_tokens(name)
+        return ''.join(t[0] for t in tokens if t)
 
 
 # =============================================================================
-# IMAGE EXTRACTION FUNCTIONS
+# SIMILARITY CALCULATORS
 # =============================================================================
 
-def extract_all_images(doc_path: str, output_folder: str = None) -> List[Dict[str, Any]]:
-    """
-    Extract all images from a Word document.
+class SimilarityCalculator:
+    """Calculate various similarity scores between names"""
     
-    Returns:
-        List of dictionaries with image info and paths
-    """
-    output_folder = output_folder or DEFAULT_CONFIG["image_output_folder"]
-    ensure_directory(output_folder)
+    def __init__(self, preprocessor: NamePreprocessor):
+        self.preprocessor = preprocessor
+        self._tfidf_vectorizer = None
+        self._tfidf_matrix = None
+        self._name_index = {}
+        
+    def exact_match(self, name1: str, name2: str) -> float:
+        """Check for exact match after preprocessing"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        return 1.0 if p1 == p2 else 0.0
     
-    doc = load_document(doc_path)
-    doc_name = Path(doc_path).stem
+    def ratio_similarity(self, name1: str, name2: str) -> float:
+        """Basic ratio similarity"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        
+        if RAPIDFUZZ_AVAILABLE:
+            return rfuzz.ratio(p1, p2) / 100.0
+        else:
+            return SequenceMatcher(None, p1, p2).ratio()
     
-    images_data = []
-    image_count = 0
-    
-    # Access the document's relationships for images
-    for rel_id, rel in doc.part.rels.items():
-        if "image" in rel.reltype:
-            image_count += 1
-            image_data = rel.target_part.blob
-            image_ext = os.path.splitext(rel.target_part.partname)[1]
+    def partial_ratio_similarity(self, name1: str, name2: str) -> float:
+        """Partial ratio similarity - good for substring matching"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        
+        if RAPIDFUZZ_AVAILABLE:
+            return rfuzz.partial_ratio(p1, p2) / 100.0
+        else:
+            # Fallback implementation
+            shorter, longer = (p1, p2) if len(p1) <= len(p2) else (p2, p1)
+            if len(shorter) == 0:
+                return 0.0
             
-            # Save image
-            image_filename = f"{doc_name}_image_{image_count}{image_ext}"
-            image_path = os.path.join(output_folder, image_filename)
+            best_ratio = 0.0
+            for i in range(len(longer) - len(shorter) + 1):
+                substr = longer[i:i + len(shorter)]
+                ratio = SequenceMatcher(None, shorter, substr).ratio()
+                best_ratio = max(best_ratio, ratio)
             
-            with open(image_path, 'wb') as f:
-                f.write(image_data)
+            return best_ratio
+    
+    def token_sort_similarity(self, name1: str, name2: str) -> float:
+        """Token sort ratio - handles word order differences"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        
+        if RAPIDFUZZ_AVAILABLE:
+            return rfuzz.token_sort_ratio(p1, p2) / 100.0
+        else:
+            # Fallback: sort tokens and compare
+            sorted1 = ' '.join(sorted(p1.split()))
+            sorted2 = ' '.join(sorted(p2.split()))
+            return SequenceMatcher(None, sorted1, sorted2).ratio()
+    
+    def token_set_similarity(self, name1: str, name2: str) -> float:
+        """Token set ratio - handles partial token matches"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        
+        if RAPIDFUZZ_AVAILABLE:
+            return rfuzz.token_set_ratio(p1, p2) / 100.0
+        else:
+            # Fallback implementation
+            tokens1 = set(p1.split())
+            tokens2 = set(p2.split())
             
-            # Get image dimensions
-            img = Image.open(BytesIO(image_data))
+            intersection = tokens1 & tokens2
+            diff1 = tokens1 - tokens2
+            diff2 = tokens2 - tokens1
             
-            image_info = {
-                "index": image_count - 1,
-                "rel_id": rel_id,
-                "filename": image_filename,
-                "path": image_path,
-                "format": image_ext,
-                "size": len(image_data),
-                "dimensions": img.size,
-            }
-            images_data.append(image_info)
-            print(f"🖼️ Extracted: {image_filename} ({img.size[0]}x{img.size[1]})")
+            if not intersection:
+                sorted1 = ' '.join(sorted(tokens1))
+                sorted2 = ' '.join(sorted(tokens2))
+                return SequenceMatcher(None, sorted1, sorted2).ratio()
+            
+            combined1 = ' '.join(sorted(intersection)) + ' ' + ' '.join(sorted(diff1))
+            combined2 = ' '.join(sorted(intersection)) + ' ' + ' '.join(sorted(diff2))
+            base = ' '.join(sorted(intersection))
+            
+            ratios = [
+                SequenceMatcher(None, base, combined1.strip()).ratio(),
+                SequenceMatcher(None, base, combined2.strip()).ratio(),
+                SequenceMatcher(None, combined1.strip(), combined2.strip()).ratio()
+            ]
+            
+            return max(ratios)
     
-    print(f"\n✅ Total images extracted: {len(images_data)}")
-    return images_data
-
-
-def extract_images_with_context(doc_path: str, output_folder: str = None) -> List[Dict[str, Any]]:
-    """
-    Extract images along with their surrounding context (nearby text).
-    """
-    images_data = extract_all_images(doc_path, output_folder)
-    doc = load_document(doc_path)
+    def jaro_winkler_similarity(self, name1: str, name2: str) -> float:
+        """Jaro-Winkler similarity - good for typos"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        
+        if RAPIDFUZZ_AVAILABLE:
+            return JaroWinkler.normalized_similarity(p1, p2)
+        elif JELLYFISH_AVAILABLE:
+            return jellyfish.jaro_winkler_similarity(p1, p2)
+        else:
+            # Fallback Jaro-Winkler implementation
+            return self._jaro_winkler_fallback(p1, p2)
     
-    # Try to find context for each image
-    for para in doc.paragraphs:
-        # Check if paragraph contains inline shapes (images)
-        for run in para.runs:
-            if run._element.xpath('.//a:blip'):
-                # This run contains an image
-                for img_info in images_data:
-                    img_info["context_paragraph"] = para.text[:100] if para.text else "No text"
-    
-    return images_data
-
-
-# =============================================================================
-# IMAGE REPLACEMENT FUNCTIONS
-# =============================================================================
-
-def replace_image_by_index(doc_path: str, image_index: int, 
-                           new_image_path: str, output_path: str = None,
-                           maintain_size: bool = True) -> str:
-    """
-    Replace a specific image in the document.
-    
-    Args:
-        doc_path: Path to Word document
-        image_index: Index of image to replace (0-based)
-        new_image_path: Path to new image file
-        output_path: Output path
-        maintain_size: Maintain original image dimensions
-    """
-    create_backup(doc_path)
-    doc = load_document(doc_path)
-    
-    image_count = 0
-    replaced = False
-    
-    for rel_id, rel in doc.part.rels.items():
-        if "image" in rel.reltype:
-            if image_count == image_index:
-                # Read new image
-                with open(new_image_path, 'rb') as f:
-                    new_image_data = f.read()
-                
-                # Replace the image data
-                rel.target_part._blob = new_image_data
-                replaced = True
-                print(f"✅ Replaced image {image_index} with {new_image_path}")
+    def _jaro_winkler_fallback(self, s1: str, s2: str, winkler_prefix_weight: float = 0.1) -> float:
+        """Fallback Jaro-Winkler implementation"""
+        if s1 == s2:
+            return 1.0
+        
+        len1, len2 = len(s1), len(s2)
+        if len1 == 0 or len2 == 0:
+            return 0.0
+        
+        match_distance = max(len1, len2) // 2 - 1
+        match_distance = max(0, match_distance)
+        
+        s1_matches = [False] * len1
+        s2_matches = [False] * len2
+        
+        matches = 0
+        transpositions = 0
+        
+        for i in range(len1):
+            start = max(0, i - match_distance)
+            end = min(i + match_distance + 1, len2)
+            
+            for j in range(start, end):
+                if s2_matches[j] or s1[i] != s2[j]:
+                    continue
+                s1_matches[i] = True
+                s2_matches[j] = True
+                matches += 1
                 break
-            image_count += 1
-    
-    if not replaced:
-        print(f"⚠️ Image index {image_index} not found")
-        return doc_path
-    
-    output_path = output_path or doc_path
-    save_document(doc, output_path)
-    
-    return output_path
-
-
-def replace_all_images_from_folder(doc_path: str, images_folder: str, 
-                                   output_path: str = None,
-                                   match_by_name: bool = False) -> str:
-    """
-    Replace all images in document with images from a folder.
-    
-    Args:
-        doc_path: Path to Word document
-        images_folder: Folder containing replacement images
-        output_path: Output path
-        match_by_name: If True, match by filename pattern; if False, replace in order
-    """
-    create_backup(doc_path)
-    doc = load_document(doc_path)
-    
-    # Get list of images in folder
-    image_files = []
-    for ext in DEFAULT_CONFIG["supported_image_formats"]:
-        image_files.extend(Path(images_folder).glob(f"*{ext}"))
-        image_files.extend(Path(images_folder).glob(f"*{ext.upper()}"))
-    
-    image_files = sorted(image_files)
-    
-    if not image_files:
-        print(f"⚠️ No images found in {images_folder}")
-        return doc_path
-    
-    image_count = 0
-    for rel_id, rel in doc.part.rels.items():
-        if "image" in rel.reltype:
-            if image_count < len(image_files):
-                new_image_path = image_files[image_count]
-                with open(new_image_path, 'rb') as f:
-                    new_image_data = f.read()
-                rel.target_part._blob = new_image_data
-                print(f"✅ Replaced image {image_count} with {new_image_path.name}")
-                image_count += 1
-    
-    output_path = output_path or doc_path
-    save_document(doc, output_path)
-    print(f"\n✅ Replaced {image_count} images")
-    
-    return output_path
-
-
-def replace_images_by_mapping(doc_path: str, 
-                              mapping: Dict[int, str],
-                              output_path: str = None) -> str:
-    """
-    Replace specific images using index-to-path mapping.
-    
-    Args:
-        doc_path: Path to Word document
-        mapping: Dictionary mapping image indices to new image paths
-        output_path: Output path
-    """
-    create_backup(doc_path)
-    doc = load_document(doc_path)
-    
-    image_count = 0
-    for rel_id, rel in doc.part.rels.items():
-        if "image" in rel.reltype:
-            if image_count in mapping:
-                new_image_path = mapping[image_count]
-                if os.path.exists(new_image_path):
-                    with open(new_image_path, 'rb') as f:
-                        new_image_data = f.read()
-                    rel.target_part._blob = new_image_data
-                    print(f"✅ Replaced image {image_count} with {new_image_path}")
-                else:
-                    print(f"⚠️ Image file not found: {new_image_path}")
-            image_count += 1
-    
-    output_path = output_path or doc_path
-    save_document(doc, output_path)
-    
-    return output_path
-
-
-# =============================================================================
-# TEXT MANIPULATION FUNCTIONS
-# =============================================================================
-
-def find_and_replace_text(doc_path: str, replacements: Dict[str, str], 
-                          output_path: str = None,
-                          case_sensitive: bool = True) -> str:
-    """
-    Find and replace text throughout the document.
-    
-    Args:
-        doc_path: Path to Word document
-        replacements: Dictionary of {old_text: new_text}
-        output_path: Output path
-        case_sensitive: Whether search is case-sensitive
-    """
-    create_backup(doc_path)
-    doc = load_document(doc_path)
-    
-    replacement_counts = {key: 0 for key in replacements}
-    
-    # Replace in paragraphs
-    for para in doc.paragraphs:
-        for old_text, new_text in replacements.items():
-            if case_sensitive:
-                if old_text in para.text:
-                    replacement_counts[old_text] += para.text.count(old_text)
-                    para.text = para.text.replace(old_text, new_text)
+        
+        if matches == 0:
+            return 0.0
+        
+        k = 0
+        for i in range(len1):
+            if not s1_matches[i]:
+                continue
+            while not s2_matches[k]:
+                k += 1
+            if s1[i] != s2[k]:
+                transpositions += 1
+            k += 1
+        
+        jaro = (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3
+        
+        # Winkler modification
+        prefix = 0
+        for i in range(min(len1, len2, 4)):
+            if s1[i] == s2[i]:
+                prefix += 1
             else:
-                pattern = re.compile(re.escape(old_text), re.IGNORECASE)
-                matches = pattern.findall(para.text)
-                replacement_counts[old_text] += len(matches)
-                para.text = pattern.sub(new_text, para.text)
-    
-    # Replace in tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for old_text, new_text in replacements.items():
-                    if case_sensitive:
-                        if old_text in cell.text:
-                            replacement_counts[old_text] += cell.text.count(old_text)
-                            cell.text = cell.text.replace(old_text, new_text)
-                    else:
-                        pattern = re.compile(re.escape(old_text), re.IGNORECASE)
-                        matches = pattern.findall(cell.text)
-                        replacement_counts[old_text] += len(matches)
-                        cell.text = pattern.sub(new_text, cell.text)
-    
-    for old_text, count in replacement_counts.items():
-        print(f"📝 Replaced '{old_text}': {count} occurrences")
-    
-    output_path = output_path or doc_path
-    save_document(doc, output_path)
-    
-    return output_path
-
-
-def find_text_locations(doc_path: str, search_text: str, 
-                        case_sensitive: bool = True) -> List[Dict[str, Any]]:
-    """Find all locations of a text string in the document."""
-    doc = load_document(doc_path)
-    locations = []
-    
-    # Search in paragraphs
-    for idx, para in enumerate(doc.paragraphs):
-        text = para.text if case_sensitive else para.text.lower()
-        search = search_text if case_sensitive else search_text.lower()
+                break
         
-        if search in text:
-            locations.append({
-                "type": "paragraph",
-                "index": idx,
-                "style": para.style.name if para.style else None,
-                "text_preview": para.text[:100],
-            })
+        return jaro + prefix * winkler_prefix_weight * (1 - jaro)
     
-    # Search in tables
-    for t_idx, table in enumerate(doc.tables):
-        for r_idx, row in enumerate(table.rows):
-            for c_idx, cell in row.cells:
-                text = cell.text if case_sensitive else cell.text.lower()
-                search = search_text if case_sensitive else search_text.lower()
-                
-                if search in text:
-                    locations.append({
-                        "type": "table_cell",
-                        "table_index": t_idx,
-                        "row": r_idx,
-                        "column": c_idx,
-                        "text_preview": cell.text[:100],
-                    })
-    
-    print(f"🔍 Found '{search_text}' in {len(locations)} locations")
-    return locations
-
-
-# =============================================================================
-# DOCUMENT ANALYSIS FUNCTIONS
-# =============================================================================
-
-def get_document_summary(doc_path: str) -> Dict[str, Any]:
-    """Get a comprehensive summary of the document."""
-    doc = load_document(doc_path)
-    
-    # Count elements
-    para_count = len(doc.paragraphs)
-    table_count = len(doc.tables)
-    
-    # Count images
-    image_count = sum(1 for rel in doc.part.rels.values() if "image" in rel.reltype)
-    
-    # Count headings
-    headings = extract_all_headings(doc_path)
-    
-    # Word count
-    total_words = sum(len(para.text.split()) for para in doc.paragraphs)
-    
-    # Character count
-    total_chars = sum(len(para.text) for para in doc.paragraphs)
-    
-    summary = {
-        "file_path": doc_path,
-        "file_name": Path(doc_path).name,
-        "paragraphs": para_count,
-        "tables": table_count,
-        "images": image_count,
-        "headings": len(headings),
-        "total_words": total_words,
-        "total_characters": total_chars,
-        "heading_breakdown": {},
-    }
-    
-    # Heading breakdown
-    for h in headings:
-        level = h["level"]
-        summary["heading_breakdown"][level] = summary["heading_breakdown"].get(level, 0) + 1
-    
-    return summary
-
-
-def print_document_structure(doc_path: str):
-    """Print the document structure (headings hierarchy)."""
-    headings = extract_all_headings(doc_path)
-    tables = extract_all_tables(doc_path)
-    
-    print("\n" + "=" * 60)
-    print("📄 DOCUMENT STRUCTURE")
-    print("=" * 60)
-    
-    for h in headings:
-        level_num = get_heading_level_number(h["level"])
-        indent = "  " * level_num
-        print(f"{indent}📌 [{h['level']}] {h['text']}")
-    
-    print("\n" + "-" * 60)
-    print(f"📊 Tables: {len(tables)}")
-    for t in tables:
-        print(f"   Table {t['index'] + 1}: {t['rows']}x{t['columns']} - Under: {t['preceding_heading'] or 'No heading'}")
-    
-    print("=" * 60)
-
-
-# =============================================================================
-# DOCUMENT MERGING FUNCTIONS
-# =============================================================================
-
-def merge_documents(doc_paths: List[str], output_path: str, 
-                    add_page_breaks: bool = True) -> str:
-    """Merge multiple Word documents into one."""
-    if not doc_paths:
-        raise ValueError("No documents provided to merge")
-    
-    # Start with the first document
-    merged_doc = load_document(doc_paths[0])
-    
-    # Append content from remaining documents
-    for doc_path in doc_paths[1:]:
-        if add_page_breaks:
-            merged_doc.add_page_break()
+    def levenshtein_similarity(self, name1: str, name2: str) -> float:
+        """Normalized Levenshtein distance"""
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
         
-        doc = load_document(doc_path)
-        
-        # Copy paragraphs
-        for para in doc.paragraphs:
-            new_para = merged_doc.add_paragraph(para.text, para.style)
-            # Copy runs for formatting
-            new_para.clear()
-            for run in para.runs:
-                new_run = new_para.add_run(run.text)
-                new_run.bold = run.bold
-                new_run.italic = run.italic
-                new_run.underline = run.underline
-        
-        # Note: Tables and images require more complex handling
-        # This is a simplified merge
-    
-    save_document(merged_doc, output_path)
-    print(f"✅ Merged {len(doc_paths)} documents into {output_path}")
-    
-    return output_path
-
-
-# =============================================================================
-# BATCH PROCESSING FUNCTIONS
-# =============================================================================
-
-def batch_extract_tables(folder_path: str, output_folder: str = None) -> Dict[str, str]:
-    """Extract tables from all Word documents in a folder."""
-    output_folder = output_folder or DEFAULT_CONFIG["excel_output_folder"]
-    ensure_directory(output_folder)
-    
-    doc_files = list(Path(folder_path).glob("*.docx"))
-    results = {}
-    
-    for doc_path in doc_files:
-        try:
-            doc_name = doc_path.stem
-            excel_path = os.path.join(output_folder, f"{doc_name}_tables.xlsx")
-            _, output = extract_and_save_tables(str(doc_path), excel_path)
-            results[str(doc_path)] = output
-        except Exception as e:
-            print(f"❌ Error processing {doc_path}: {e}")
-            results[str(doc_path)] = f"Error: {e}"
-    
-    print(f"\n✅ Batch processing complete. Processed {len(doc_files)} documents.")
-    return results
-
-
-def batch_find_replace(folder_path: str, replacements: Dict[str, str], 
-                       output_folder: str = None) -> Dict[str, str]:
-    """Apply find/replace to all Word documents in a folder."""
-    output_folder = output_folder or folder_path
-    ensure_directory(output_folder)
-    
-    doc_files = list(Path(folder_path).glob("*.docx"))
-    results = {}
-    
-    for doc_path in doc_files:
-        try:
-            output_path = os.path.join(output_folder, doc_path.name)
-            result = find_and_replace_text(str(doc_path), replacements, output_path)
-            results[str(doc_path)] = result
-        except Exception as e:
-            print(f"❌ Error processing {doc_path}: {e}")
-            results[str(doc_path)] = f"Error: {e}"
-    
-    return results
-
-
-# =============================================================================
-# TEMPLATE PROCESSING FUNCTIONS
-# =============================================================================
-
-def fill_template_with_data(template_path: str, data: Dict[str, Any], 
-                            output_path: str = None) -> str:
-    """
-    Fill a Word template with data.
-    Placeholders format: {{placeholder_name}}
-    
-    Args:
-        template_path: Path to template document
-        data: Dictionary with placeholder values
-        output_path: Output path for filled document
-    """
-    replacements = {f"{{{{{key}}}}}": str(value) for key, value in data.items()}
-    output_path = output_path or template_path.replace(".docx", "_filled.docx")
-    
-    return find_and_replace_text(template_path, replacements, output_path)
-
-
-def create_documents_from_excel(template_path: str, excel_path: str, 
-                                 output_folder: str, 
-                                 name_column: str = None) -> List[str]:
-    """
-    Create multiple documents from a template using Excel data.
-    Each row in Excel creates a new document.
-    """
-    ensure_directory(output_folder)
-    df = pd.read_excel(excel_path)
-    
-    created_files = []
-    
-    for idx, row in df.iterrows():
-        # Convert row to dictionary
-        data = row.to_dict()
-        
-        # Determine output filename
-        if name_column and name_column in data:
-            filename = f"{data[name_column]}.docx"
+        if RAPIDFUZZ_AVAILABLE:
+            return Levenshtein.normalized_similarity(p1, p2)
+        elif JELLYFISH_AVAILABLE:
+            max_len = max(len(p1), len(p2))
+            if max_len == 0:
+                return 1.0
+            distance = jellyfish.levenshtein_distance(p1, p2)
+            return 1 - (distance / max_len)
         else:
-            filename = f"document_{idx + 1}.docx"
+            # Fallback
+            return self._levenshtein_fallback(p1, p2)
+    
+    def _levenshtein_fallback(self, s1: str, s2: str) -> float:
+        """Fallback Levenshtein implementation"""
+        if s1 == s2:
+            return 1.0
         
-        output_path = os.path.join(output_folder, filename)
+        len1, len2 = len(s1), len(s2)
+        if len1 == 0 or len2 == 0:
+            return 0.0
         
-        # Create document from template
-        fill_template_with_data(template_path, data, output_path)
-        created_files.append(output_path)
-        print(f"📄 Created: {filename}")
+        # Create distance matrix
+        dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
+        
+        for i in range(len1 + 1):
+            dp[i][0] = i
+        for j in range(len2 + 1):
+            dp[0][j] = j
+        
+        for i in range(1, len1 + 1):
+            for j in range(1, len2 + 1):
+                cost = 0 if s1[i-1] == s2[j-1] else 1
+                dp[i][j] = min(
+                    dp[i-1][j] + 1,      # deletion
+                    dp[i][j-1] + 1,      # insertion
+                    dp[i-1][j-1] + cost  # substitution
+                )
+        
+        max_len = max(len1, len2)
+        return 1 - (dp[len1][len2] / max_len)
     
-    print(f"\n✅ Created {len(created_files)} documents")
-    return created_files
-
-
-# =============================================================================
-# EXPORT FUNCTIONS
-# =============================================================================
-
-def export_document_to_markdown(doc_path: str, output_path: str = None) -> str:
-    """Export Word document content to Markdown format."""
-    doc = load_document(doc_path)
-    
-    markdown_lines = []
-    
-    for para in doc.paragraphs:
-        if para.style:
-            style_name = para.style.name
+    def phonetic_similarity(self, name1: str, name2: str) -> float:
+        """Phonetic similarity using multiple algorithms"""
+        if not JELLYFISH_AVAILABLE:
+            return 0.0
+        
+        p1 = self.preprocessor.preprocess(name1)
+        p2 = self.preprocessor.preprocess(name2)
+        
+        scores = []
+        
+        # Soundex comparison
+        try:
+            tokens1 = p1.split()
+            tokens2 = p2.split()
             
-            if "Heading 1" in style_name:
-                markdown_lines.append(f"# {para.text}\n")
-            elif "Heading 2" in style_name:
-                markdown_lines.append(f"## {para.text}\n")
-            elif "Heading 3" in style_name:
-                markdown_lines.append(f"### {para.text}\n")
-            elif "List" in style_name:
-                markdown_lines.append(f"- {para.text}")
-            else:
-                markdown_lines.append(f"{para.text}\n")
+            soundex_matches = 0
+            for t1 in tokens1:
+                if len(t1) > 0:
+                    s1 = jellyfish.soundex(t1)
+                    for t2 in tokens2:
+                        if len(t2) > 0 and jellyfish.soundex(t2) == s1:
+                            soundex_matches += 1
+                            break
+            
+            if tokens1:
+                scores.append(soundex_matches / len(tokens1))
+        except Exception:
+            pass
+        
+        # Metaphone comparison
+        try:
+            metaphone_matches = 0
+            for t1 in tokens1:
+                if len(t1) > 0:
+                    m1 = jellyfish.metaphone(t1)
+                    for t2 in tokens2:
+                        if len(t2) > 0 and jellyfish.metaphone(t2) == m1:
+                            metaphone_matches += 1
+                            break
+            
+            if tokens1:
+                scores.append(metaphone_matches / len(tokens1))
+        except Exception:
+            pass
+        
+        return max(scores) if scores else 0.0
+    
+    def ngram_similarity(self, name1: str, name2: str, n: int = 2) -> float:
+        """N-gram similarity (character-level)"""
+        p1 = self.preprocessor.preprocess(name1).replace(' ', '')
+        p2 = self.preprocessor.preprocess(name2).replace(' ', '')
+        
+        if len(p1) < n or len(p2) < n:
+            return self.ratio_similarity(name1, name2)
+        
+        ngrams1 = set(p1[i:i+n] for i in range(len(p1) - n + 1))
+        ngrams2 = set(p2[i:i+n] for i in range(len(p2) - n + 1))
+        
+        if not ngrams1 or not ngrams2:
+            return 0.0
+        
+        intersection = ngrams1 & ngrams2
+        union = ngrams1 | ngrams2
+        
+        return len(intersection) / len(union)  # Jaccard similarity
+    
+    def build_tfidf_index(self, names: List[str]):
+        """Build TF-IDF index for fast matching"""
+        if not SKLEARN_AVAILABLE:
+            return
+        
+        processed_names = [self.preprocessor.preprocess(n) for n in names]
+        self._name_index = {i: name for i, name in enumerate(names)}
+        
+        self._tfidf_vectorizer = TfidfVectorizer(
+            analyzer='char_wb',
+            ngram_range=(2, 4),
+            min_df=1,
+            max_df=0.95
+        )
+        
+        self._tfidf_matrix = self._tfidf_vectorizer.fit_transform(processed_names)
+    
+    def tfidf_similarity(self, name: str, top_n: int = 5) -> List[Tuple[str, float]]:
+        """Get TF-IDF based similarity scores"""
+        if not SKLEARN_AVAILABLE or self._tfidf_matrix is None:
+            return []
+        
+        processed = self.preprocessor.preprocess(name)
+        query_vector = self._tfidf_vectorizer.transform([processed])
+        
+        similarities = cosine_similarity(query_vector, self._tfidf_matrix).flatten()
+        top_indices = similarities.argsort()[-top_n:][::-1]
+        
+        results = []
+        for idx in top_indices:
+            results.append((self._name_index[idx], float(similarities[idx])))
+        
+        return results
+
+
+# =============================================================================
+# MAIN NAME MATCHER CLASS
+# =============================================================================
+
+class AdvancedNameMatcher:
+    """
+    Advanced Name Matching System
+    
+    Features:
+    - Multiple matching algorithms (fuzzy, phonetic, n-gram, TF-IDF)
+    - Ensemble scoring with configurable weights
+    - Smart preprocessing for business names
+    - Parallel processing support
+    - Confidence scoring
+    """
+    
+    def __init__(self, config: Optional[MatchConfig] = None):
+        self.config = config or MatchConfig()
+        self.preprocessor = NamePreprocessor()
+        self.calculator = SimilarityCalculator(self.preprocessor)
+        self._df1_data = None
+        self._name_to_value = {}
+        self._names_list = []
+        
+    def fit(self, df1: pd.DataFrame, name_col: str = 'name', value_col: str = 'value'):
+        """
+        Fit the matcher with reference data
+        
+        Parameters:
+        -----------
+        df1 : pd.DataFrame
+            Reference dataframe with names and values
+        name_col : str
+            Name of the column containing names
+        value_col : str
+            Name of the column containing values
+        """
+        self._df1_data = df1.copy()
+        self._names_list = df1[name_col].astype(str).tolist()
+        self._name_to_value = dict(zip(df1[name_col].astype(str), df1[value_col]))
+        
+        # Build TF-IDF index if enabled
+        if self.config.use_tfidf and SKLEARN_AVAILABLE:
+            self.calculator.build_tfidf_index(self._names_list)
+        
+        return self
+    
+    def _calculate_ensemble_score(self, name1: str, name2: str) -> Tuple[float, Dict[str, float]]:
+        """Calculate ensemble similarity score using multiple algorithms"""
+        scores = {}
+        weights = self.config.weights
+        
+        # Exact match (after preprocessing)
+        scores['exact'] = self.calculator.exact_match(name1, name2)
+        
+        # If exact match, return immediately
+        if scores['exact'] == 1.0:
+            return 1.0, scores
+        
+        # Fuzzy matching scores
+        scores['ratio'] = self.calculator.ratio_similarity(name1, name2)
+        scores['partial_ratio'] = self.calculator.partial_ratio_similarity(name1, name2)
+        scores['token_sort'] = self.calculator.token_sort_similarity(name1, name2)
+        scores['token_set'] = self.calculator.token_set_similarity(name1, name2)
+        scores['jaro_winkler'] = self.calculator.jaro_winkler_similarity(name1, name2)
+        
+        # Phonetic similarity
+        if self.config.use_phonetic and JELLYFISH_AVAILABLE:
+            scores['phonetic'] = self.calculator.phonetic_similarity(name1, name2)
         else:
-            markdown_lines.append(f"{para.text}\n")
+            scores['phonetic'] = 0.0
+        
+        # N-gram similarity
+        if self.config.use_ngrams:
+            scores['ngram'] = self.calculator.ngram_similarity(name1, name2)
+        else:
+            scores['ngram'] = 0.0
+        
+        # TF-IDF score (if available and indexed)
+        scores['tfidf'] = 0.0  # Will be updated if available
+        
+        # Calculate weighted ensemble score
+        total_weight = sum(weights.get(k, 0) for k in scores.keys() if k != 'exact')
+        
+        if total_weight == 0:
+            ensemble_score = max(scores.values())
+        else:
+            ensemble_score = sum(
+                scores.get(k, 0) * weights.get(k, 0) 
+                for k in scores.keys() if k != 'exact'
+            ) / total_weight
+        
+        return ensemble_score, scores
     
-    markdown_content = "\n".join(markdown_lines)
+    def _find_best_match(self, query_name: str) -> MatchResult:
+        """Find the best match for a single query name"""
+        best_score = 0.0
+        best_match = None
+        best_details = {}
+        best_match_type = 'none'
+        
+        # Get TF-IDF candidates if available
+        tfidf_candidates = set()
+        if self.config.use_tfidf and SKLEARN_AVAILABLE:
+            tfidf_results = self.calculator.tfidf_similarity(query_name, top_n=20)
+            tfidf_candidates = {name for name, _ in tfidf_results}
+            
+            # Update TF-IDF scores
+            tfidf_scores = {name: score for name, score in tfidf_results}
+        
+        # Search through all names (or just TF-IDF candidates for efficiency)
+        search_names = tfidf_candidates if tfidf_candidates else self._names_list
+        
+        for ref_name in search_names:
+            score, details = self._calculate_ensemble_score(query_name, ref_name)
+            
+            # Update TF-IDF score if available
+            if self.config.use_tfidf and ref_name in tfidf_candidates:
+                details['tfidf'] = tfidf_scores.get(ref_name, 0.0)
+                # Recalculate ensemble with TF-IDF
+                weights = self.config.weights
+                total_weight = sum(weights.get(k, 0) for k in details.keys() if k != 'exact')
+                if total_weight > 0:
+                    score = sum(
+                        details.get(k, 0) * weights.get(k, 0) 
+                        for k in details.keys() if k != 'exact'
+                    ) / total_weight
+            
+            if score > best_score:
+                best_score = score
+                best_match = ref_name
+                best_details = details
+                
+                if details.get('exact', 0) == 1.0:
+                    best_match_type = 'exact'
+                elif score >= 0.95:
+                    best_match_type = 'very_high'
+                elif score >= 0.85:
+                    best_match_type = 'high'
+                elif score >= 0.70:
+                    best_match_type = 'medium'
+                elif score >= 0.50:
+                    best_match_type = 'low'
+                else:
+                    best_match_type = 'very_low'
+        
+        # If no good match found with TF-IDF candidates, search all names
+        if best_score < 0.5 and tfidf_candidates and len(tfidf_candidates) < len(self._names_list):
+            for ref_name in self._names_list:
+                if ref_name in tfidf_candidates:
+                    continue
+                    
+                score, details = self._calculate_ensemble_score(query_name, ref_name)
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = ref_name
+                    best_details = details
+        
+        return MatchResult(
+            query_name=query_name,
+            matched_name=best_match or '',
+            matched_value=self._name_to_value.get(best_match, None),
+            confidence_score=round(best_score, 4),
+            match_details={k: round(v, 4) for k, v in best_details.items()},
+            match_type=best_match_type
+        )
     
-    output_path = output_path or doc_path.replace(".docx", ".md")
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(markdown_content)
+    def match(self, df2: pd.DataFrame, name_col: str = 'name') -> pd.DataFrame:
+        """
+        Match names from df2 to df1
+        
+        Parameters:
+        -----------
+        df2 : pd.DataFrame
+            DataFrame with names to match
+        name_col : str
+            Name of the column containing names to match
+            
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with original data plus match results
+        """
+        if self._df1_data is None:
+            raise ValueError("Matcher not fitted. Call fit() first.")
+        
+        results = []
+        query_names = df2[name_col].astype(str).tolist()
+        
+        if self.config.parallel_processing and len(query_names) > 10:
+            # Parallel processing for large datasets
+            with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+                future_to_name = {
+                    executor.submit(self._find_best_match, name): name 
+                    for name in query_names
+                }
+                
+                for future in as_completed(future_to_name):
+                    results.append(future.result())
+        else:
+            # Sequential processing
+            for name in query_names:
+                results.append(self._find_best_match(name))
+        
+        # Sort results to match original order
+        results_dict = {r.query_name: r for r in results}
+        results = [results_dict[name] for name in query_names]
+        
+        # Create result DataFrame
+        result_df = df2.copy()
+        result_df['matched_name'] = [r.matched_name for r in results]
+        result_df['matched_value'] = [r.matched_value for r in results]
+        result_df['confidence_score'] = [r.confidence_score for r in results]
+        result_df['match_type'] = [r.match_type for r in results]
+        result_df['match_details'] = [r.match_details for r in results]
+        
+        # Apply threshold filter
+        if self.config.min_confidence_threshold > 0:
+            mask = result_df['confidence_score'] >= self.config.min_confidence_threshold
+            result_df.loc[~mask, ['matched_name', 'matched_value', 'match_type']] = [None, None, 'below_threshold']
+        
+        return result_df
     
-    print(f"✅ Exported to Markdown: {output_path}")
-    return output_path
+    def get_top_matches(self, query_name: str, top_n: int = 5) -> List[MatchResult]:
+        """Get top N matches for a single query name"""
+        if self._df1_data is None:
+            raise ValueError("Matcher not fitted. Call fit() first.")
+        
+        all_results = []
+        
+        for ref_name in self._names_list:
+            score, details = self._calculate_ensemble_score(query_name, ref_name)
+            all_results.append(MatchResult(
+                query_name=query_name,
+                matched_name=ref_name,
+                matched_value=self._name_to_value.get(ref_name),
+                confidence_score=round(score, 4),
+                match_details={k: round(v, 4) for k, v in details.items()},
+                match_type='candidate'
+            ))
+        
+        # Sort by confidence score
+        all_results.sort(key=lambda x: x.confidence_score, reverse=True)
+        
+        return all_results[:top_n]
 
 
-def export_all_to_excel(doc_path: str, output_path: str = None) -> str:
+# =============================================================================
+# MAIN FUNCTION - EASY TO USE API
+# =============================================================================
+
+def match_names(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    df1_name_col: str = 'name',
+    df1_value_col: str = 'value',
+    df2_name_col: str = 'name',
+    min_confidence: float = 0.0,
+    parallel: bool = True
+) -> pd.DataFrame:
     """
-    Export complete document analysis to Excel.
-    Includes: Summary, Headings, Tables, Text Content
+    Main function to match names between two DataFrames
+    
+    Parameters:
+    -----------
+    df1 : pd.DataFrame
+        Reference DataFrame with names and values
+    df2 : pd.DataFrame
+        DataFrame with names to match
+    df1_name_col : str
+        Column name for names in df1 (default: 'name')
+    df1_value_col : str
+        Column name for values in df1 (default: 'value')
+    df2_name_col : str
+        Column name for names in df2 (default: 'name')
+    min_confidence : float
+        Minimum confidence threshold (0.0 to 1.0)
+    parallel : bool
+        Enable parallel processing
+        
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with matched results including:
+        - Original df2 columns
+        - matched_name: Best matching name from df1
+        - matched_value: Corresponding value from df1
+        - confidence_score: Match confidence (0.0 to 1.0)
+        - match_type: Category of match quality
+        - match_details: Dictionary with individual algorithm scores
+    
+    Example:
+    --------
+    >>> df1 = pd.DataFrame({
+    ...     'name': ['Apple Inc.', 'Microsoft Corporation', 'Google LLC'],
+    ...     'value': [100, 200, 300]
+    ... })
+    >>> df2 = pd.DataFrame({
+    ...     'name': ['apple', 'MICROSOFT CORP', 'Gogle']
+    ... })
+    >>> result = match_names(df1, df2)
     """
-    output_path = output_path or doc_path.replace(".docx", "_analysis.xlsx")
+    config = MatchConfig(
+        min_confidence_threshold=min_confidence,
+        parallel_processing=parallel
+    )
     
-    # Gather all data
-    summary = get_document_summary(doc_path)
-    headings = extract_all_headings(doc_path)
-    tables = extract_all_tables(doc_path)
+    matcher = AdvancedNameMatcher(config)
+    matcher.fit(df1, name_col=df1_name_col, value_col=df1_value_col)
     
-    with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
-        # Summary sheet
-        summary_df = pd.DataFrame([{
-            "Metric": k,
-            "Value": str(v)
-        } for k, v in summary.items() if k != "heading_breakdown"])
-        summary_df.to_excel(writer, sheet_name="Summary", index=False)
-        
-        # Headings sheet
-        headings_df = pd.DataFrame(headings)
-        headings_df.to_excel(writer, sheet_name="Headings", index=False)
-        
-        # Tables sheet (list view)
-        tables_info = [{
-            "Index": t["index"],
-            "Heading": t["preceding_heading"],
-            "Rows": t["rows"],
-            "Columns": t["columns"]
-        } for t in tables]
-        tables_df = pd.DataFrame(tables_info)
-        tables_df.to_excel(writer, sheet_name="Tables_List", index=False)
-        
-        # Individual table sheets
-        for t in tables:
-            sheet_name = f"Table_{t['index'] + 1}"[:31]
-            t["dataframe"].to_excel(writer, sheet_name=sheet_name, index=False)
-    
-    print(f"✅ Complete analysis exported to: {output_path}")
-    return output_path
+    return matcher.match(df2, name_col=df2_name_col)
 
 
 # =============================================================================
-# MAIN DEMO FUNCTION
-# =============================================================================
-
-def demo():
-    """Demonstrate all main functionalities."""
-    print("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║         WORD DOCUMENT EDITOR - AUTOMATION TOOLKIT            ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║                                                              ║
-    ║  Available Functions:                                        ║
-    ║                                                              ║
-    ║  TABLE OPERATIONS:                                           ║
-    ║    • extract_all_tables(doc_path)                            ║
-    ║    • extract_and_save_tables(doc_path, excel_path)           ║
-    ║    • replace_table_by_index(doc_path, index, dataframe)      ║
-    ║    • replace_multiple_tables(doc_path, {idx: df, ...})       ║
-    ║                                                              ║
-    ║  HEADING OPERATIONS:                                         ║
-    ║    • extract_all_headings(doc_path)                          ║
-    ║    • extract_heading_2_paragraphs(doc_path)                  ║
-    ║    • extract_content_under_heading(doc_path, heading)        ║
-    ║                                                              ║
-    ║  IMAGE OPERATIONS:                                           ║
-    ║    • extract_all_images(doc_path, output_folder)             ║
-    ║    • replace_image_by_index(doc_path, index, new_image)      ║
-    ║    • replace_all_images_from_folder(doc_path, folder)        ║
-    ║                                                              ║
-    ║  TEXT OPERATIONS:                                            ║
-    ║    • find_and_replace_text(doc_path, {old: new, ...})        ║
-    ║    • find_text_locations(doc_path, search_text)              ║
-    ║                                                              ║
-    ║  ANALYSIS:                                                   ║
-    ║    • get_document_summary(doc_path)                          ║
-    ║    • print_document_structure(doc_path)                      ║
-    ║    • export_all_to_excel(doc_path)                           ║
-    ║                                                              ║
-    ║  BATCH OPERATIONS:                                           ║
-    ║    • batch_extract_tables(folder_path)                       ║
-    ║    • batch_find_replace(folder_path, replacements)           ║
-    ║    • merge_documents([doc1, doc2, ...], output_path)         ║
-    ║                                                              ║
-    ║  TEMPLATES:                                                  ║
-    ║    • fill_template_with_data(template, data_dict)            ║
-    ║    • create_documents_from_excel(template, excel_data)       ║
-    ║                                                              ║
-    ╚══════════════════════════════════════════════════════════════╝
-    """)
-
-
-# =============================================================================
-# USAGE EXAMPLES
+# DEMONSTRATION & TESTING
 # =============================================================================
 
 if __name__ == "__main__":
-    demo()
+    # Create sample data
+    df1 = pd.DataFrame({
+        'name': [
+            'Apple Inc.',
+            'Microsoft Corporation',
+            'Google LLC',
+            'Amazon.com, Inc.',
+            'Tesla, Inc.',
+            'Meta Platforms, Inc.',
+            'NVIDIA Corporation',
+            'Johnson & Johnson',
+            'Procter & Gamble Co.',
+            'The Coca-Cola Company',
+            'International Business Machines Corporation',
+            'Berkshire Hathaway Inc.',
+            'JPMorgan Chase & Co.',
+            'Bank of America Corporation',
+            'Wells Fargo & Company'
+        ],
+        'value': [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500]
+    })
     
-    # Example usage (uncomment to run):
+    df2 = pd.DataFrame({
+        'name': [
+            'apple',                           # lowercase
+            'MICROSOFT CORP',                  # uppercase, abbreviated
+            'Gogle',                           # typo
+            'Amazon Inc',                      # missing .com
+            'Tesla Motors',                    # different suffix
+            'Meta',                            # shortened
+            'nvidia',                          # lowercase
+            'Johnson and Johnson',             # & vs and
+            'Procter Gamble',                  # missing &
+            'Coca Cola',                       # missing The and hyphen
+            'IBM',                             # acronym
+            'Berkshire Hathway',               # typo
+            'JP Morgan',                       # different format
+            'Bank America',                    # missing of
+            'Wells Fargo Company',             # missing &
+            'Unknown Company XYZ',             # no match
+            'APPLE INCORPORATED',              # different suffix
+            'MSFT Corp.',                      # ticker-like
+        ]
+    })
     
-    # === EXTRACT TABLES TO EXCEL ===
-    # tables, excel_path = extract_and_save_tables("document.docx", "output.xlsx")
+    print("=" * 80)
+    print("ADVANCED NAME MATCHING DEMO")
+    print("=" * 80)
+    print("\nReference Data (df1):")
+    print(df1.to_string(index=False))
+    print("\nQuery Data (df2):")
+    print(df2.to_string(index=False))
     
-    # === REPLACE TABLE WITH DATAFRAME ===
-    # new_data = pd.DataFrame({
-    #     "Name": ["Alice", "Bob", "Charlie"],
-    #     "Score": [95, 87, 92]
-    # })
-    # replace_table_by_index("document.docx", 0, new_data, "updated_document.docx")
+    # Run matching
+    print("\n" + "=" * 80)
+    print("MATCHING RESULTS")
+    print("=" * 80)
     
-    # === EXTRACT ALL IMAGES ===
-    # images = extract_all_images("document.docx", "./my_images")
+    result = match_names(df1, df2, min_confidence=0.3)
     
-    # === REPLACE IMAGES FROM FOLDER ===
-    # replace_all_images_from_folder("document.docx", "./new_images", "updated.docx")
+    # Display results
+    display_cols = ['name', 'matched_name', 'matched_value', 'confidence_score', 'match_type']
+    print("\n" + result[display_cols].to_string(index=False))
     
-    # === FIND AND REPLACE TEXT ===
-    # find_and_replace_text("document.docx", {
-    #     "old company": "New Company",
-    #     "2023": "2024"
-    # })
+    # Show detailed scores for first few matches
+    print("\n" + "=" * 80)
+    print("DETAILED MATCH SCORES (First 5)")
+    print("=" * 80)
     
-    # === GET DOCUMENT SUMMARY ===
-    # summary = get_document_summary("document.docx")
-    # print(summary)
-    
-    # === BATCH PROCESS FOLDER ===
-    # batch_extract_tables("./documents/", "./excel_outputs/")
+    for idx, row in result.head().iterrows():
+        print(f"\nQuery: '{row['name']}'")
+        print(f"Match: '{row['matched_name']}' (Value: {row['matched_value']})")
+        print(f"Confidence: {row['confidence_score']:.2%} ({row['match_type']})")
+        print("Algorithm Scores:")
+        for algo, score in row['match_details'].items():
+            print(f"  - {algo}: {score:.4f}")
 ```
 
-## Quick Reference Guide
+## Key Features
 
-### 1️⃣ Extract Tables to Excel
+### 1. **Multiple Matching Algorithms**
+| Algorithm | Best For |
+|-----------|----------|
+| Exact Match | Pre-processed identical names |
+| Ratio | General similarity |
+| Partial Ratio | Substring matching |
+| Token Sort | Different word orders |
+| Token Set | Extra/missing words |
+| Jaro-Winkler | Typos and misspellings |
+| N-gram | Character-level matching |
+| TF-IDF | Large dataset efficiency |
+| Phonetic | Similar sounding names |
+
+### 2. **Smart Preprocessing**
+- Handles **Ltd, Limited, Corp, Corporation, Inc**, etc.
+- Normalizes **& ↔ and**
+- Removes punctuation and extra spaces
+- Case-insensitive matching
+- Unicode normalization
+
+### 3. **Usage Example**
 
 ```python
-from word_editor import extract_and_save_tables
-
-# Extract all tables from Word and save to Excel
-tables_data, excel_path = extract_and_save_tables(
-    "report.docx", 
-    "extracted_tables.xlsx"
-)
-
-# Access individual DataFrames
-for table in tables_data:
-    print(f"Table {table['index']}: {table['preceding_heading']}")
-    print(table['dataframe'])
-```
-
-### 2️⃣ Replace Table with DataFrame
-
-```python
-from word_editor import replace_table_by_index, replace_multiple_tables
 import pandas as pd
 
-# Create new data
-new_df = pd.DataFrame({
-    "Product": ["Widget A", "Widget B", "Widget C"],
-    "Price": [29.99, 39.99, 49.99],
-    "Stock": [100, 50, 75]
+# Your data
+df1 = pd.DataFrame({
+    'name': ['Apple Inc.', 'Microsoft Corp', 'Google LLC'],
+    'value': [100, 200, 300]
 })
 
-# Replace single table
-replace_table_by_index("report.docx", 0, new_df, "updated_report.docx")
-
-# Replace multiple tables at once
-replacements = {
-    0: sales_df,
-    2: inventory_df,
-    3: summary_df
-}
-replace_multiple_tables("report.docx", replacements, "batch_updated.docx")
-```
-
-### 3️⃣ Extract and Replace Images
-
-```python
-from word_editor import (
-    extract_all_images, 
-    replace_image_by_index,
-    replace_all_images_from_folder,
-    replace_images_by_mapping
-)
-
-# Extract all images
-images = extract_all_images("presentation.docx", "./extracted_images")
-
-# Replace single image
-replace_image_by_index("presentation.docx", 0, "new_chart.png", "updated.docx")
-
-# Replace all images from folder (in order)
-replace_all_images_from_folder("presentation.docx", "./new_charts/", "updated.docx")
-
-# Replace specific images using mapping
-mapping = {
-    0: "./charts/sales_chart.png",
-    2: "./charts/growth_chart.png",
-    5: "./charts/summary_chart.png"
-}
-replace_images_by_mapping("presentation.docx", mapping, "updated.docx")
-```
-
-### 4️⃣ Extract Headings
-
-```python
-from word_editor import (
-    extract_all_headings,
-    extract_heading_2_paragraphs,
-    extract_content_under_heading
-)
-
-# Get all headings
-headings = extract_all_headings("document.docx")
-
-# Get only Heading 2 style
-h2_headings = extract_heading_2_paragraphs("document.docx")
-
-# Get content under specific heading
-content = extract_content_under_heading("document.docx", "Financial Summary")
-print(content["paragraphs"])  # Text paragraphs
-print(content["tables"])       # DataFrames of tables
-```
-
-### 5️⃣ Batch Processing
-
-```python
-from word_editor import (
-    batch_extract_tables,
-    batch_find_replace,
-    create_documents_from_excel
-)
-
-# Extract tables from all docs in folder
-results = batch_extract_tables("./documents/", "./excel_output/")
-
-# Find/replace across all documents
-batch_find_replace("./documents/", {
-    "2023": "2024",
-    "Draft": "Final"
+df2 = pd.DataFrame({
+    'name': ['apple', 'MICROSOFT CORPORATION', 'Gogle']
 })
 
-# Create multiple docs from template + Excel
-create_documents_from_excel(
-    "template.docx",
-    "employee_data.xlsx",
-    "./output_letters/",
-    name_column="Employee_Name"
+# Simple usage
+result = match_names(df1, df2)
+print(result)
+
+# Advanced usage with custom config
+config = MatchConfig(
+    min_confidence_threshold=0.5,
+    parallel_processing=True,
+    weights={
+        'token_set': 0.30,
+        'token_sort': 0.25,
+        'jaro_winkler': 0.20,
+        'ratio': 0.15,
+        'partial_ratio': 0.10
+    }
 )
+matcher = AdvancedNameMatcher(config)
+matcher.fit(df1)
+result = matcher.match(df2)
 ```
 
-## Workflow Diagram
+## Installation Requirements
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    WORD DOCUMENT AUTOMATION WORKFLOW                │
-└─────────────────────────────────────────────────────────────────────┘
-
-                          ┌──────────────┐
-                          │  Word Doc    │
-                          │  (.docx)     │
-                          └──────┬───────┘
-                                 │
-           ┌─────────────────────┼─────────────────────┐
-           │                     │                     │
-           ▼                     ▼                     ▼
-    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-    │  EXTRACT    │      │  EXTRACT    │      │  EXTRACT    │
-    │  Tables     │      │  Headings   │      │  Images     │
-    └──────┬──────┘      └──────┬──────┘      └──────┬──────┘
-           │                    │                    │
-           ▼                    ▼                    ▼
-    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-    │ DataFrames  │      │ Heading     │      │ Image       │
-    │ (pandas)    │      │ List        │      │ Files       │
-    └──────┬──────┘      └──────┬──────┘      └──────┬──────┘
-           │                    │                    │
-           ▼                    ▼                    ▼
-    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-    │ Save to     │      │ Save to     │      │ Process/    │
-    │ Excel       │      │ Excel       │      │ Modify      │
-    └──────┬──────┘      └─────────────┘      └──────┬──────┘
-           │                                         │
-           │          ┌───────────────┐              │
-           └─────────►│   MODIFY      │◄─────────────┘
-                      │  DataFrames   │
-                      │  Images       │
-                      └───────┬───────┘
-                              │
-                              ▼
-                      ┌───────────────┐
-                      │   REPLACE     │
-                      │  in Document  │
-                      └───────┬───────┘
-                              │
-                              ▼
-                      ┌───────────────┐
-                      │  Updated      │
-                      │  Word Doc     │
-                      └───────────────┘
+```bash
+pip install pandas numpy rapidfuzz scikit-learn jellyfish
 ```
 
-This functional toolkit provides everything you need for Word document automation without using OOP!
+## Output Format
+
+| Column | Description |
+|--------|-------------|
+| matched_name | Best matching name from df1 |
+| matched_value | Corresponding value from df1 |
+| confidence_score | 0.0 to 1.0 confidence |
+| match_type | exact/very_high/high/medium/low/very_low |
+| match_details | Dict of individual algorithm scores |
