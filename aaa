@@ -1,231 +1,36 @@
-import pandas as pd
-import numpy as np
-from sklearn.metrics import r2_score
-import statsmodels.api as sm
-from itertools import chain
-
-
-# --------------------
-# Optimized Forward Selection (Adj R² Gain)
-# --------------------
-def forward_selection_adjR2_fast(X, y):
-    remaining = list(X.columns)
-    selected = []
-    best_adj_r2 = -np.inf
-    y_arr = y.values
-    n = len(y_arr)
-
-    while remaining:
-        best_var = None
-        best_r2_adj = best_adj_r2
-        for var in remaining:
-            trial_vars = selected + [var]
-            X_trial = np.column_stack([np.ones(n), X[trial_vars].values])
-            beta, _, _, _ = np.linalg.lstsq(X_trial, y_arr, rcond=None)
-            y_pred = X_trial @ beta
-            rss = np.sum((y_arr - y_pred) ** 2)
-            tss = np.sum((y_arr - y_arr.mean()) ** 2)
-            r2 = 1 - rss / tss
-            adj_r2 = 1 - (1 - r2) * (n - 1) / (n - X_trial.shape[1])
-            if adj_r2 > best_r2_adj + 1e-6:
-                best_r2_adj = adj_r2
-                best_var = var
-        if best_var is None:
-            break
-        selected.append(best_var)
-        remaining.remove(best_var)
-        best_adj_r2 = best_r2_adj
-    return selected
-
-# --------------------
-# Optimized Backward Elimination
-# --------------------
-def backward_elimination_fast(X, y, sl=0.05):
-    cols = list(X.columns)
-    n = len(y)
-    while True:
-        Xc = np.column_stack([np.ones(n), X[cols].values])
-        beta, _, _, _ = np.linalg.lstsq(Xc, y.values, rcond=None)
-        y_pred = Xc @ beta
-        mse = np.sum((y.values - y_pred) ** 2) / (n - Xc.shape[1])
-        var_beta = mse * np.linalg.inv(Xc.T @ Xc).diagonal()
-        se_beta = np.sqrt(var_beta)
-        t_stats = beta / se_beta
-        pvals = 2 * (1 - t.cdf(np.abs(t_stats), df=n - Xc.shape[1]))
-        pvals_dict = dict(zip(["const"] + cols, pvals))
-        max_pval_var = max(cols, key=lambda c: pvals_dict[c])
-        if pvals_dict[max_pval_var] > sl:
-            cols.remove(max_pval_var)
-        else:
-            break
-    return cols
-
-
-# ----------------------------
-# Transformation functions
-# ----------------------------
-def linear_transform(x_sample, y_sample, data): return data
-def quadratic_transform(x_sample, y_sample, data): return data ** 2
-def square_root_transform(data): return np.sqrt(np.clip(data, 0, None))
-def exp_transform(data): return np.exp(data)
-def symmetric_transform(data): return np.abs(data)
-def log_transform(data): return np.log(np.clip(data, 1e-6, None))
-
-TRANSFORM_FUNCS = {
-    'linear': lambda x, y, d: linear_transform(x, y, d),
-    'quadratic': lambda x, y, d: quadratic_transform(x, y, d),
-    'sqrt': lambda x, y, d: square_root_transform(d),
-    'exp': lambda x, y, d: exp_transform(d),
-    'symmetric': lambda x, y, d: symmetric_transform(d),
-    'log': lambda x, y, d: log_transform(d)
-}
-
-# ----------------------------
-# Single Factor Analysis
-# ----------------------------
-def single_factor_analysis(df, target, variables):
-    results = []
-    y = df[target]
-
-    for var in variables:
-        x_orig = df[var]
-        for tname, tfunc in TRANSFORM_FUNCS.items():
-            try:
-                x_trans = tfunc(x_orig, y, x_orig)
-                X = sm.add_constant(x_trans)
-                model = sm.OLS(y, X).fit()
-                r2 = model.rsquared
-                pval = model.pvalues[1]
-                sign = np.sign(model.params[1])
-                corr = np.corrcoef(x_trans, y)[0, 1]
-                results.append({
-                    'variable': var,
-                    'transform': tname,
-                    'R2': r2,
-                    'pval': pval,
-                    'sign': sign,
-                    'pearson_corr': corr
-                })
-            except Exception:
-                continue
-
-    return pd.DataFrame(results)
-
-# ----------------------------
-# Hybrid variable selection
-# ----------------------------
-def hybrid_selection(df, target, candidates):
-    y = df[target]
-    selected_vars = []
-    remaining_vars = candidates.copy()
-    best_adj_r2 = -np.inf
-
-    while remaining_vars:
-        improvements = []
-        for var in remaining_vars:
-            X = sm.add_constant(df[selected_vars + [var]])
-            model = sm.OLS(y, X).fit()
-            if model.f_pvalue < 0.05:
-                improvements.append((var, model.rsquared_adj))
-
-        if not improvements:
-            break
-
-        best_var, best_r2 = max(improvements, key=lambda x: x[1])
-        if best_r2 > best_adj_r2:
-            selected_vars.append(best_var)
-            remaining_vars.remove(best_var)
-            best_adj_r2 = best_r2
-        else:
-            break
-
-    # Backward elimination
-    improved = True
-    while improved and len(selected_vars) > 1:
-        improved = False
-        for var in selected_vars.copy():
-            vars_test = [v for v in selected_vars if v != var]
-            X = sm.add_constant(df[vars_test])
-            model = sm.OLS(y, X).fit()
-            if model.f_pvalue < 0.05 and model.rsquared_adj > best_adj_r2:
-                selected_vars = vars_test
-                best_adj_r2 = model.rsquared_adj
-                improved = True
-
-    return selected_vars
-
-# ----------------------------
-# Segment-wise R²
-# ----------------------------
-def segment_r2(y_true, y_pred, segments):
-    results = []
-    for seg_value, idx in pd.Series(segments).groupby(segments).groups.items():
-        r2 = r2_score(y_true.iloc[idx], y_pred.iloc[idx])
-        results.append({"Segment": seg_value, "R2": r2})
-    return pd.DataFrame(results)
-
-# ----------------------------
-# Main pipeline
-# ----------------------------
-def run_pipeline(df, target, variables, segment_col, output_excel):
-    # Step 1: SFA
-    sfa_results = single_factor_analysis(df, target, variables)
-
-    # Step 2: Filter significant variables
-    passing_vars = sfa_results[(sfa_results['pval'] < 0.05) & (sfa_results['R2'] > 0.01)]
-    passing_vars_names = list(set(passing_vars['variable']))
-
-    # Step 3: Hybrid selection
-    selected_vars = hybrid_selection(df, target, passing_vars_names)
-
-    # Step 4: Fit final model
-    y = df[target]
-    X = sm.add_constant(df[selected_vars])
-    final_model = sm.OLS(y, X).fit()
-
-    # Step 5: Scores
-    df["model_score"] = final_model.predict(X)
-
-    # Step 6: R² metrics
-    overall_r2 = r2_score(y, df["model_score"])
-    segment_r2_df = segment_r2(y, df["model_score"], df[segment_col])
-
-    # Step 7: Save to Excel
-    with pd.ExcelWriter(output_excel) as writer:
-        sfa_results.to_excel(writer, sheet_name="SFA_Results", index=False)
-        pd.DataFrame({"Selected_Variables": selected_vars}).to_excel(writer, sheet_name="Selected_Variables", index=False)
-        pd.DataFrame(final_model.summary().tables[1]).to_excel(writer, sheet_name="Model_Coefficients")
-        pd.DataFrame({"Overall_R2": [overall_r2]}).to_excel(writer, sheet_name="Overall_R2", index=False)
-        segment_r2_df.to_excel(writer, sheet_name="Segment_R2", index=False)
-        df[[target, "model_score"]].to_excel(writer, sheet_name="Scores", index=False)
-
-    return {
-        "selected_vars": selected_vars,
-        "overall_r2": overall_r2,
-        "segment_r2": segment_r2_df,
-        "model": final_model
-    }
-
-# ----------------------------
-# Dummy data for testing
-# ----------------------------
-np.random.seed(42)
-training_df = pd.DataFrame({
-    "logit_pd": np.random.randn(500),
-    "var1": np.random.randn(500),
-    "var2": np.random.rand(500) * 10,
-    "var3": np.random.randint(1, 100, 500),
-    "segment": np.random.choice(["A", "B", "C"], 500)
-})
-
-result = run_pipeline(
-    df=training_df,
-    target="logit_pd",
-    variables=["var1", "var2", "var3"],
-    segment_col="segment",
-    output_excel="model_output.xlsx"
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$Message
 )
 
-print("Selected Variables:", result["selected_vars"])
-print("Overall R2:", result["overall_r2"])
-print("Segment-wise R2:\n", result["segment_r2"])
+# 1. Stage all changes
+Write-Host "Staging changes..." -ForegroundColor Cyan
+git add -A
+
+# 2. Commit with the provided message
+Write-Host "Committing..." -ForegroundColor Cyan
+git commit -m $Message
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Nothing to commit or commit failed. Exiting." -ForegroundColor Yellow
+    exit
+}
+
+# 3. Pull latest changes via rebase to keep history clean
+Write-Host "Pulling latest changes (rebase)..." -ForegroundColor Cyan
+git pull --rebase
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Conflict detected during pull! Please resolve manually." -ForegroundColor Red
+    exit
+}
+
+# 4. Push to remote
+Write-Host "Pushing to remote..." -ForegroundColor Cyan
+git push
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Successfully synced!" -ForegroundColor Green
+} else {
+    Write-Host "Push failed." -ForegroundColor Red
+}
