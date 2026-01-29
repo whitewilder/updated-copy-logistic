@@ -1,1078 +1,323 @@
-# VS Code Extension: IRB Document Validator (Using VS Code Language Models)
-
-I'll refactor the extension to use VS Code's built-in Language Model API instead of external API keys.
-
-## Updated Project Structure
-
-```
-my-ai-extension/
-├── src/
-│   ├── extension.ts
-│   ├── documentProcessor.ts
-│   ├── aiService.ts
-│   ├── excelGenerator.ts
-│   ├── promptBuilder.ts
-│   └── types.ts
-├── package.json
-├── tsconfig.json
-├── .vscodeignore
-└── README.md
-```
-
-## 1. **package.json** (Updated)
-
-```json
-{
-  "name": "irb-document-validator",
-  "displayName": "IRB Document Validator",
-  "description": "Validates Word documents for IRB compliance using VS Code AI models",
-  "version": "1.0.0",
-  "engines": {
-    "vscode": "^1.90.0"
-  },
-  "categories": [
-    "Linters",
-    "Formatters",
-    "AI"
-  ],
-  "activationEvents": [
-    "onCommand:irb-validator.validateDocument"
-  ],
-  "main": "./out/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "irb-validator.validateDocument",
-        "title": "IRB: Validate Word Document"
-      }
-    ],
-    "configuration": {
-      "title": "IRB Document Validator",
-      "properties": {
-        "irbValidator.outputFolder": {
-          "type": "string",
-          "default": "",
-          "description": "Default output folder for Excel reports"
-        },
-        "irbValidator.batchSize": {
-          "type": "number",
-          "default": 5,
-          "description": "Number of paragraphs to analyze in one batch (reduces API calls)"
-        },
-        "irbValidator.preferredModel": {
-          "type": "string",
-          "default": "auto",
-          "enum": ["auto", "gpt-4", "gpt-3.5-turbo", "copilot"],
-          "description": "Preferred AI model (auto will select best available)"
-        }
-      }
-    }
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src --ext ts"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.90.0",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
-    "eslint": "^8.0.0",
-    "typescript": "^5.0.0"
-  },
-  "dependencies": {
-    "mammoth": "^1.6.0",
-    "exceljs": "^4.4.0"
-  }
-}
-```
-
-## 2. **src/types.ts** (Updated)
-
-```typescript
-import * as vscode from 'vscode';
-
-export interface ValidationIssue {
-  category: string;
-  paragraph: number;
-  originalText: string;
-  issue: string;
-  severity: 'Critical' | 'Major' | 'Minor';
-  suggestion: string;
-  rewrittenText?: string;
-  lineNumber?: number;
-}
-
-export interface DocumentAnalysis {
-  grammarIssues: ValidationIssue[];
-  spellingIssues: ValidationIssue[];
-  phrasingIssues: ValidationIssue[];
-  concisenessIssues: ValidationIssue[];
-  toneIssues: ValidationIssue[];
-  irbComplianceIssues: ValidationIssue[];
-  modelValidationIssues: ValidationIssue[];
-  logicalConsistencyIssues: ValidationIssue[];
-}
-
-export interface ParagraphBatch {
-  startIndex: number;
-  endIndex: number;
-  paragraphs: string[];
-}
-
-export interface BatchAnalysisResult {
-  batchIndex: number;
-  issues: ParsedIssue[];
-}
-
-export interface ParsedIssue {
-  paragraphNumber: number;
-  category: string;
-  severity: 'Critical' | 'Major' | 'Minor';
-  issue: string;
-  suggestion: string;
-  rewrittenText?: string;
-  originalText: string;
-}
-
-export interface ModelInfo {
-  model: vscode.LanguageModelChat;
-  name: string;
-  family: string;
-  maxInputTokens: number;
-}
-```
-
-## 3. **src/promptBuilder.ts** (New - Optimized Prompts)
-
-```typescript
-/**
- * Build system prompt for IRB validation
- */
-export function buildSystemPrompt(): string {
-  return `You are an IRB (Internal Ratings-Based) model validation expert and technical editor specializing in:
-- Basel II/III regulatory frameworks and CRR compliance
-- Credit risk modeling (PD, LGD, EAD estimation)
-- Model validation and performance metrics
-- Statistical methodologies and backtesting
-- Technical documentation for regulatory submissions
-
-Analyze documents for:
-1. Grammar, spelling, and syntax errors
-2. Awkward phrasing and clarity issues
-3. Verbosity and conciseness
-4. Professional tone and formality
-5. Logical consistency and flow
-6. IRB regulatory alignment
-7. Model methodology soundness
-8. Technical accuracy and completeness
-
-Respond ONLY in valid JSON format without markdown code blocks.`;
-}
-
-/**
- * Build batch analysis prompt for multiple paragraphs
- */
-export function buildBatchAnalysisPrompt(
-  paragraphs: string[],
-  startIndex: number
-): string {
-  const paragraphsText = paragraphs
-    .map((p, idx) => `[PARAGRAPH ${startIndex + idx + 1}]\n${p}\n`)
-    .join('\n');
-
-  return `Analyze the following IRB documentation paragraphs. For EACH paragraph, identify ALL issues across these categories:
-
-Categories:
-- Grammar: grammatical errors, syntax issues
-- Spelling: spelling mistakes, typos
-- Phrasing: awkward wording, unclear expressions
-- Conciseness: verbosity, redundancy
-- Tone: informal language, unprofessional tone
-- IRB Compliance: regulatory misalignment, missing requirements
-- Model Validation: methodology issues, insufficient justification
-- Logical Consistency: contradictions, unclear flow
-
-Paragraphs to analyze:
-${paragraphsText}
-
-Respond with JSON array (NO markdown, NO code blocks):
-[
-  {
-    "paragraphNumber": 1,
-    "category": "Grammar|Spelling|Phrasing|Conciseness|Tone|IRB Compliance|Model Validation|Logical Consistency",
-    "severity": "Critical|Major|Minor",
-    "issue": "specific issue description",
-    "suggestion": "how to fix it",
-    "rewrittenText": "improved version (only if significant changes needed)"
-  }
-]
-
-If a paragraph has NO issues, omit it from the response. Return empty array [] if all paragraphs are perfect.`;
-}
-
-/**
- * Build overall document analysis prompt
- */
-export function buildOverallAnalysisPrompt(summaryText: string): string {
-  return `Perform a comprehensive IRB model validation review of this document summary:
-
-${summaryText}
-
-Evaluate:
-1. Overall document structure and completeness
-2. Model development methodology
-3. Variable selection and justification
-4. Performance metrics and validation approach
-5. Regulatory compliance (Basel II/III, CRR)
-6. Risk identification and limitations
-7. Documentation quality and clarity
-
-Respond with JSON (NO markdown, NO code blocks):
-{
-  "overallAssessment": "brief summary of document quality",
-  "criticalIssues": ["issue1", "issue2"],
-  "majorGaps": ["gap1", "gap2"],
-  "recommendations": ["rec1", "rec2"],
-  "complianceStatus": "assessment of regulatory alignment",
-  "strengths": ["strength1", "strength2"]
-}`;
-}
-
-/**
- * Extract and clean JSON from AI response
- */
-export function extractJSON(response: string): any {
-  try {
-    // Remove markdown code blocks if present
-    let cleaned = response.trim();
-    cleaned = cleaned.replace(/^```json\s*/i, '');
-    cleaned = cleaned.replace(/^```\s*/i, '');
-    cleaned = cleaned.replace(/\s*```$/i, '');
-    cleaned = cleaned.trim();
-
-    // Try to find JSON array or object
-    const jsonMatch = cleaned.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-
-    // Fallback: try parsing the whole thing
-    return JSON.parse(cleaned);
-  } catch (error) {
-    console.error('JSON extraction failed:', error);
-    console.error('Response was:', response);
-    return null;
-  }
-}
-```
-
-## 4. **src/aiService.ts** (New - VS Code LM Integration)
-
-```typescript
-import * as vscode from 'vscode';
-import { ModelInfo, ParsedIssue } from './types';
-import { 
-  buildSystemPrompt, 
-  buildBatchAnalysisPrompt, 
-  buildOverallAnalysisPrompt,
-  extractJSON 
-} from './promptBuilder';
-
-/**
- * Select best available language model
- */
-export async function selectLanguageModel(
-  preferredModel: string = 'auto'
-): Promise<ModelInfo | null> {
-  try {
-    const models = await vscode.lm.selectChatModels();
-    
-    if (!models || models.length === 0) {
-      vscode.window.showErrorMessage('No language models available. Please install GitHub Copilot or configure AI models.');
-      return null;
-    }
-
-    let selectedModel: vscode.LanguageModelChat | null = null;
-
-    // Auto-select based on capability
-    if (preferredModel === 'auto') {
-      // Prefer GPT-4 for better accuracy
-      selectedModel = models.find(m => 
-        m.family.toLowerCase().includes('gpt-4') || 
-        m.name.toLowerCase().includes('gpt-4')
-      ) || models[0];
-    } else {
-      // Try to find preferred model
-      selectedModel = models.find(m => 
-        m.family.toLowerCase().includes(preferredModel.toLowerCase()) ||
-        m.name.toLowerCase().includes(preferredModel.toLowerCase())
-      ) || models[0];
-    }
-
-    if (!selectedModel) {
-      selectedModel = models[0];
-    }
-
-    const modelInfo: ModelInfo = {
-      model: selectedModel,
-      name: selectedModel.name,
-      family: selectedModel.family,
-      maxInputTokens: selectedModel.maxInputTokens || 4096
-    };
-
-    console.log(`Selected model: ${modelInfo.name} (${modelInfo.family})`);
-    return modelInfo;
-
-  } catch (error) {
-    vscode.window.showErrorMessage(`Failed to select language model: ${error}`);
-    return null;
-  }
-}
-
-/**
- * Analyze a batch of paragraphs (optimized to reduce API calls)
- */
-export async function analyzeParagraphBatch(
-  modelInfo: ModelInfo,
-  paragraphs: string[],
-  startIndex: number,
-  token: vscode.CancellationToken
-): Promise<ParsedIssue[]> {
-  try {
-    const messages = [
-      vscode.LanguageModelChatMessage.User(buildSystemPrompt()),
-      vscode.LanguageModelChatMessage.User(buildBatchAnalysisPrompt(paragraphs, startIndex))
-    ];
-
-    const response = await modelInfo.model.sendRequest(
-      messages,
-      {},
-      token
-    );
-
-    // Collect response
-    let fullResponse = '';
-    for await (const chunk of response.text) {
-      fullResponse += chunk;
-    }
-
-    // Parse JSON response
-    const parsed = extractJSON(fullResponse);
-    
-    if (!parsed) {
-      console.warn('Failed to parse batch response');
-      return [];
-    }
-
-    // Ensure it's an array
-    const issues = Array.isArray(parsed) ? parsed : [parsed];
-    
-    // Map to ParsedIssue format with original text
-    return issues.map((issue: any) => ({
-      paragraphNumber: issue.paragraphNumber || startIndex + 1,
-      category: issue.category || 'Unknown',
-      severity: issue.severity || 'Minor',
-      issue: issue.issue || 'No description',
-      suggestion: issue.suggestion || 'No suggestion',
-      rewrittenText: issue.rewrittenText,
-      originalText: paragraphs[issue.paragraphNumber - startIndex - 1] || ''
-    }));
-
-  } catch (error) {
-    console.error('Batch analysis error:', error);
-    return [];
-  }
-}
-
-/**
- * Perform overall document analysis
- */
-export async function performOverallAnalysis(
-  modelInfo: ModelInfo,
-  documentSummary: string,
-  token: vscode.CancellationToken
-): Promise<any> {
-  try {
-    const messages = [
-      vscode.LanguageModelChatMessage.User(buildSystemPrompt()),
-      vscode.LanguageModelChatMessage.User(buildOverallAnalysisPrompt(documentSummary))
-    ];
-
-    const response = await modelInfo.model.sendRequest(
-      messages,
-      {},
-      token
-    );
-
-    let fullResponse = '';
-    for await (const chunk of response.text) {
-      fullResponse += chunk;
-    }
-
-    const parsed = extractJSON(fullResponse);
-    return parsed || {
-      overallAssessment: 'Analysis unavailable',
-      criticalIssues: [],
-      majorGaps: [],
-      recommendations: [],
-      complianceStatus: 'Unknown'
-    };
-
-  } catch (error) {
-    console.error('Overall analysis error:', error);
-    return {
-      overallAssessment: 'Analysis failed',
-      criticalIssues: [],
-      majorGaps: [],
-      recommendations: [],
-      complianceStatus: 'Error'
-    };
-  }
-}
-
-/**
- * Estimate token count (rough approximation)
- */
-export function estimateTokens(text: string): number {
-  // Rough estimate: ~4 characters per token
-  return Math.ceil(text.length / 4);
-}
-
-/**
- * Calculate optimal batch size based on model capacity
- */
-export function calculateOptimalBatchSize(
-  modelInfo: ModelInfo,
-  averageParagraphLength: number,
-  configuredBatchSize: number
-): number {
-  const maxTokens = modelInfo.maxInputTokens;
-  const systemPromptTokens = 300; // Approximate
-  const responseBufferTokens = 1000; // Reserve for response
-  
-  const availableTokens = maxTokens - systemPromptTokens - responseBufferTokens;
-  const tokensPerParagraph = estimateTokens(
-    `[PARAGRAPH X]\n${'a'.repeat(averageParagraphLength)}\n`
-  );
-  
-  const maxBatchSize = Math.floor(availableTokens / tokensPerParagraph);
-  
-  // Use configured size or calculated max, whichever is smaller
-  return Math.min(configuredBatchSize, maxBatchSize, 10); // Cap at 10 for safety
-}
-```
-
-## 5. **src/documentProcessor.ts** (Updated - Batched Processing)
-
-```typescript
-import * as mammoth from 'mammoth';
-import * as fs from 'fs';
-import * as vscode from 'vscode';
-import { ValidationIssue, DocumentAnalysis, ParagraphBatch, ParsedIssue } from './types';
-import { analyzeParagraphBatch, performOverallAnalysis, calculateOptimalBatchSize } from './aiService';
-
-/**
- * Extract text from Word document
- */
-export async function extractTextFromWord(filePath: string): Promise<string[]> {
-  const buffer = fs.readFileSync(filePath);
-  const result = await mammoth.extractRawText({ buffer });
-  
-  const paragraphs = result.value
-    .split('\n')
-    .map(p => p.trim())
-    .filter(p => p.length > 20); // Filter very short paragraphs
-  
-  return paragraphs;
-}
-
-/**
- * Create batches of paragraphs for efficient processing
- */
-function createParagraphBatches(
-  paragraphs: string[],
-  batchSize: number
-): ParagraphBatch[] {
-  const batches: ParagraphBatch[] = [];
-  
-  for (let i = 0; i < paragraphs.length; i += batchSize) {
-    batches.push({
-      startIndex: i,
-      endIndex: Math.min(i + batchSize, paragraphs.length),
-      paragraphs: paragraphs.slice(i, i + batchSize)
-    });
-  }
-  
-  return batches;
-}
-
-/**
- * Process document with optimized batching
- */
-export async function processDocument(
-  filePath: string,
-  modelInfo: any,
-  batchSize: number,
-  progressCallback: (progress: number, message: string) => void,
-  token: vscode.CancellationToken
-): Promise<DocumentAnalysis> {
-  const analysis: DocumentAnalysis = {
-    grammarIssues: [],
-    spellingIssues: [],
-    phrasingIssues: [],
-    concisenessIssues: [],
-    toneIssues: [],
-    irbComplianceIssues: [],
-    modelValidationIssues: [],
-    logicalConsistencyIssues: []
-  };
-
-  try {
-    // Extract paragraphs
-    progressCallback(5, 'Extracting text from Word document...');
-    const paragraphs = await extractTextFromWord(filePath);
-    
-    if (paragraphs.length === 0) {
-      throw new Error('No content found in document');
-    }
-
-    // Calculate optimal batch size
-    const avgLength = paragraphs.reduce((sum, p) => sum + p.length, 0) / paragraphs.length;
-    const optimalBatchSize = calculateOptimalBatchSize(modelInfo, avgLength, batchSize);
-    
-    console.log(`Processing ${paragraphs.length} paragraphs in batches of ${optimalBatchSize}`);
-
-    // Create batches
-    const batches = createParagraphBatches(paragraphs, optimalBatchSize);
-    const totalBatches = batches.length;
-
-    // Process each batch
-    for (let i = 0; i < batches.length; i++) {
-      if (token.isCancellationRequested) {
-        throw new Error('Analysis cancelled by user');
-      }
-
-      const batch = batches[i];
-      const progress = 10 + ((i / totalBatches) * 70);
-      
-      progressCallback(
-        progress,
-        `Analyzing paragraphs ${batch.startIndex + 1}-${batch.endIndex} of ${paragraphs.length}...`
-      );
-
-      // Analyze batch
-      const batchIssues = await analyzeParagraphBatch(
-        modelInfo,
-        batch.paragraphs,
-        batch.startIndex,
-        token
-      );
-
-      // Categorize issues
-      batchIssues.forEach(issue => {
-        categorizeIssue(issue, analysis);
-      });
-
-      // Small delay to avoid rate limiting
-      await sleep(200);
-    }
-
-    // Overall document analysis
-    progressCallback(85, 'Performing comprehensive document analysis...');
-    
-    const documentSummary = createDocumentSummary(paragraphs);
-    const overallAnalysis = await performOverallAnalysis(
-      modelInfo,
-      documentSummary,
-      token
-    );
-    
-    addOverallIssues(overallAnalysis, analysis);
-
-    progressCallback(100, 'Analysis complete!');
-    return analysis;
-
-  } catch (error) {
-    if (token.isCancellationRequested) {
-      throw new Error('Analysis cancelled');
-    }
-    throw new Error(`Document processing failed: ${error}`);
-  }
-}
-
-/**
- * Categorize a single issue into appropriate category
- */
-function categorizeIssue(issue: ParsedIssue, analysis: DocumentAnalysis): void {
-  const validationIssue: ValidationIssue = {
-    category: issue.category,
-    paragraph: issue.paragraphNumber,
-    originalText: issue.originalText,
-    issue: issue.issue,
-    severity: issue.severity,
-    suggestion: issue.suggestion,
-    rewrittenText: issue.rewrittenText
-  };
-
-  const categoryMap: Record<string, keyof DocumentAnalysis> = {
-    'grammar': 'grammarIssues',
-    'spelling': 'spellingIssues',
-    'phrasing': 'phrasingIssues',
-    'conciseness': 'concisenessIssues',
-    'tone': 'toneIssues',
-    'irb compliance': 'irbComplianceIssues',
-    'model validation': 'modelValidationIssues',
-    'logical consistency': 'logicalConsistencyIssues'
-  };
-
-  const key = categoryMap[issue.category.toLowerCase()];
-  if (key) {
-    analysis[key].push(validationIssue);
-  } else {
-    // Default to phrasing issues if category not recognized
-    analysis.phrasingIssues.push(validationIssue);
-  }
-}
-
-/**
- * Create document summary for overall analysis
- */
-function createDocumentSummary(paragraphs: string[]): string {
-  // Take first 3 and last 2 paragraphs, plus random samples from middle
-  const summary: string[] = [];
-  
-  // Introduction
-  summary.push(...paragraphs.slice(0, Math.min(3, paragraphs.length)));
-  
-  // Middle samples
-  if (paragraphs.length > 10) {
-    const middleStart = Math.floor(paragraphs.length * 0.4);
-    const middleEnd = Math.floor(paragraphs.length * 0.6);
-    summary.push(...paragraphs.slice(middleStart, middleStart + 2));
-  }
-  
-  // Conclusion
-  if (paragraphs.length > 5) {
-    summary.push(...paragraphs.slice(-2));
-  }
-  
-  return summary.join('\n\n');
-}
-
-/**
- * Add overall document issues
- */
-function addOverallIssues(overallAnalysis: any, analysis: DocumentAnalysis): void {
-  if (!overallAnalysis) {return;}
-
-  // Critical issues
-  if (overallAnalysis.criticalIssues && Array.isArray(overallAnalysis.criticalIssues)) {
-    overallAnalysis.criticalIssues.forEach((issue: string) => {
-      analysis.irbComplianceIssues.push({
-        category: 'IRB Compliance',
-        paragraph: 0,
-        originalText: 'OVERALL DOCUMENT',
-        issue: issue,
-        severity: 'Critical',
-        suggestion: 'Address this critical compliance issue throughout the document'
-      });
-    });
-  }
-
-  // Major gaps
-  if (overallAnalysis.majorGaps && Array.isArray(overallAnalysis.majorGaps)) {
-    overallAnalysis.majorGaps.forEach((gap: string) => {
-      analysis.modelValidationIssues.push({
-        category: 'Model Validation',
-        paragraph: 0,
-        originalText: 'OVERALL DOCUMENT',
-        issue: gap,
-        severity: 'Major',
-        suggestion: 'Add missing content or clarification for this gap'
-      });
-    });
-  }
-
-  // Recommendations
-  if (overallAnalysis.recommendations && Array.isArray(overallAnalysis.recommendations)) {
-    overallAnalysis.recommendations.forEach((rec: string) => {
-      analysis.logicalConsistencyIssues.push({
-        category: 'Logical Consistency',
-        paragraph: 0,
-        originalText: 'OVERALL DOCUMENT',
-        issue: `Recommendation: ${rec}`,
-        severity: 'Minor',
-        suggestion: 'Consider implementing this improvement'
-      });
-    });
-  }
-}
-
-/**
- * Sleep utility
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-```
-
-## 6. **src/excelGenerator.ts** (Keep same as before)
-
-```typescript
-// Same as previous version - no changes needed
-// Copy the entire excelGenerator.ts from the previous response
-```
-
-## 7. **src/extension.ts** (Updated - No API Keys)
-
-```typescript
-import * as vscode from 'vscode';
+import * as ExcelJS from 'exceljs';
 import * as path from 'path';
-import { processDocument } from './documentProcessor';
-import { generateExcelReport } from './excelGenerator';
-import { selectLanguageModel } from './aiService';
+import { DocumentAnalysis, ValidationIssue } from './types';
 
 /**
- * Extension activation
+ * Generate Excel report from document analysis
  */
-export function activate(context: vscode.ExtensionContext) {
-  console.log('IRB Document Validator extension is now active');
-
-  const disposable = vscode.commands.registerCommand(
-    'irb-validator.validateDocument',
-    () => handleValidateDocument(context)
+export async function generateExcelReport(
+  analysis: DocumentAnalysis,
+  outputPath: string,
+  sourceFileName: string
+): Promise<string> {
+  const workbook = new ExcelJS.Workbook();
+  
+  // Set workbook properties
+  workbook.creator = 'IRB Document Validator';
+  workbook.created = new Date();
+  
+  // Create summary sheet
+  createSummarySheet(workbook, analysis, sourceFileName);
+  
+  // Create detailed sheets for each category
+  createDetailedSheet(workbook, 'Grammar Issues', analysis.grammarIssues);
+  createDetailedSheet(workbook, 'Spelling Issues', analysis.spellingIssues);
+  createDetailedSheet(workbook, 'Phrasing Issues', analysis.phrasingIssues);
+  createDetailedSheet(workbook, 'Conciseness Issues', analysis.concisenessIssues);
+  createDetailedSheet(workbook, 'Tone Issues', analysis.toneIssues);
+  createDetailedSheet(workbook, 'IRB Compliance', analysis.irbComplianceIssues);
+  createDetailedSheet(workbook, 'Model Validation', analysis.modelValidationIssues);
+  createDetailedSheet(workbook, 'Logical Consistency', analysis.logicalConsistencyIssues);
+  
+  // Create consolidated view
+  createConsolidatedSheet(workbook, analysis);
+  
+  // Save workbook
+  const finalPath = path.join(
+    outputPath,
+    `IRB_Validation_${sourceFileName}_${getTimestamp()}.xlsx`
   );
-
-  context.subscriptions.push(disposable);
-}
-
-/**
- * Handle document validation command
- */
-async function handleValidateDocument(context: vscode.ExtensionContext) {
-  const cancellationTokenSource = new vscode.CancellationTokenSource();
   
-  try {
-    // Get configuration
-    const config = vscode.workspace.getConfiguration('irbValidator');
-    const batchSize = config.get<number>('batchSize') || 5;
-    const preferredModel = config.get<string>('preferredModel') || 'auto';
-
-    // Select AI model automatically
-    const modelInfo = await selectLanguageModel(preferredModel);
-    
-    if (!modelInfo) {
-      vscode.window.showErrorMessage(
-        'No AI model available. Please install GitHub Copilot or configure language models.',
-        'Learn More'
-      ).then(selection => {
-        if (selection === 'Learn More') {
-          vscode.env.openExternal(
-            vscode.Uri.parse('https://marketplace.visualstudio.com/items?itemName=GitHub.copilot')
-          );
-        }
-      });
-      return;
-    }
-
-    vscode.window.showInformationMessage(
-      `Using AI model: ${modelInfo.name} (${modelInfo.family})`
-    );
-
-    // Select Word document
-    const fileUri = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: false,
-      filters: {
-        'Word Documents': ['docx', 'doc']
-      },
-      openLabel: 'Select IRB Document'
-    });
-
-    if (!fileUri || fileUri.length === 0) {
-      return;
-    }
-
-    const filePath = fileUri[0].fsPath;
-    const fileName = path.basename(filePath, path.extname(filePath));
-
-    // Select output folder
-    let outputPath = config.get<string>('outputFolder');
-    
-    if (!outputPath) {
-      const folderUri = await vscode.window.showOpenDialog({
-        canSelectFiles: false,
-        canSelectFolders: true,
-        canSelectMany: false,
-        openLabel: 'Select Output Folder for Excel Report'
-      });
-
-      if (!folderUri || folderUri.length === 0) {
-        outputPath = path.dirname(filePath); // Use same folder as input
-      } else {
-        outputPath = folderUri[0].fsPath;
-      }
-    }
-
-    // Process document with progress and cancellation support
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: 'IRB Document Validation',
-        cancellable: true
-      },
-      async (progress, token) => {
-        // Handle cancellation
-        token.onCancellationRequested(() => {
-          cancellationTokenSource.cancel();
-          vscode.window.showWarningMessage('Analysis cancelled by user');
-        });
-
-        // Process document
-        progress.report({ message: 'Initializing analysis...' });
-        
-        const analysis = await processDocument(
-          filePath,
-          modelInfo,
-          batchSize,
-          (percent, message) => {
-            progress.report({
-              increment: percent,
-              message: message
-            });
-          },
-          cancellationTokenSource.token
-        );
-
-        if (cancellationTokenSource.token.isCancellationRequested) {
-          return;
-        }
-
-        // Generate Excel report
-        progress.report({ message: 'Generating Excel report...' });
-        const reportPath = await generateExcelReport(
-          analysis,
-          outputPath!,
-          fileName
-        );
-
-        // Calculate statistics
-        const stats = calculateStatistics(analysis);
-
-        // Show success message with options
-        const action = await vscode.window.showInformationMessage(
-          `✅ Validation Complete!\n\n` +
-          `Total Issues: ${stats.total}\n` +
-          `Critical: ${stats.critical} | Major: ${stats.major} | Minor: ${stats.minor}\n\n` +
-          `Report: ${path.basename(reportPath)}`,
-          'Open Report',
-          'Open Folder',
-          'Show Summary'
-        );
-
-        handleUserAction(action, reportPath, outputPath!, stats, analysis);
-      }
-    );
-
-  } catch (error: any) {
-    if (error.message.includes('cancelled')) {
-      vscode.window.showWarningMessage('Document validation was cancelled');
-    } else {
-      vscode.window.showErrorMessage(`Validation failed: ${error.message}`);
-      console.error('Validation error:', error);
-    }
-  } finally {
-    cancellationTokenSource.dispose();
-  }
+  await workbook.xlsx.writeFile(finalPath);
+  return finalPath;
 }
 
 /**
- * Calculate issue statistics
+ * Create summary sheet with statistics
  */
-function calculateStatistics(analysis: any): {
-  total: number;
-  critical: number;
-  major: number;
-  minor: number;
-  byCategory: Record<string, number>;
-} {
-  let total = 0;
-  let critical = 0;
-  let major = 0;
-  let minor = 0;
-  const byCategory: Record<string, number> = {};
-
-  Object.entries(analysis).forEach(([category, issues]: [string, any]) => {
-    if (Array.isArray(issues)) {
-      byCategory[category] = issues.length;
-      total += issues.length;
-      critical += issues.filter((i: any) => i.severity === 'Critical').length;
-      major += issues.filter((i: any) => i.severity === 'Major').length;
-      minor += issues.filter((i: any) => i.severity === 'Minor').length;
-    }
+function createSummarySheet(
+  workbook: ExcelJS.Workbook,
+  analysis: DocumentAnalysis,
+  sourceFileName: string
+): void {
+  const sheet = workbook.addWorksheet('Summary', {
+    views: [{ state: 'frozen', xSplit: 0, ySplit: 1 }]
   });
 
-  return { total, critical, major, minor, byCategory };
-}
-
-/**
- * Handle user action after completion
- */
-async function handleUserAction(
-  action: string | undefined,
-  reportPath: string,
-  outputFolder: string,
-  stats: any,
-  analysis: any
-): Promise<void> {
-  if (action === 'Open Report') {
-    await vscode.env.openExternal(vscode.Uri.file(reportPath));
-  } else if (action === 'Open Folder') {
-    await vscode.env.openExternal(vscode.Uri.file(outputFolder));
-  } else if (action === 'Show Summary') {
-    showDetailedSummary(stats, analysis);
-  }
-}
-
-/**
- * Show detailed summary in output channel
- */
-function showDetailedSummary(stats: any, analysis: any): void {
-  const outputChannel = vscode.window.createOutputChannel('IRB Validation Summary');
-  outputChannel.clear();
-  outputChannel.appendLine('═══════════════════════════════════════════════════════');
-  outputChannel.appendLine('          IRB DOCUMENT VALIDATION SUMMARY');
-  outputChannel.appendLine('═══════════════════════════════════════════════════════\n');
+  // Title
+  sheet.mergeCells('A1:D1');
+  const titleCell = sheet.getCell('A1');
+  titleCell.value = 'IRB Document Validation Report';
+  titleCell.font = { size: 16, bold: true };
+  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
   
-  outputChannel.appendLine(`Total Issues Found: ${stats.total}`);
-  outputChannel.appendLine(`  ├─ Critical: ${stats.critical}`);
-  outputChannel.appendLine(`  ├─ Major: ${stats.major}`);
-  outputChannel.appendLine(`  └─ Minor: ${stats.minor}\n`);
+  // Document info
+  sheet.getCell('A3').value = 'Source Document:';
+  sheet.getCell('B3').value = sourceFileName;
+  sheet.getCell('A4').value = 'Report Generated:';
+  sheet.getCell('B4').value = new Date().toLocaleString();
   
-  outputChannel.appendLine('Issues by Category:');
-  Object.entries(stats.byCategory).forEach(([category, count]) => {
-    if (count > 0) {
-      outputChannel.appendLine(`  • ${category}: ${count}`);
+  // Statistics header
+  sheet.getCell('A6').value = 'Issue Category';
+  sheet.getCell('B6').value = 'Critical';
+  sheet.getCell('C6').value = 'Major';
+  sheet.getCell('D6').value = 'Minor';
+  sheet.getCell('E6').value = 'Total';
+  
+  // Style header row
+  const headerRow = sheet.getRow(6);
+  headerRow.font = { bold: true };
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF4472C4' }
+  };
+  headerRow.font = { color: { argb: 'FFFFFFFF' }, bold: true };
+  
+  // Add statistics
+  let row = 7;
+  const categories = [
+    { name: 'Grammar', issues: analysis.grammarIssues },
+    { name: 'Spelling', issues: analysis.spellingIssues },
+    { name: 'Phrasing', issues: analysis.phrasingIssues },
+    { name: 'Conciseness', issues: analysis.concisenessIssues },
+    { name: 'Tone', issues: analysis.toneIssues },
+    { name: 'IRB Compliance', issues: analysis.irbComplianceIssues },
+    { name: 'Model Validation', issues: analysis.modelValidationIssues },
+    { name: 'Logical Consistency', issues: analysis.logicalConsistencyIssues }
+  ];
+  
+  categories.forEach(category => {
+    const critical = category.issues.filter(i => i.severity === 'Critical').length;
+    const major = category.issues.filter(i => i.severity === 'Major').length;
+    const minor = category.issues.filter(i => i.severity === 'Minor').length;
+    const total = category.issues.length;
+    
+    sheet.getCell(`A${row}`).value = category.name;
+    sheet.getCell(`B${row}`).value = critical;
+    sheet.getCell(`C${row}`).value = major;
+    sheet.getCell(`D${row}`).value = minor;
+    sheet.getCell(`E${row}`).value = total;
+    
+    // Color code based on severity
+    if (critical > 0) {
+      sheet.getRow(row).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFFFC7CE' }
+      };
+    } else if (major > 0) {
+      sheet.getRow(row).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFFFEB9C' }
+      };
     }
+    
+    row++;
   });
   
-  outputChannel.appendLine('\n═══════════════════════════════════════════════════════');
-  
-  // Show critical issues
-  if (stats.critical > 0) {
-    outputChannel.appendLine('\n🔴 CRITICAL ISSUES:\n');
-    Object.values(analysis).forEach((issues: any) => {
-      if (Array.isArray(issues)) {
-        issues
-          .filter(i => i.severity === 'Critical')
-          .forEach(issue => {
-            outputChannel.appendLine(`[Para ${issue.paragraph}] ${issue.issue}`);
-            outputChannel.appendLine(`  → ${issue.suggestion}\n`);
-          });
-      }
-    });
-  }
-  
-  outputChannel.show();
+  // Set column widths
+  sheet.getColumn('A').width = 25;
+  sheet.getColumn('B').width = 12;
+  sheet.getColumn('C').width = 12;
+  sheet.getColumn('D').width = 12;
+  sheet.getColumn('E').width = 12;
 }
 
 /**
- * Extension deactivation
+ * Create detailed sheet for specific issue category
  */
-export function deactivate() {}
-```
+function createDetailedSheet(
+  workbook: ExcelJS.Workbook,
+  sheetName: string,
+  issues: ValidationIssue[]
+): void {
+  const sheet = workbook.addWorksheet(sheetName, {
+    views: [{ state: 'frozen', xSplit: 0, ySplit: 1 }]
+  });
 
-## 8. **README.md** (Updated)
-
-```markdown
-# IRB Document Validator
-
-AI-powered VS Code extension for validating IRB (Internal Ratings-Based) model documentation using built-in language models.
-
-## ✨ Features
-
-- 🤖 **Automatic AI Model Detection** - Uses VS Code's built-in language models (no API keys needed)
-- 📊 **Comprehensive Analysis** - Grammar, spelling, tone, IRB compliance, model validation
-- ⚡ **Optimized Batch Processing** - Minimizes AI requests through intelligent batching
-- 📈 **Professional Excel Reports** - Multi-sheet reports with color-coded severity
-- 🎯 **IRB-Specific Validation** - Basel II/III compliance, model methodology review
-- 🚀 **Fast & Efficient** - Smart batching reduces processing time by 80%
-
-## 🔧 Requirements
-
-- VS Code 1.90.0 or higher
-- GitHub Copilot extension (for AI capabilities)
-- Node.js 18+ (for development)
-
-## 📦 Installation
-
-1. Clone repository
-2. Run `npm install`
-3. Press `F5` to launch extension
-
-## 🚀 Usage
-
-1. Open Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
-2. Run: `IRB: Validate Word Document`
-3. Select your `.docx` document
-4. Choose output folder
-5. Review generated Excel report
-
-## ⚙️ Configuration
-
-```json
-{
-  "irbValidator.batchSize": 5,          // Paragraphs per batch (default: 5)
-  "irbValidator.preferredModel": "auto", // AI model preference
-  "irbValidator.outputFolder": ""        // Default output location
+  // Headers
+  const headers = [
+    'Para #',
+    'Severity',
+    'Original Text',
+    'Issue Description',
+    'Suggestion',
+    'Rewritten Text'
+  ];
+  
+  sheet.addRow(headers);
+  
+  // Style header
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF4472C4' }
+  };
+  headerRow.font = { color: { argb: 'FFFFFFFF' }, bold: true };
+  
+  // Add data
+  issues.forEach(issue => {
+    const row = sheet.addRow([
+      issue.paragraph,
+      issue.severity,
+      issue.originalText,
+      issue.issue,
+      issue.suggestion,
+      issue.rewrittenText || ''
+    ]);
+    
+    // Color code by severity
+    const severityColors: Record<string, string> = {
+      'Critical': 'FFFF0000',
+      'Major': 'FFFF9900',
+      'Minor': 'FFFFFF00'
+    };
+    
+    row.getCell(2).font = {
+      color: { argb: severityColors[issue.severity] || 'FF000000' },
+      bold: true
+    };
+    
+    // Wrap text
+    row.alignment = { wrapText: true, vertical: 'top' };
+  });
+  
+  // Set column widths
+  sheet.getColumn(1).width = 8;  // Para #
+  sheet.getColumn(2).width = 12; // Severity
+  sheet.getColumn(3).width = 40; // Original Text
+  sheet.getColumn(4).width = 40; // Issue
+  sheet.getColumn(5).width = 40; // Suggestion
+  sheet.getColumn(6).width = 40; // Rewritten
+  
+  // Auto-filter
+  sheet.autoFilter = {
+    from: 'A1',
+    to: 'F1'
+  };
 }
-```
 
-## 📊 Output
+/**
+ * Create consolidated view of all issues
+ */
+function createConsolidatedSheet(
+  workbook: ExcelJS.Workbook,
+  analysis: DocumentAnalysis
+): void {
+  const sheet = workbook.addWorksheet('All Issues', {
+    views: [{ state: 'frozen', xSplit: 0, ySplit: 1 }]
+  });
 
-The extension generates an Excel report with:
-- **Summary Sheet**: Issue statistics and overview
-- **Category Sheets**: Detailed issues by type
-- **Consolidated View**: All issues sorted by severity
-- **Color Coding**: Critical (red), Major (orange), Minor (yellow)
+  // Headers
+  const headers = [
+    'Category',
+    'Para #',
+    'Severity',
+    'Original Text',
+    'Issue Description',
+    'Suggestion',
+    'Rewritten Text'
+  ];
+  
+  sheet.addRow(headers);
+  
+  // Style header
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF4472C4' }
+  };
+  headerRow.font = { color: { argb: 'FFFFFFFF' }, bold: true };
+  
+  // Consolidate all issues
+  const allIssues = [
+    ...analysis.grammarIssues,
+    ...analysis.spellingIssues,
+    ...analysis.phrasingIssues,
+    ...analysis.concisenessIssues,
+    ...analysis.toneIssues,
+    ...analysis.irbComplianceIssues,
+    ...analysis.modelValidationIssues,
+    ...analysis.logicalConsistencyIssues
+  ];
+  
+  // Sort by paragraph number and severity
+  allIssues.sort((a, b) => {
+    if (a.paragraph !== b.paragraph) {
+      return a.paragraph - b.paragraph;
+    }
+    const severityOrder: Record<string, number> = {
+      'Critical': 1,
+      'Major': 2,
+      'Minor': 3
+    };
+    return severityOrder[a.severity] - severityOrder[b.severity];
+  });
+  
+  // Add data
+  allIssues.forEach(issue => {
+    const row = sheet.addRow([
+      issue.category,
+      issue.paragraph,
+      issue.severity,
+      issue.originalText,
+      issue.issue,
+      issue.suggestion,
+      issue.rewrittenText || ''
+    ]);
+    
+    // Color code by severity
+    const severityColors: Record<string, string> = {
+      'Critical': 'FFFFC7CE',
+      'Major': 'FFFFEB9C',
+      'Minor': 'FFFFFF00'
+    };
+    
+    row.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: severityColors[issue.severity] || 'FFFFFFFF' }
+    };
+    
+    row.alignment = { wrapText: true, vertical: 'top' };
+  });
+  
+  // Set column widths
+  sheet.getColumn(1).width = 20; // Category
+  sheet.getColumn(2).width = 8;  // Para #
+  sheet.getColumn(3).width = 12; // Severity
+  sheet.getColumn(4).width = 35; // Original Text
+  sheet.getColumn(5).width = 35; // Issue
+  sheet.getColumn(6).width = 35; // Suggestion
+  sheet.getColumn(7).width = 35; // Rewritten
+  
+  // Auto-filter
+  sheet.autoFilter = {
+    from: 'A1',
+    to: 'G1'
+  };
+}
 
-## 🎯 Validation Categories
-
-1. **Grammar & Spelling** - Language correctness
-2. **Phrasing** - Clarity and readability
-3. **Conciseness** - Verbosity reduction
-4. **Tone** - Professional language
-5. **IRB Compliance** - Regulatory alignment
-6. **Model Validation** - Methodology soundness
-7. **Logical Consistency** - Flow and coherence
-
-## 🔄 How It Works
-
-1. Extracts text from Word document
-2. Calculates optimal batch size based on AI model capacity
-3. Processes paragraphs in batches (reduces API calls by 80-90%)
-4. Performs overall document analysis
-5. Generates comprehensive Excel report
-
-## 📝 License
-
-MIT
-```
-
-## Key Improvements
-
-1. **No API Keys Required** - Uses VS Code's built-in `vscode.lm` API
-2. **Automatic Model Detection** - Selects best available AI model
-3. **Optimized Batching** - Processes 5-10 paragraphs per request (vs 1 before)
-4. **Smart Token Management** - Calculates optimal batch size based on model capacity
-5. **Reduced API Calls** - 80-90% fewer requests compared to paragraph-by-paragraph
-6. **Cancellation Support** - Users can cancel long-running operations
-7. **Better Error Handling** - Graceful fallbacks and user-friendly messages
-8. **Progress Tracking** - Real-time feedback during processing
-
-This optimized version will process documents much faster and more efficiently!
+/**
+ * Get timestamp for filename
+ */
+function getTimestamp(): string {
+  const now = new Date();
+  return now.toISOString().replace(/[:.]/g, '-').substring(0, 19);
+}
