@@ -1,36 +1,2229 @@
-param(
-    [Parameter(Mandatory=$true)]
-    [string]$Message
-)
+File 1: package.json
+JSON
 
-# 1. Stage all changes
-Write-Host "Staging changes..." -ForegroundColor Cyan
-git add -A
+{
+  "name": "doc-analyzer-rlm-advanced",
+  "displayName": "Advanced Document Analyzer RLM",
+  "description": "Recursive Language Model document analysis with REPL, context memory, multi-format output",
+  "version": "2.0.0",
+  "publisher": "doc-analyzer",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "extensionDependencies": ["github.copilot-chat"],
+  "contributes": {
+    "commands": [
+      { "command": "docAnalyzer.analyze", "title": "Doc Analyzer: Analyze Word Document" },
+      { "command": "docAnalyzer.repl", "title": "Doc Analyzer: Open REPL Session" }
+    ],
+    "chatParticipants": [{
+      "id": "doc-analyzer-rlm",
+      "name": "docrlm",
+      "description": "RLM document analyzer with REPL",
+      "isSticky": true,
+      "commands": [
+        { "name": "analyze", "description": "Full 4-layer analysis" },
+        { "name": "repl", "description": "Interactive REPL on last analysis" }
+      ]
+    }]
+  },
+  "scripts": {
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.95.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "mammoth": "^1.6.0",
+    "exceljs": "^4.4.0"
+  }
+}
+File 2: tsconfig.json
+JSON
 
-# 2. Commit with the provided message
-Write-Host "Committing..." -ForegroundColor Cyan
-git commit -m $Message
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2022",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "declaration": true
+  },
+  "exclude": ["node_modules", "dist"]
+}
+File 3: webpack.config.js
+JavaScript
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Nothing to commit or commit failed. Exiting." -ForegroundColor Yellow
-    exit
+const path = require('path');
+module.exports = {
+  target: 'node',
+  mode: 'none',
+  entry: './src/extension.ts',
+  output: { path: path.resolve(__dirname, 'dist'), filename: 'extension.js', libraryTarget: 'commonjs2' },
+  externals: { vscode: 'commonjs vscode' },
+  resolve: { extensions: ['.ts', '.js'] },
+  module: { rules: [{ test: /\.ts$/, exclude: /node_modules/, use: 'ts-loader' }] },
+  devtool: 'nosources-source-map'
+};
+File 4: .vscodeignore
+text
+
+.vscode/**
+node_modules/**
+src/**
+webpack.config.js
+tsconfig.json
+File 5: src/config.ts
+TypeScript
+
+// ============================================================
+// config.ts — All types, constants, system prompts
+// ============================================================
+
+// ──────────── TYPES ────────────
+
+export interface ChunkIssue {
+  type: 'flow' | 'logic' | 'redundancy' | 'clarity' | 'terminology' | 'assumption';
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  description: string;
+  suggestion: string;
 }
 
-# 3. Pull latest changes via rebase to keep history clean
-Write-Host "Pulling latest changes (rebase)..." -ForegroundColor Cyan
-git pull --rebase
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Conflict detected during pull! Please resolve manually." -ForegroundColor Red
-    exit
+export interface ChunkAnalysis {
+  chunk_index: number;
+  total_chunks: number;
+  chunk_summary: string;
+  narrative_role: 'introduction' | 'continuation' | 'deepening' | 'deviation' | 'conclusion' | 'bridge';
+  issues_detected: ChunkIssue[];
+  dependencies_on_previous_sections: string[];
+  new_concepts_introduced: string[];
+  unresolved_references: string[];
+  tone_shift: string;
+  updated_global_context: string;
 }
 
-# 4. Push to remote
-Write-Host "Pushing to remote..." -ForegroundColor Cyan
-git push
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "Successfully synced!" -ForegroundColor Green
-} else {
-    Write-Host "Push failed." -ForegroundColor Red
+export interface SectionOutline {
+  section: string;
+  role: string;
+  weight: 'underweight' | 'balanced' | 'overweight';
+  issues: string[];
+  chunk_range: [number, number];
 }
+
+export interface ReorderRec {
+  from: string;
+  to: string;
+  reason: string;
+  priority: 'low' | 'medium' | 'high';
+}
+
+export interface StructuralSynthesis {
+  document_outline: SectionOutline[];
+  global_flow_assessment: 'Strong' | 'Moderate' | 'Weak' | 'Fragmented';
+  key_structural_issues: string[];
+  missing_sections_or_transitions: string[];
+  recommended_reordering: ReorderRec[];
+  narrative_arc: string;
+  audience_alignment: string;
+}
+
+export interface FlowBreak {
+  location: string;
+  between_chunks: [number, number];
+  reason: string;
+  severity: 'minor' | 'major' | 'critical';
+}
+
+export interface QualityAudit {
+  sanity_score: number;
+  readability_score: number;
+  completeness_score: number;
+  flow_breaks: FlowBreak[];
+  story_gaps: string[];
+  terminology_inconsistencies: TermInconsistency[];
+  reader_confusion_risk_areas: string[];
+  strengths: string[];
+  priority_fixes: string[];
+}
+
+export interface TermInconsistency {
+  term_variants: string[];
+  recommended: string;
+  locations: string[];
+}
+
+export interface VisualRec {
+  location: string;
+  type: 'Table' | 'Line Chart' | 'Bar Chart' | 'Flow Diagram' | 'Comparison Matrix' | 'Gantt Chart' | 'Heatmap' | 'Pie Chart';
+  data_fields: string[];
+  purpose: string;
+  story_supported: string;
+  priority: 'low' | 'medium' | 'high';
+}
+
+export interface VisualizationPlan {
+  visual_recommendations: VisualRec[];
+}
+
+export interface GlobalContextMemory {
+  document_objective: string;
+  target_audience: string;
+  document_type: string;
+  key_themes: string[];
+  entities: string[];
+  running_summary: string;
+  chunk_summaries: string[];
+  terminology_registry: Map<string, string[]>;
+  unresolved_threads: string[];
+  assumptions_made: string[];
+  section_boundaries: number[];
+}
+
+export interface FullAnalysisResult {
+  metadata: {
+    filename: string;
+    total_chunks: number;
+    total_characters: number;
+    analyzed_at: string;
+    model_used: string;
+    processing_time_ms: number;
+  };
+  layer1_chunk_analyses: ChunkAnalysis[];
+  layer2_structural_synthesis: StructuralSynthesis;
+  layer3_quality_audit: QualityAudit;
+  layer4_visualization_plan: VisualizationPlan;
+  executive_summary: string;
+  cross_reference_map: Record<string, string[]>;
+}
+
+export interface REPLState {
+  analysisResult: FullAnalysisResult | null;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  contextSnapshot: GlobalContextMemory | null;
+  sessionId: string;
+}
+
+// ──────────── CONSTANTS ────────────
+
+export const MAX_CHUNK_TOKENS = 2000;
+export const OVERLAP_TOKENS = 250;
+export const MAX_RETRIES = 3;
+export const RETRY_DELAY_BASE_MS = 2000;
+
+// ──────────── SYSTEM PROMPTS ────────────
+
+export const PROMPTS = {
+
+  LAYER1_CHUNK: `You are an expert document analyst within a Recursive Language Model (RLM) hierarchy.
+
+CRITICAL OPERATING RULES:
+- NEVER treat this chunk in isolation. You have Global Context Memory.
+- Infer the document's global objective and audience from accumulated context.
+- Maintain hierarchical reasoning—do not flatten or over-summarize.
+- Do NOT rewrite content; analyze and propose.
+- Track terminology consistency across chunks.
+- Flag unresolved references from earlier sections.
+
+You are processing chunk (i/N) of a larger document.
+
+INPUTS PROVIDED:
+- Current Chunk text (C)
+- Chunk Index (i / N)
+- Previously Accumulated Global Context (G)
+- Previous Chunk Summary (P)
+
+PERFORM:
+1. Summarize chunk relative to global document intent.
+2. Classify its narrative role (introduction/continuation/deepening/deviation/conclusion/bridge).
+3. Detect issues with severity ratings:
+   - Logical jumps, redundancies, missing transitions
+   - Assumptions not established, terminology drift, clarity problems
+4. Extract new entities, concepts, metrics, claims.
+5. Identify unresolved references to content not yet seen.
+6. Note any tone shifts from previous sections.
+7. Update Global Context Memory.
+
+OUTPUT STRICTLY AS JSON (no markdown fences, no explanation):
+{
+  "chunk_summary": "...",
+  "narrative_role": "introduction|continuation|deepening|deviation|conclusion|bridge",
+  "issues_detected": [
+    {"type":"flow|logic|redundancy|clarity|terminology|assumption","severity":"low|medium|high|critical","description":"...","suggestion":"..."}
+  ],
+  "dependencies_on_previous_sections": ["..."],
+  "new_concepts_introduced": ["..."],
+  "unresolved_references": ["..."],
+  "tone_shift": "none|minor|significant",
+  "updated_global_context": "..."
+}`,
+
+  LAYER2_SYNTHESIS: `You are a senior document architect synthesizing chunk-level analyses into a structural overview.
+
+INPUTS: Array of chunk analyses + Global Context Memory + Document objective.
+
+TASKS:
+1. Build hierarchical outline with section weight assessment.
+2. Identify structural imbalances (overweight/underweight).
+3. Detect conflicting assumptions or duplicated reasoning across distant chunks.
+4. Evaluate narrative coherence and arc.
+5. Assess audience alignment throughout.
+6. Identify reader disengagement points.
+7. Recommend reordering with priority levels.
+
+OUTPUT STRICTLY AS JSON:
+{
+  "document_outline": [{"section":"...","role":"...","weight":"underweight|balanced|overweight","issues":[],"chunk_range":[0,0]}],
+  "global_flow_assessment": "Strong|Moderate|Weak|Fragmented",
+  "key_structural_issues": ["..."],
+  "missing_sections_or_transitions": ["..."],
+  "recommended_reordering": [{"from":"...","to":"...","reason":"...","priority":"low|medium|high"}],
+  "narrative_arc": "...",
+  "audience_alignment": "..."
+}`,
+
+  LAYER3_AUDIT: `You are a senior editorial reviewer performing comprehensive quality audit.
+
+EVALUATE:
+- Logical progression and argument completeness
+- Reader onboarding quality
+- Terminology consistency (flag all variant usages)
+- Claims vs evidence alignment
+- Data shown but not interpreted
+- Overly dense or under-explained areas
+- Technically correct but narratively weak sections
+
+SCORING: Provide sanity_score (0-100), readability_score (0-100), completeness_score (0-100).
+
+OUTPUT STRICTLY AS JSON:
+{
+  "sanity_score": 0,
+  "readability_score": 0,
+  "completeness_score": 0,
+  "flow_breaks": [{"location":"...","between_chunks":[0,0],"reason":"...","severity":"minor|major|critical"}],
+  "story_gaps": ["..."],
+  "terminology_inconsistencies": [{"term_variants":["..."],"recommended":"...","locations":["..."]}],
+  "reader_confusion_risk_areas": ["..."],
+  "strengths": ["..."],
+  "priority_fixes": ["..."]
+}`,
+
+  LAYER4_VISUAL: `You are a documentation visualization architect.
+
+Based on document structure and content:
+1. Identify where visual aids significantly improve comprehension.
+2. Recommend specific chart/table types.
+3. Specify exact data fields needed.
+4. Explain why this visualization is needed (not decorative).
+5. Map each to the narrative question it answers.
+6. Assign priority.
+
+OUTPUT STRICTLY AS JSON:
+{
+  "visual_recommendations": [
+    {"location":"...","type":"Table|Line Chart|Bar Chart|Flow Diagram|Comparison Matrix|Gantt Chart|Heatmap|Pie Chart","data_fields":["..."],"purpose":"...","story_supported":"...","priority":"low|medium|high"}
+  ]
+}`,
+
+  EXECUTIVE_SUMMARY: `Based on the complete 4-layer analysis, write a structured executive summary covering:
+1. Document Purpose & Scope (1 paragraph)
+2. Key Strengths (bullet points)
+3. Critical Issues & Risks (bullet points with severity)
+4. Priority Recommendations (numbered, actionable)
+5. Overall Assessment (1 paragraph)
+
+Write clear, actionable prose. No JSON. No vague statements.`,
+
+  REPL_SYSTEM: `You are an interactive document analysis assistant with full access to a completed 4-layer RLM analysis.
+
+You can:
+- Answer questions about any section, chunk, or finding
+- Drill deeper into specific issues
+- Compare sections
+- Suggest rewrites for specific sections (only when asked)
+- Explain scoring rationale
+- Generate additional visualizations
+- Cross-reference findings
+
+RULES:
+- Always reference the analysis data when answering
+- If asked to rewrite, clearly mark original vs proposed
+- Maintain conversation context across turns
+- Be specific—cite chunk numbers, section names, scores
+
+You have the full analysis result available as context.`
+};
+File 6: src/utils.ts
+TypeScript
+
+// ============================================================
+// utils.ts — Logger, progress tracker, JSON validation, output generators
+// ============================================================
+
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import { FullAnalysisResult, QualityAudit, StructuralSynthesis, ChunkAnalysis, VisualizationPlan } from './config';
+
+// ──────────── LOGGER ────────────
+
+export class Logger {
+  private static channel: vscode.OutputChannel | null = null;
+
+  static init(): vscode.OutputChannel {
+    if (!this.channel) {
+      this.channel = vscode.window.createOutputChannel('Doc Analyzer RLM');
+    }
+    return this.channel;
+  }
+
+  static info(msg: string): void {
+    this.init().appendLine(`[INFO  ${this.ts()}] ${msg}`);
+  }
+
+  static warn(msg: string): void {
+    this.init().appendLine(`[WARN  ${this.ts()}] ${msg}`);
+  }
+
+  static error(msg: string, err?: any): void {
+    this.init().appendLine(`[ERROR ${this.ts()}] ${msg}`);
+    if (err?.stack) { this.init().appendLine(err.stack); }
+  }
+
+  static debug(msg: string): void {
+    this.init().appendLine(`[DEBUG ${this.ts()}] ${msg}`);
+  }
+
+  private static ts(): string {
+    return new Date().toISOString().substring(11, 23);
+  }
+}
+
+// ──────────── PROGRESS TRACKER ────────────
+
+export class ProgressTracker {
+  private currentPercent = 0;
+
+  constructor(
+    private reporter?: (msg: string, increment: number) => void,
+    private stream?: vscode.ChatResponseStream
+  ) {}
+
+  report(message: string, targetPercent: number): void {
+    const increment = Math.max(0, targetPercent - this.currentPercent);
+    this.currentPercent = targetPercent;
+    Logger.info(`[${targetPercent}%] ${message}`);
+    this.reporter?.(message, increment);
+    this.stream?.progress(message);
+  }
+}
+
+// ──────────── JSON VALIDATION ────────────
+
+export function extractAndParseJSON<T>(raw: string, fallback: () => T): T {
+  // Strip markdown fences
+  let cleaned = raw.trim();
+
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+
+  // Find outermost JSON object
+  const firstBrace = cleaned.indexOf('{');
+  if (firstBrace === -1) {
+    Logger.warn('No JSON object found in LLM response, using fallback');
+    return fallback();
+  }
+
+  // Find matching closing brace
+  let depth = 0;
+  let lastBrace = -1;
+  for (let i = firstBrace; i < cleaned.length; i++) {
+    if (cleaned[i] === '{') { depth++; }
+    if (cleaned[i] === '}') { depth--; if (depth === 0) { lastBrace = i; break; } }
+  }
+
+  if (lastBrace === -1) {
+    Logger.warn('Unbalanced braces in JSON, attempting repair');
+    cleaned = cleaned.substring(firstBrace) + '}'.repeat(depth);
+    lastBrace = cleaned.length - 1;
+  } else {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+
+  // Repair common issues
+  cleaned = cleaned
+    .replace(/,\s*([\]}])/g, '$1')           // trailing commas
+    .replace(/\n/g, ' ')                       // newlines in strings
+    .replace(/[\x00-\x1f]/g, ' ');            // control characters
+
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch (e1) {
+    Logger.warn(`JSON parse attempt 1 failed: ${e1}`);
+
+    // Try fixing unquoted keys
+    const repaired = cleaned.replace(/(\{|,)\s*([a-zA-Z_]\w*)\s*:/g, '$1"$2":');
+    try {
+      return JSON.parse(repaired) as T;
+    } catch (e2) {
+      Logger.error(`JSON parse failed after repair: ${e2}`);
+      return fallback();
+    }
+  }
+}
+
+// ──────────── OUTPUT GENERATORS ────────────
+
+export async function writeTextReport(result: FullAnalysisResult, outputDir: string): Promise<string> {
+  const filePath = path.join(outputDir, `analysis_${sanitizeFilename(result.metadata.filename)}_${Date.now()}.txt`);
+  const lines: string[] = [];
+
+  lines.push('=' .repeat(80));
+  lines.push('DOCUMENT ANALYSIS REPORT');
+  lines.push('='.repeat(80));
+  lines.push('');
+  lines.push(`File:           ${result.metadata.filename}`);
+  lines.push(`Chunks:         ${result.metadata.total_chunks}`);
+  lines.push(`Characters:     ${result.metadata.total_characters.toLocaleString()}`);
+  lines.push(`Model:          ${result.metadata.model_used}`);
+  lines.push(`Analyzed:       ${result.metadata.analyzed_at}`);
+  lines.push(`Processing:     ${(result.metadata.processing_time_ms / 1000).toFixed(1)}s`);
+  lines.push('');
+
+  // Scores
+  lines.push('-'.repeat(80));
+  lines.push('SCORES');
+  lines.push('-'.repeat(80));
+  const qa = result.layer3_quality_audit;
+  lines.push(`Sanity Score:       ${qa.sanity_score}/100  ${scoreBar(qa.sanity_score)}`);
+  lines.push(`Readability Score:  ${qa.readability_score}/100  ${scoreBar(qa.readability_score)}`);
+  lines.push(`Completeness Score: ${qa.completeness_score}/100  ${scoreBar(qa.completeness_score)}`);
+  lines.push(`Flow Assessment:    ${result.layer2_structural_synthesis.global_flow_assessment}`);
+  lines.push('');
+
+  // Executive Summary
+  lines.push('-'.repeat(80));
+  lines.push('EXECUTIVE SUMMARY');
+  lines.push('-'.repeat(80));
+  lines.push(result.executive_summary);
+  lines.push('');
+
+  // Document Outline
+  lines.push('-'.repeat(80));
+  lines.push('DOCUMENT STRUCTURE');
+  lines.push('-'.repeat(80));
+  const ss = result.layer2_structural_synthesis;
+  lines.push(`Narrative Arc: ${ss.narrative_arc}`);
+  lines.push(`Audience Alignment: ${ss.audience_alignment}`);
+  lines.push('');
+  for (const sec of ss.document_outline) {
+    const weightTag = sec.weight === 'balanced' ? '  ' : sec.weight === 'overweight' ? '++' : '--';
+    lines.push(`  [${weightTag}] ${sec.section} (${sec.role}) [Chunks ${sec.chunk_range[0]+1}-${sec.chunk_range[1]+1}]`);
+    for (const iss of sec.issues) {
+      lines.push(`       ⚠ ${iss}`);
+    }
+  }
+  lines.push('');
+
+  if (ss.key_structural_issues.length > 0) {
+    lines.push('Key Structural Issues:');
+    ss.key_structural_issues.forEach((i, idx) => lines.push(`  ${idx+1}. ${i}`));
+    lines.push('');
+  }
+
+  if (ss.missing_sections_or_transitions.length > 0) {
+    lines.push('Missing Sections/Transitions:');
+    ss.missing_sections_or_transitions.forEach(m => lines.push(`  • ${m}`));
+    lines.push('');
+  }
+
+  if (ss.recommended_reordering.length > 0) {
+    lines.push('Recommended Reordering:');
+    ss.recommended_reordering.forEach(r => lines.push(`  [${r.priority.toUpperCase()}] Move "${r.from}" → "${r.to}": ${r.reason}`));
+    lines.push('');
+  }
+
+  // Quality Audit
+  lines.push('-'.repeat(80));
+  lines.push('QUALITY AUDIT');
+  lines.push('-'.repeat(80));
+
+  if (qa.strengths.length > 0) {
+    lines.push('Strengths:');
+    qa.strengths.forEach(s => lines.push(`  ✓ ${s}`));
+    lines.push('');
+  }
+
+  if (qa.priority_fixes.length > 0) {
+    lines.push('Priority Fixes:');
+    qa.priority_fixes.forEach((f, i) => lines.push(`  ${i+1}. ${f}`));
+    lines.push('');
+  }
+
+  if (qa.flow_breaks.length > 0) {
+    lines.push('Flow Breaks:');
+    qa.flow_breaks.forEach(fb => lines.push(`  [${fb.severity.toUpperCase()}] ${fb.location}: ${fb.reason}`));
+    lines.push('');
+  }
+
+  if (qa.story_gaps.length > 0) {
+    lines.push('Story Gaps:');
+    qa.story_gaps.forEach(g => lines.push(`  ○ ${g}`));
+    lines.push('');
+  }
+
+  if (qa.terminology_inconsistencies.length > 0) {
+    lines.push('Terminology Inconsistencies:');
+    qa.terminology_inconsistencies.forEach(t => {
+      lines.push(`  Variants: ${t.term_variants.join(' / ')} → Recommended: "${t.recommended}"`);
+    });
+    lines.push('');
+  }
+
+  if (qa.reader_confusion_risk_areas.length > 0) {
+    lines.push('Reader Confusion Risk:');
+    qa.reader_confusion_risk_areas.forEach(r => lines.push(`  ⚠ ${r}`));
+    lines.push('');
+  }
+
+  // Chunk Analyses
+  lines.push('-'.repeat(80));
+  lines.push('CHUNK-LEVEL ANALYSIS');
+  lines.push('-'.repeat(80));
+  for (const ca of result.layer1_chunk_analyses) {
+    lines.push(`\n--- Chunk ${ca.chunk_index + 1}/${ca.total_chunks} [${ca.narrative_role}] ---`);
+    lines.push(ca.chunk_summary);
+    if (ca.tone_shift && ca.tone_shift !== 'none') {
+      lines.push(`  Tone Shift: ${ca.tone_shift}`);
+    }
+    if (ca.issues_detected.length > 0) {
+      lines.push('  Issues:');
+      ca.issues_detected.forEach(iss => {
+        lines.push(`    [${iss.severity.toUpperCase()}/${iss.type}] ${iss.description}`);
+        if (iss.suggestion) { lines.push(`      → ${iss.suggestion}`); }
+      });
+    }
+    if (ca.new_concepts_introduced.length > 0) {
+      lines.push(`  New Concepts: ${ca.new_concepts_introduced.join(', ')}`);
+    }
+    if (ca.unresolved_references.length > 0) {
+      lines.push(`  Unresolved References: ${ca.unresolved_references.join(', ')}`);
+    }
+  }
+  lines.push('');
+
+  // Visualization
+  if (result.layer4_visualization_plan.visual_recommendations.length > 0) {
+    lines.push('-'.repeat(80));
+    lines.push('VISUALIZATION RECOMMENDATIONS');
+    lines.push('-'.repeat(80));
+    result.layer4_visualization_plan.visual_recommendations.forEach((v, i) => {
+      lines.push(`\n  ${i+1}. ${v.type} at "${v.location}" [${v.priority.toUpperCase()}]`);
+      lines.push(`     Purpose: ${v.purpose}`);
+      lines.push(`     Data: ${v.data_fields.join(', ')}`);
+      lines.push(`     Answers: ${v.story_supported}`);
+    });
+    lines.push('');
+  }
+
+  // Cross-references
+  if (Object.keys(result.cross_reference_map).length > 0) {
+    lines.push('-'.repeat(80));
+    lines.push('CROSS-REFERENCE MAP');
+    lines.push('-'.repeat(80));
+    for (const [concept, refs] of Object.entries(result.cross_reference_map)) {
+      lines.push(`  "${concept}" → appears in: ${refs.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('='.repeat(80));
+  lines.push('END OF REPORT');
+  lines.push('='.repeat(80));
+
+  const content = lines.join('\n');
+  fs.writeFileSync(filePath, content, 'utf-8');
+  Logger.info(`Text report written: ${filePath}`);
+  return filePath;
+}
+
+export async function writeExcelReport(result: FullAnalysisResult, outputDir: string): Promise<string> {
+  const ExcelJS = require('exceljs');
+  const filePath = path.join(outputDir, `analysis_${sanitizeFilename(result.metadata.filename)}_${Date.now()}.xlsx`);
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Doc Analyzer RLM';
+  workbook.created = new Date();
+
+  // ── Sheet 1: Overview ──
+  const overviewSheet = workbook.addWorksheet('Overview', { properties: { tabColor: { argb: '4472C4' } } });
+  overviewSheet.columns = [
+    { header: 'Property', key: 'prop', width: 30 },
+    { header: 'Value', key: 'val', width: 60 }
+  ];
+  styleHeader(overviewSheet);
+  overviewSheet.addRow({ prop: 'Filename', val: result.metadata.filename });
+  overviewSheet.addRow({ prop: 'Total Chunks', val: result.metadata.total_chunks });
+  overviewSheet.addRow({ prop: 'Total Characters', val: result.metadata.total_characters.toLocaleString() });
+  overviewSheet.addRow({ prop: 'Model Used', val: result.metadata.model_used });
+  overviewSheet.addRow({ prop: 'Analyzed At', val: result.metadata.analyzed_at });
+  overviewSheet.addRow({ prop: 'Processing Time', val: `${(result.metadata.processing_time_ms / 1000).toFixed(1)}s` });
+  overviewSheet.addRow({ prop: '', val: '' });
+  overviewSheet.addRow({ prop: 'Sanity Score', val: result.layer3_quality_audit.sanity_score });
+  overviewSheet.addRow({ prop: 'Readability Score', val: result.layer3_quality_audit.readability_score });
+  overviewSheet.addRow({ prop: 'Completeness Score', val: result.layer3_quality_audit.completeness_score });
+  overviewSheet.addRow({ prop: 'Flow Assessment', val: result.layer2_structural_synthesis.global_flow_assessment });
+  overviewSheet.addRow({ prop: 'Narrative Arc', val: result.layer2_structural_synthesis.narrative_arc });
+  overviewSheet.addRow({ prop: 'Audience Alignment', val: result.layer2_structural_synthesis.audience_alignment });
+  overviewSheet.addRow({ prop: '', val: '' });
+  overviewSheet.addRow({ prop: 'Executive Summary', val: result.executive_summary });
+
+  // Color-code scores
+  for (let r = 8; r <= 10; r++) {
+    const row = overviewSheet.getRow(r + 1);
+    const scoreVal = row.getCell(2).value as number;
+    if (typeof scoreVal === 'number') {
+      row.getCell(2).fill = {
+        type: 'pattern', pattern: 'solid',
+        fgColor: { argb: scoreVal >= 80 ? 'C6EFCE' : scoreVal >= 60 ? 'FFEB9C' : 'FFC7CE' }
+      };
+    }
+  }
+
+  // ── Sheet 2: Document Structure ──
+  const structSheet = workbook.addWorksheet('Structure', { properties: { tabColor: { argb: '70AD47' } } });
+  structSheet.columns = [
+    { header: 'Section', key: 'section', width: 35 },
+    { header: 'Role', key: 'role', width: 20 },
+    { header: 'Weight', key: 'weight', width: 15 },
+    { header: 'Chunk Range', key: 'range', width: 15 },
+    { header: 'Issues', key: 'issues', width: 50 }
+  ];
+  styleHeader(structSheet);
+  for (const sec of result.layer2_structural_synthesis.document_outline) {
+    const row = structSheet.addRow({
+      section: sec.section,
+      role: sec.role,
+      weight: sec.weight,
+      range: `${sec.chunk_range[0]+1}-${sec.chunk_range[1]+1}`,
+      issues: sec.issues.join('; ')
+    });
+    if (sec.weight === 'overweight') {
+      row.getCell(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } };
+    } else if (sec.weight === 'underweight') {
+      row.getCell(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEB9C' } };
+    }
+  }
+
+  // ── Sheet 3: Chunk Analysis ──
+  const chunkSheet = workbook.addWorksheet('Chunk Analysis', { properties: { tabColor: { argb: 'ED7D31' } } });
+  chunkSheet.columns = [
+    { header: 'Chunk', key: 'idx', width: 8 },
+    { header: 'Role', key: 'role', width: 15 },
+    { header: 'Summary', key: 'summary', width: 50 },
+    { header: 'Issues Count', key: 'issueCount', width: 12 },
+    { header: 'Issues Detail', key: 'issues', width: 50 },
+    { header: 'New Concepts', key: 'concepts', width: 30 },
+    { header: 'Tone Shift', key: 'tone', width: 12 },
+    { header: 'Unresolved', key: 'unresolved', width: 30 }
+  ];
+  styleHeader(chunkSheet);
+  for (const ca of result.layer1_chunk_analyses) {
+    const row = chunkSheet.addRow({
+      idx: ca.chunk_index + 1,
+      role: ca.narrative_role,
+      summary: ca.chunk_summary,
+      issueCount: ca.issues_detected.length,
+      issues: ca.issues_detected.map(i => `[${i.severity}/${i.type}] ${i.description}`).join('\n'),
+      concepts: ca.new_concepts_introduced.join(', '),
+      tone: ca.tone_shift || 'none',
+      unresolved: ca.unresolved_references.join(', ')
+    });
+    row.alignment = { wrapText: true, vertical: 'top' };
+    if (ca.issues_detected.some(i => i.severity === 'critical')) {
+      row.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC7CE' } };
+    }
+  }
+
+  // ── Sheet 4: All Issues ──
+  const issueSheet = workbook.addWorksheet('All Issues', { properties: { tabColor: { argb: 'FF0000' } } });
+  issueSheet.columns = [
+    { header: 'Chunk', key: 'chunk', width: 8 },
+    { header: 'Type', key: 'type', width: 14 },
+    { header: 'Severity', key: 'severity', width: 10 },
+    { header: 'Description', key: 'desc', width: 55 },
+    { header: 'Suggestion', key: 'suggestion', width: 45 }
+  ];
+  styleHeader(issueSheet);
+  for (const ca of result.layer1_chunk_analyses) {
+    for (const iss of ca.issues_detected) {
+      const row = issueSheet.addRow({
+        chunk: ca.chunk_index + 1,
+        type: iss.type,
+        severity: iss.severity,
+        desc: iss.description,
+        suggestion: iss.suggestion
+      });
+      row.alignment = { wrapText: true, vertical: 'top' };
+      const sevColors: Record<string, string> = {
+        critical: 'FFC7CE', high: 'FFDDDD', medium: 'FFEB9C', low: 'C6EFCE'
+      };
+      row.getCell(3).fill = {
+        type: 'pattern', pattern: 'solid',
+        fgColor: { argb: sevColors[iss.severity] || 'FFFFFF' }
+      };
+    }
+  }
+
+  // ── Sheet 5: Quality Audit ──
+  const auditSheet = workbook.addWorksheet('Quality Audit', { properties: { tabColor: { argb: '9B59B6' } } });
+  auditSheet.columns = [
+    { header: 'Category', key: 'cat', width: 25 },
+    { header: 'Detail', key: 'detail', width: 65 }
+  ];
+  styleHeader(auditSheet);
+
+  const qa = result.layer3_quality_audit;
+  if (qa.strengths.length > 0) {
+    auditSheet.addRow({ cat: '✓ STRENGTHS', detail: '' });
+    qa.strengths.forEach(s => auditSheet.addRow({ cat: '', detail: s }));
+    auditSheet.addRow({ cat: '', detail: '' });
+  }
+  if (qa.priority_fixes.length > 0) {
+    auditSheet.addRow({ cat: '! PRIORITY FIXES', detail: '' });
+    qa.priority_fixes.forEach((f, i) => auditSheet.addRow({ cat: `  #${i+1}`, detail: f }));
+    auditSheet.addRow({ cat: '', detail: '' });
+  }
+  if (qa.flow_breaks.length > 0) {
+    auditSheet.addRow({ cat: '⚡ FLOW BREAKS', detail: '' });
+    qa.flow_breaks.forEach(fb => auditSheet.addRow({ cat: `  [${fb.severity}] ${fb.location}`, detail: fb.reason }));
+    auditSheet.addRow({ cat: '', detail: '' });
+  }
+  if (qa.story_gaps.length > 0) {
+    auditSheet.addRow({ cat: '○ STORY GAPS', detail: '' });
+    qa.story_gaps.forEach(g => auditSheet.addRow({ cat: '', detail: g }));
+    auditSheet.addRow({ cat: '', detail: '' });
+  }
+  if (qa.terminology_inconsistencies.length > 0) {
+    auditSheet.addRow({ cat: '📝 TERMINOLOGY', detail: '' });
+    qa.terminology_inconsistencies.forEach(t =>
+      auditSheet.addRow({ cat: `  ${t.term_variants.join(' / ')}`, detail: `→ "${t.recommended}" at ${t.locations.join(', ')}` })
+    );
+  }
+  if (qa.reader_confusion_risk_areas.length > 0) {
+    auditSheet.addRow({ cat: '', detail: '' });
+    auditSheet.addRow({ cat: '⚠ CONFUSION RISK', detail: '' });
+    qa.reader_confusion_risk_areas.forEach(r => auditSheet.addRow({ cat: '', detail: r }));
+  }
+
+  // ── Sheet 6: Visualizations ──
+  if (result.layer4_visualization_plan.visual_recommendations.length > 0) {
+    const vizSheet = workbook.addWorksheet('Visualizations', { properties: { tabColor: { argb: '00B0F0' } } });
+    vizSheet.columns = [
+      { header: '#', key: 'num', width: 5 },
+      { header: 'Location', key: 'loc', width: 25 },
+      { header: 'Type', key: 'type', width: 20 },
+      { header: 'Priority', key: 'priority', width: 10 },
+      { header: 'Data Fields', key: 'data', width: 30 },
+      { header: 'Purpose', key: 'purpose', width: 40 },
+      { header: 'Story Supported', key: 'story', width: 35 }
+    ];
+    styleHeader(vizSheet);
+    result.layer4_visualization_plan.visual_recommendations.forEach((v, i) => {
+      vizSheet.addRow({
+        num: i + 1, loc: v.location, type: v.type, priority: v.priority,
+        data: v.data_fields.join(', '), purpose: v.purpose, story: v.story_supported
+      });
+    });
+  }
+
+  await workbook.xlsx.writeFile(filePath);
+  Logger.info(`Excel report written: ${filePath}`);
+  return filePath;
+}
+
+function scoreBar(score: number): string {
+  const filled = Math.round(score / 5);
+  return '█'.repeat(filled) + '░'.repeat(20 - filled);
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
+}
+
+function styleHeader(sheet: any): void {
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true, color: { argb: 'FFFFFF' }, size: 11 };
+  headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '4472C4' } };
+  headerRow.alignment = { horizontal: 'center' };
+  headerRow.border = {
+    bottom: { style: 'medium', color: { argb: '000000' } }
+  };
+}
+
+// ──────────── MARKDOWN RENDERER ────────────
+
+export function renderMarkdown(result: FullAnalysisResult): string {
+  const lines: string[] = [];
+  const qa = result.layer3_quality_audit;
+  const ss = result.layer2_structural_synthesis;
+  const se = (s: number) => s >= 80 ? '🟢' : s >= 60 ? '🟡' : '🔴';
+
+  lines.push(`# 📄 Document Analysis Report`);
+  lines.push(`**File:** ${result.metadata.filename} | **Chunks:** ${result.metadata.total_chunks} | **Model:** ${result.metadata.model_used} | **Time:** ${(result.metadata.processing_time_ms/1000).toFixed(1)}s`);
+  lines.push('');
+
+  lines.push(`## Scores`);
+  lines.push(`| Metric | Score | Rating |`);
+  lines.push(`|--------|-------|--------|`);
+  lines.push(`| Sanity | ${qa.sanity_score}/100 | ${se(qa.sanity_score)} |`);
+  lines.push(`| Readability | ${qa.readability_score}/100 | ${se(qa.readability_score)} |`);
+  lines.push(`| Completeness | ${qa.completeness_score}/100 | ${se(qa.completeness_score)} |`);
+  lines.push(`| Flow | ${ss.global_flow_assessment} | ${ss.global_flow_assessment === 'Strong' ? '🟢' : ss.global_flow_assessment === 'Moderate' ? '🟡' : '🔴'} |`);
+  lines.push('');
+
+  lines.push(`## 📋 Executive Summary`);
+  lines.push(result.executive_summary);
+  lines.push('');
+
+  lines.push(`## 🏗️ Structure (${ss.document_outline.length} sections)`);
+  for (const sec of ss.document_outline) {
+    const w = sec.weight === 'balanced' ? '✅' : sec.weight === 'overweight' ? '⬆️' : '⬇️';
+    lines.push(`- ${w} **${sec.section}** — ${sec.role} [Chunks ${sec.chunk_range[0]+1}-${sec.chunk_range[1]+1}]`);
+    sec.issues.forEach(i => lines.push(`  - ⚠️ ${i}`));
+  }
+  lines.push('');
+
+  if (qa.priority_fixes.length > 0) {
+    lines.push(`## 🔧 Priority Fixes`);
+    qa.priority_fixes.forEach((f, i) => lines.push(`${i+1}. ${f}`));
+    lines.push('');
+  }
+
+  if (qa.flow_breaks.length > 0) {
+    lines.push(`## 🔴 Flow Breaks`);
+    qa.flow_breaks.forEach(fb => lines.push(`- **[${fb.severity}] ${fb.location}:** ${fb.reason}`));
+    lines.push('');
+  }
+
+  const totalIssues = result.layer1_chunk_analyses.reduce((s, c) => s + c.issues_detected.length, 0);
+  lines.push(`## 📦 Chunk Analysis (${totalIssues} issues across ${result.metadata.total_chunks} chunks)`);
+  for (const ca of result.layer1_chunk_analyses) {
+    const roleIcons: Record<string, string> = {
+      introduction: '🟢', continuation: '🔵', deepening: '🟣',
+      deviation: '🟠', conclusion: '🏁', bridge: '🌉'
+    };
+    lines.push(`### Chunk ${ca.chunk_index+1} ${roleIcons[ca.narrative_role] || '⚪'} ${ca.narrative_role}`);
+    lines.push(ca.chunk_summary);
+    if (ca.issues_detected.length > 0) {
+      ca.issues_detected.forEach(i => lines.push(`- \`[${i.severity}/${i.type}]\` ${i.description} → *${i.suggestion}*`));
+    }
+    if (ca.new_concepts_introduced.length > 0) {
+      lines.push(`**New:** ${ca.new_concepts_introduced.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  if (result.layer4_visualization_plan.visual_recommendations.length > 0) {
+    lines.push(`## 📊 Visualization Recommendations`);
+    result.layer4_visualization_plan.visual_recommendations.forEach(v => {
+      lines.push(`- **${v.type}** at *${v.location}* [${v.priority}]: ${v.purpose}`);
+    });
+  }
+
+  return lines.join('\n');
+}
+File 7: src/parser.ts
+TypeScript
+
+// ============================================================
+// parser.ts — Word document parsing + smart chunking
+// ============================================================
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { MAX_CHUNK_TOKENS, OVERLAP_TOKENS } from './config';
+import { Logger } from './utils';
+
+export interface ParsedDocument {
+  text: string;
+  filename: string;
+  sizeBytes: number;
+  characterCount: number;
+}
+
+export interface Chunk {
+  index: number;
+  total: number;
+  text: string;
+  startOffset: number;
+  endOffset: number;
+  estimatedTokens: number;
+}
+
+/**
+ * Parse a .docx file and extract raw text.
+ */
+export async function parseWordDocument(filePath: string): Promise<ParsedDocument> {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext !== '.docx' && ext !== '.doc') {
+    throw new Error(`Invalid file type: "${ext}". Only .docx/.doc files are accepted.`);
+  }
+
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  const stats = fs.statSync(filePath);
+  if (stats.size === 0) {
+    throw new Error('File is empty (0 bytes).');
+  }
+
+  Logger.info(`Parsing: ${filePath} (${(stats.size / 1024).toFixed(1)} KB)`);
+
+  const mammoth = require('mammoth');
+  const buffer = fs.readFileSync(filePath);
+
+  let result: { value: string; messages: any[] };
+  try {
+    result = await mammoth.extractRawText({ buffer });
+  } catch (err: any) {
+    throw new Error(`Failed to parse Word document: ${err.message}`);
+  }
+
+  const text = result.value.trim();
+  if (text.length < 20) {
+    throw new Error('Document contains insufficient text content (< 20 characters).');
+  }
+
+  if (result.messages.length > 0) {
+    Logger.warn(`Parser warnings: ${result.messages.map((m: any) => m.message).join('; ')}`);
+  }
+
+  Logger.info(`Parsed successfully: ${text.length} characters`);
+
+  return {
+    text,
+    filename: path.basename(filePath),
+    sizeBytes: stats.size,
+    characterCount: text.length
+  };
+}
+
+/**
+ * Smart chunking with paragraph-aware boundaries and overlapping context.
+ * Detects section headers and prefers splitting at section boundaries.
+ */
+export function chunkDocument(
+  text: string,
+  maxTokens: number = MAX_CHUNK_TOKENS,
+  overlapTokens: number = OVERLAP_TOKENS
+): Chunk[] {
+  const maxChars = maxTokens * 4;
+  const overlapChars = overlapTokens * 4;
+
+  if (text.length <= maxChars) {
+    Logger.info('Document fits in single chunk');
+    return [{
+      index: 0, total: 1, text, startOffset: 0,
+      endOffset: text.length, estimatedTokens: Math.ceil(text.length / 4)
+    }];
+  }
+
+  // Split on double-newlines (paragraphs) or section-like headers
+  const paragraphs = text.split(/\n\s*\n/);
+  const chunks: Chunk[] = [];
+  let currentParagraphs: string[] = [];
+  let currentLen = 0;
+  let startOffset = 0;
+  let runningOffset = 0;
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const para = paragraphs[i].trim();
+    if (!para) {
+      runningOffset += paragraphs[i].length + 2;
+      continue;
+    }
+
+    const isHeader = /^(?:#{1,6}\s|[A-Z][A-Z\s]{3,}$|\d+\.\s+[A-Z])/.test(para);
+
+    // Split conditions: over size OR hit a header with enough content
+    const shouldSplit = (currentLen + para.length > maxChars && currentParagraphs.length > 0) ||
+                        (isHeader && currentLen > maxChars * 0.4 && currentParagraphs.length > 2);
+
+    if (shouldSplit) {
+      const chunkText = currentParagraphs.join('\n\n');
+      chunks.push({
+        index: chunks.length, total: 0, text: chunkText,
+        startOffset, endOffset: startOffset + chunkText.length,
+        estimatedTokens: Math.ceil(chunkText.length / 4)
+      });
+
+      // Overlap: carry last paragraphs
+      const overlapParas: string[] = [];
+      let oLen = 0;
+      for (let j = currentParagraphs.length - 1; j >= 0; j--) {
+        if (oLen + currentParagraphs[j].length > overlapChars) { break; }
+        overlapParas.unshift(currentParagraphs[j]);
+        oLen += currentParagraphs[j].length;
+      }
+
+      currentParagraphs = [...overlapParas];
+      currentLen = oLen;
+      startOffset = runningOffset - oLen;
+    }
+
+    currentParagraphs.push(para);
+    currentLen += para.length;
+    runningOffset += paragraphs[i].length + 2;
+  }
+
+  // Final chunk
+  if (currentParagraphs.length > 0) {
+    const chunkText = currentParagraphs.join('\n\n');
+    chunks.push({
+      index: chunks.length, total: 0, text: chunkText,
+      startOffset, endOffset: startOffset + chunkText.length,
+      estimatedTokens: Math.ceil(chunkText.length / 4)
+    });
+  }
+
+  // Set totals
+  const total = chunks.length;
+  chunks.forEach(c => c.total = total);
+
+  Logger.info(`Chunked into ${total} chunks (avg ~${Math.round(text.length / total / 4)} tokens each)`);
+  return chunks;
+}
+File 8: src/context.ts
+TypeScript
+
+// ============================================================
+// context.ts — Global Context Memory with inconsistency tracking
+// ============================================================
+
+import { GlobalContextMemory, ChunkAnalysis, TermInconsistency } from './config';
+import { Logger } from './utils';
+
+/**
+ * Creates initial empty global context.
+ */
+export function createInitialContext(): GlobalContextMemory {
+  return {
+    document_objective: '',
+    target_audience: '',
+    document_type: '',
+    key_themes: [],
+    entities: [],
+    running_summary: '',
+    chunk_summaries: [],
+    terminology_registry: new Map(),
+    unresolved_threads: [],
+    assumptions_made: [],
+    section_boundaries: []
+  };
+}
+
+/**
+ * Updates global context after a chunk analysis.
+ * This is the core mechanism that prevents context collapse:
+ * each chunk's analysis feeds into an ever-growing context memory
+ * that is passed to the next chunk.
+ */
+export function updateContext(
+  ctx: GlobalContextMemory,
+  analysis: ChunkAnalysis,
+  chunkIndex: number
+): GlobalContextMemory {
+  // Clone to avoid mutation
+  const updated: GlobalContextMemory = {
+    ...ctx,
+    key_themes: [...ctx.key_themes],
+    entities: [...ctx.entities],
+    chunk_summaries: [...ctx.chunk_summaries],
+    terminology_registry: new Map(ctx.terminology_registry),
+    unresolved_threads: [...ctx.unresolved_threads],
+    assumptions_made: [...ctx.assumptions_made],
+    section_boundaries: [...ctx.section_boundaries]
+  };
+
+  // Accumulate chunk summary
+  updated.chunk_summaries.push(analysis.chunk_summary);
+
+  // Update running summary from LLM
+  if (analysis.updated_global_context) {
+    updated.running_summary = analysis.updated_global_context;
+  }
+
+  // Merge new concepts into themes (deduplicated)
+  for (const concept of analysis.new_concepts_introduced) {
+    const normalized = concept.toLowerCase().trim();
+    if (!updated.key_themes.some(t => t.toLowerCase() === normalized)) {
+      updated.key_themes.push(concept);
+    }
+  }
+
+  // Track unresolved references
+  if (analysis.unresolved_references) {
+    for (const ref of analysis.unresolved_references) {
+      if (!updated.unresolved_threads.includes(ref)) {
+        updated.unresolved_threads.push(ref);
+      }
+    }
+  }
+
+  // Resolve references that were unresolved but now addressed
+  if (analysis.new_concepts_introduced.length > 0) {
+    updated.unresolved_threads = updated.unresolved_threads.filter(thread => {
+      const resolved = analysis.new_concepts_introduced.some(c =>
+        c.toLowerCase().includes(thread.toLowerCase()) ||
+        thread.toLowerCase().includes(c.toLowerCase())
+      );
+      if (resolved) {
+        Logger.debug(`Resolved thread: "${thread}" at chunk ${chunkIndex}`);
+      }
+      return !resolved;
+    });
+  }
+
+  // Detect section boundaries from narrative role transitions
+  if (chunkIndex > 0) {
+    const prevRole = updated.chunk_summaries.length > 1 ? 'continuation' : 'introduction';
+    if (analysis.narrative_role === 'introduction' || analysis.narrative_role === 'bridge') {
+      updated.section_boundaries.push(chunkIndex);
+    }
+  }
+
+  // Infer document objective from first chunk
+  if (chunkIndex === 0 && !updated.document_objective) {
+    updated.document_objective = analysis.chunk_summary;
+  }
+
+  return updated;
+}
+
+/**
+ * Builds a compressed context string for LLM consumption.
+ * Limits size to prevent token overflow while preserving critical information.
+ */
+export function compressContextForLLM(ctx: GlobalContextMemory, maxChars: number = 4000): string {
+  const parts: string[] = [];
+
+  if (ctx.document_objective) {
+    parts.push(`OBJECTIVE: ${ctx.document_objective}`);
+  }
+  if (ctx.target_audience) {
+    parts.push(`AUDIENCE: ${ctx.target_audience}`);
+  }
+  if (ctx.key_themes.length > 0) {
+    parts.push(`THEMES: ${ctx.key_themes.slice(-20).join(', ')}`);
+  }
+  if (ctx.unresolved_threads.length > 0) {
+    parts.push(`UNRESOLVED: ${ctx.unresolved_threads.join(', ')}`);
+  }
+  if (ctx.running_summary) {
+    parts.push(`RUNNING SUMMARY: ${ctx.running_summary}`);
+  }
+
+  // Add recent chunk summaries (most important for continuity)
+  const recentSummaries = ctx.chunk_summaries.slice(-5);
+  if (recentSummaries.length > 0) {
+    parts.push(`RECENT SECTIONS:\n${recentSummaries.map((s, i) =>
+      `  [Chunk ${ctx.chunk_summaries.length - recentSummaries.length + i + 1}]: ${s}`
+    ).join('\n')}`);
+  }
+
+  let result = parts.join('\n');
+  if (result.length > maxChars) {
+    result = result.substring(0, maxChars - 100) + '\n[...context truncated for token limits...]';
+  }
+
+  return result;
+}
+
+/**
+ * Builds cross-reference map from all chunk analyses.
+ */
+export function buildCrossReferenceMap(
+  analyses: ChunkAnalysis[]
+): Record<string, string[]> {
+  const conceptMap: Record<string, string[]> = {};
+
+  for (const ca of analyses) {
+    for (const concept of ca.new_concepts_introduced) {
+      const key = concept.toLowerCase().trim();
+      if (!conceptMap[key]) {
+        conceptMap[key] = [];
+      }
+      conceptMap[key].push(`Chunk ${ca.chunk_index + 1}`);
+    }
+
+    // Also check dependencies
+    for (const dep of ca.dependencies_on_previous_sections) {
+      const key = dep.toLowerCase().trim();
+      if (!conceptMap[key]) {
+        conceptMap[key] = [];
+      }
+      if (!conceptMap[key].includes(`Chunk ${ca.chunk_index + 1} (ref)`)) {
+        conceptMap[key].push(`Chunk ${ca.chunk_index + 1} (ref)`);
+      }
+    }
+  }
+
+  // Filter to concepts appearing in multiple chunks (actual cross-references)
+  const crossRefs: Record<string, string[]> = {};
+  for (const [concept, locations] of Object.entries(conceptMap)) {
+    if (locations.length >= 2) {
+      crossRefs[concept] = locations;
+    }
+  }
+
+  return crossRefs;
+}
+File 9: src/llm.ts
+TypeScript
+
+// ============================================================
+// llm.ts — LLM / Copilot interface with retry & model selection
+// ============================================================
+
+import * as vscode from 'vscode';
+import { MAX_RETRIES, RETRY_DELAY_BASE_MS } from './config';
+import { Logger, extractAndParseJSON } from './utils';
+
+let cachedModel: vscode.LanguageModelChat | null = null;
+
+/**
+ * Selects and caches a language model.
+ * Prefers gpt-4o, falls back to any available Copilot model.
+ */
+export async function getModel(): Promise<vscode.LanguageModelChat> {
+  if (cachedModel) { return cachedModel; }
+
+  // Try preferred models in order
+  const families = ['gpt-4o', 'gpt-4', 'gpt-3.5-turbo'];
+  for (const family of families) {
+    const models = await vscode.lm.selectChatModels({ vendor: 'copilot', family });
+    if (models && models.length > 0) {
+      cachedModel = models[0];
+      Logger.info(`Selected model: ${cachedModel.vendor}/${cachedModel.family} (${cachedModel.id})`);
+      return cachedModel;
+    }
+  }
+
+  // Fallback to any model
+  const allModels = await vscode.lm.selectChatModels();
+  if (allModels && allModels.length > 0) {
+    cachedModel = allModels[0];
+    Logger.info(`Fallback model: ${cachedModel.vendor}/${cachedModel.family}`);
+    return cachedModel;
+  }
+
+  throw new Error('No language models available. Install GitHub Copilot Chat and sign in.');
+}
+
+export function getModelName(): string {
+  return cachedModel ? `${cachedModel.vendor}/${cachedModel.family}` : 'unknown';
+}
+
+/**
+ * Send prompt to LLM with retry logic and cancellation support.
+ */
+export async function callLLM(
+  systemPrompt: string,
+  userPrompt: string,
+  token: vscode.CancellationToken
+): Promise<string> {
+  const model = await getModel();
+
+  // Combine into single user message (Copilot API)
+  const messages = [
+    vscode.LanguageModelChatMessage.User(
+      `<SYSTEM_INSTRUCTIONS>\n${systemPrompt}\n</SYSTEM_INSTRUCTIONS>\n\n<USER_REQUEST>\n${userPrompt}\n</USER_REQUEST>`
+    )
+  ];
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (token.isCancellationRequested) {
+      throw new Error('Cancelled by user.');
+    }
+
+    try {
+      const response = await model.sendRequest(messages, {}, token);
+      let fullText = '';
+      for await (const chunk of response.text) {
+        fullText += chunk;
+        if (token.isCancellationRequested) {
+          throw new Error('Cancelled by user.');
+        }
+      }
+      return fullText.trim();
+    } catch (err: any) {
+      if (err.message === 'Cancelled by user.') { throw err; }
+
+      Logger.warn(`LLM call attempt ${attempt + 1} failed: ${err.message}`);
+
+      if (err instanceof vscode.LanguageModelError) {
+        if (err.code === 'rate_limited' || err.code === 'model_busy' || err.code === 'quota_exceeded') {
+          const delay = RETRY_DELAY_BASE_MS * Math.pow(2, attempt);
+          Logger.info(`Rate limited, waiting ${delay}ms...`);
+          await sleep(delay);
+          continue;
+        }
+      }
+
+      if (attempt === MAX_RETRIES - 1) {
+        throw new Error(`LLM call failed after ${MAX_RETRIES} attempts: ${err.message}`);
+      }
+
+      await sleep(RETRY_DELAY_BASE_MS * (attempt + 1));
+    }
+  }
+
+  throw new Error('LLM call exhausted all retries.');
+}
+
+/**
+ * Call LLM and parse response as JSON with fallback.
+ */
+export async function callLLMForJSON<T>(
+  systemPrompt: string,
+  userPrompt: string,
+  token: vscode.CancellationToken,
+  fallback: () => T
+): Promise<T> {
+  const raw = await callLLM(systemPrompt, userPrompt, token);
+  return extractAndParseJSON<T>(raw, fallback);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+File 10: src/rlmPipeline.ts
+TypeScript
+
+// ============================================================
+// rlmPipeline.ts — Recursive 4-Layer Analysis Orchestrator
+// ============================================================
+
+import * as vscode from 'vscode';
+import {
+  PROMPTS, ChunkAnalysis, StructuralSynthesis, QualityAudit,
+  VisualizationPlan, FullAnalysisResult, GlobalContextMemory
+} from './config';
+import { Chunk } from './parser';
+import { callLLM, callLLMForJSON, getModelName } from './llm';
+import { createInitialContext, updateContext, compressContextForLLM, buildCrossReferenceMap } from './context';
+import { Logger, ProgressTracker } from './utils';
+
+/**
+ * Main RLM Pipeline: 4 layers of recursive, context-preserving analysis.
+ */
+export async function runRLMPipeline(
+  chunks: Chunk[],
+  filename: string,
+  totalChars: number,
+  token: vscode.CancellationToken,
+  progress: ProgressTracker
+): Promise<{ result: FullAnalysisResult; context: GlobalContextMemory }> {
+  const startTime = Date.now();
+
+  // ═══════════════════════════════════════════
+  // LAYER 1: Recursive Chunk Analysis
+  // ═══════════════════════════════════════════
+  progress.report('Layer 1: Beginning recursive chunk analysis...', 2);
+  let globalContext = createInitialContext();
+  const chunkAnalyses: ChunkAnalysis[] = [];
+  let previousSummary = '';
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (token.isCancellationRequested) { throw new Error('Cancelled.'); }
+
+    progress.report(
+      `Layer 1: Chunk ${i + 1}/${chunks.length} (${chunks[i].estimatedTokens} tokens)...`,
+      2 + (i / chunks.length) * 38
+    );
+
+    const compressedCtx = compressContextForLLM(globalContext);
+
+    const userPrompt = `CHUNK ${i + 1} OF ${chunks.length}
+
+GLOBAL CONTEXT MEMORY:
+${compressedCtx}
+
+PREVIOUS CHUNK SUMMARY:
+${previousSummary || '(First chunk — no previous context)'}
+
+CURRENT CHUNK TEXT:
+---
+${chunks[i].text.substring(0, 7000)}
+---
+
+Analyze this chunk. Output ONLY valid JSON, no other text.`;
+
+    const analysis = await callLLMForJSON<ChunkAnalysis>(
+      PROMPTS.LAYER1_CHUNK,
+      userPrompt,
+      token,
+      () => ({
+        chunk_index: i,
+        total_chunks: chunks.length,
+        chunk_summary: `Chunk ${i + 1} content.`,
+        narrative_role: 'continuation' as const,
+        issues_detected: [],
+        dependencies_on_previous_sections: [],
+        new_concepts_introduced: [],
+        unresolved_references: [],
+        tone_shift: 'none',
+        updated_global_context: globalContext.running_summary
+      })
+    );
+
+    // Normalize
+    analysis.chunk_index = i;
+    analysis.total_chunks = chunks.length;
+    analysis.issues_detected = Array.isArray(analysis.issues_detected) ? analysis.issues_detected : [];
+    analysis.new_concepts_introduced = Array.isArray(analysis.new_concepts_introduced) ? analysis.new_concepts_introduced : [];
+    analysis.dependencies_on_previous_sections = Array.isArray(analysis.dependencies_on_previous_sections) ? analysis.dependencies_on_previous_sections : [];
+    analysis.unresolved_references = Array.isArray(analysis.unresolved_references) ? analysis.unresolved_references : [];
+
+    chunkAnalyses.push(analysis);
+
+    // UPDATE GLOBAL CONTEXT (prevents context collapse)
+    previousSummary = analysis.chunk_summary;
+    globalContext = updateContext(globalContext, analysis, i);
+
+    Logger.info(`Chunk ${i+1}: role=${analysis.narrative_role}, issues=${analysis.issues_detected.length}, concepts=${analysis.new_concepts_introduced.length}`);
+  }
+
+  // ═══════════════════════════════════════════
+  // LAYER 2: Structural Synthesis
+  // ═══════════════════════════════════════════
+  progress.report('Layer 2: Structural synthesis...', 45);
+
+  const synthesisSummaries = chunkAnalyses.map(ca => ({
+    chunk: ca.chunk_index + 1,
+    summary: ca.chunk_summary,
+    role: ca.narrative_role,
+    issues_count: ca.issues_detected.length,
+    concepts: ca.new_concepts_introduced,
+    tone: ca.tone_shift
+  }));
+
+  const synthesisPrompt = `CHUNK ANALYSES:
+${JSON.stringify(synthesisSummaries, null, 2)}
+
+GLOBAL CONTEXT:
+${compressContextForLLM(globalContext)}
+
+DOCUMENT OBJECTIVE: ${globalContext.document_objective}
+SECTION BOUNDARIES DETECTED AT CHUNKS: ${globalContext.section_boundaries.join(', ') || 'none'}
+
+Synthesize into structural overview. Output ONLY valid JSON.`;
+
+  const synthesis = await callLLMForJSON<StructuralSynthesis>(
+    PROMPTS.LAYER2_SYNTHESIS,
+    synthesisPrompt,
+    token,
+    () => ({
+      document_outline: chunkAnalyses.map((ca, i) => ({
+        section: `Section ${i + 1}`, role: ca.narrative_role,
+        weight: 'balanced' as const, issues: ca.issues_detected.map(is => is.description),
+        chunk_range: [i, i] as [number, number]
+      })),
+      global_flow_assessment: 'Moderate' as const,
+      key_structural_issues: [],
+      missing_sections_or_transitions: [],
+      recommended_reordering: [],
+      narrative_arc: 'Linear',
+      audience_alignment: 'Unclear'
+    })
+  );
+
+  // Normalize
+  synthesis.document_outline = Array.isArray(synthesis.document_outline) ? synthesis.document_outline : [];
+  synthesis.key_structural_issues = Array.isArray(synthesis.key_structural_issues) ? synthesis.key_structural_issues : [];
+  synthesis.missing_sections_or_transitions = Array.isArray(synthesis.missing_sections_or_transitions) ? synthesis.missing_sections_or_transitions : [];
+  synthesis.recommended_reordering = Array.isArray(synthesis.recommended_reordering) ? synthesis.recommended_reordering : [];
+
+  Logger.info(`Layer 2: flow=${synthesis.global_flow_assessment}, sections=${synthesis.document_outline.length}`);
+
+  // ═══════════════════════════════════════════
+  // LAYER 3: Quality Audit
+  // ═══════════════════════════════════════════
+  progress.report('Layer 3: Quality audit...', 62);
+
+  const auditPrompt = `STRUCTURAL SYNTHESIS:
+${JSON.stringify(synthesis, null, 2)}
+
+CHUNK ISSUES SUMMARY:
+${JSON.stringify(chunkAnalyses.map(ca => ({
+    chunk: ca.chunk_index + 1, role: ca.narrative_role,
+    issues: ca.issues_detected, summary: ca.chunk_summary.substring(0, 200),
+    unresolved: ca.unresolved_references
+  })), null, 2)}
+
+UNRESOLVED THREADS: ${globalContext.unresolved_threads.join(', ') || 'none'}
+ALL THEMES: ${globalContext.key_themes.join(', ')}
+
+Perform comprehensive quality audit. Output ONLY valid JSON.`;
+
+  const audit = await callLLMForJSON<QualityAudit>(
+    PROMPTS.LAYER3_AUDIT,
+    auditPrompt,
+    token,
+    () => ({
+      sanity_score: 50, readability_score: 50, completeness_score: 50,
+      flow_breaks: [], story_gaps: [], terminology_inconsistencies: [],
+      reader_confusion_risk_areas: [], strengths: [], priority_fixes: []
+    })
+  );
+
+  // Normalize
+  audit.sanity_score = clampScore(audit.sanity_score);
+  audit.readability_score = clampScore(audit.readability_score);
+  audit.completeness_score = clampScore(audit.completeness_score);
+  audit.flow_breaks = Array.isArray(audit.flow_breaks) ? audit.flow_breaks : [];
+  audit.story_gaps = Array.isArray(audit.story_gaps) ? audit.story_gaps : [];
+  audit.terminology_inconsistencies = Array.isArray(audit.terminology_inconsistencies) ? audit.terminology_inconsistencies : [];
+  audit.reader_confusion_risk_areas = Array.isArray(audit.reader_confusion_risk_areas) ? audit.reader_confusion_risk_areas : [];
+  audit.strengths = Array.isArray(audit.strengths) ? audit.strengths : [];
+  audit.priority_fixes = Array.isArray(audit.priority_fixes) ? audit.priority_fixes : [];
+
+  Logger.info(`Layer 3: sanity=${audit.sanity_score}, readability=${audit.readability_score}, completeness=${audit.completeness_score}`);
+
+  // ═══════════════════════════════════════════
+  // LAYER 4: Visualization Recommendations
+  // ═══════════════════════════════════════════
+  progress.report('Layer 4: Visualization recommendations...', 78);
+
+  const vizPrompt = `DOCUMENT OUTLINE:
+${JSON.stringify(synthesis.document_outline, null, 2)}
+
+CONTENT SUMMARIES:
+${JSON.stringify(chunkAnalyses.map(ca => ({
+    chunk: ca.chunk_index + 1, summary: ca.chunk_summary.substring(0, 150),
+    concepts: ca.new_concepts_introduced
+  })), null, 2)}
+
+DOCUMENT OBJECTIVE: ${globalContext.document_objective}
+
+Recommend visualizations. Output ONLY valid JSON.`;
+
+  const vizPlan = await callLLMForJSON<VisualizationPlan>(
+    PROMPTS.LAYER4_VISUAL,
+    vizPrompt,
+    token,
+    () => ({ visual_recommendations: [] })
+  );
+  vizPlan.visual_recommendations = Array.isArray(vizPlan.visual_recommendations) ? vizPlan.visual_recommendations : [];
+
+  Logger.info(`Layer 4: ${vizPlan.visual_recommendations.length} visualization recommendations`);
+
+  // ═══════════════════════════════════════════
+  // Executive Summary
+  // ═══════════════════════════════════════════
+  progress.report('Generating executive summary...', 90);
+
+  let execSummary: string;
+  try {
+    execSummary = await callLLM(
+      PROMPTS.EXECUTIVE_SUMMARY,
+      `SCORES: Sanity=${audit.sanity_score}, Readability=${audit.readability_score}, Completeness=${audit.completeness_score}
+FLOW: ${synthesis.global_flow_assessment}
+SECTIONS: ${synthesis.document_outline.length}
+TOTAL ISSUES: ${chunkAnalyses.reduce((s, c) => s + c.issues_detected.length, 0)}
+STRUCTURAL ISSUES: ${synthesis.key_structural_issues.join('; ')}
+STRENGTHS: ${audit.strengths.join('; ')}
+PRIORITY FIXES: ${audit.priority_fixes.join('; ')}
+STORY GAPS: ${audit.story_gaps.join('; ')}
+DOCUMENT OBJECTIVE: ${globalContext.document_objective}
+NARRATIVE ARC: ${synthesis.narrative_arc}
+
+Write the executive summary. Plain text only.`,
+      token
+    );
+  } catch {
+    execSummary = `Analysis complete. Sanity: ${audit.sanity_score}/100, Flow: ${synthesis.global_flow_assessment}. ${audit.priority_fixes.length} priority fixes identified.`;
+  }
+
+  // Build cross-reference map
+  const crossRefs = buildCrossReferenceMap(chunkAnalyses);
+
+  const processingTime = Date.now() - startTime;
+  progress.report('Analysis complete!', 100);
+
+  const result: FullAnalysisResult = {
+    metadata: {
+      filename,
+      total_chunks: chunks.length,
+      total_characters: totalChars,
+      analyzed_at: new Date().toISOString(),
+      model_used: getModelName(),
+      processing_time_ms: processingTime
+    },
+    layer1_chunk_analyses: chunkAnalyses,
+    layer2_structural_synthesis: synthesis,
+    layer3_quality_audit: audit,
+    layer4_visualization_plan: vizPlan,
+    executive_summary: execSummary,
+    cross_reference_map: crossRefs
+  };
+
+  return { result, context: globalContext };
+}
+
+function clampScore(val: any): number {
+  const n = typeof val === 'number' ? val : 50;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+File 11: src/repl.ts
+TypeScript
+
+// ============================================================
+// repl.ts — Interactive REPL loop with full context retention
+// ============================================================
+
+import * as vscode from 'vscode';
+import { REPLState, PROMPTS, FullAnalysisResult, GlobalContextMemory } from './config';
+import { callLLM } from './llm';
+import { Logger } from './utils';
+
+let currentState: REPLState = {
+  analysisResult: null,
+  conversationHistory: [],
+  contextSnapshot: null,
+  sessionId: ''
+};
+
+/**
+ * Initialize REPL with analysis results and context.
+ */
+export function initREPL(result: FullAnalysisResult, context: GlobalContextMemory): void {
+  currentState = {
+    analysisResult: result,
+    conversationHistory: [],
+    contextSnapshot: context,
+    sessionId: `repl_${Date.now()}`
+  };
+  Logger.info(`REPL session initialized: ${currentState.sessionId}`);
+}
+
+export function isREPLActive(): boolean {
+  return currentState.analysisResult !== null;
+}
+
+/**
+ * Process a REPL query against the analysis results.
+ * Maintains full conversation history for context retention.
+ */
+export async function processREPLQuery(
+  query: string,
+  token: vscode.CancellationToken
+): Promise<string> {
+  if (!currentState.analysisResult) {
+    return '❌ No analysis loaded. Run `@docrlm /analyze` first to analyze a document.';
+  }
+
+  const result = currentState.analysisResult;
+
+  // Build analysis context summary for LLM
+  const analysisContext = buildREPLContext(result);
+
+  // Build conversation history (last 10 turns to prevent token overflow)
+  const recentHistory = currentState.conversationHistory.slice(-10);
+  const historyStr = recentHistory.length > 0
+    ? `\nCONVERSATION HISTORY:\n${recentHistory.map(h => `${h.role.toUpperCase()}: ${h.content}`).join('\n')}\n`
+    : '';
+
+  const userPrompt = `${analysisContext}
+${historyStr}
+USER QUERY: ${query}
+
+Respond thoroughly, citing specific chunks, sections, scores, and issues from the analysis. If the user asks for a rewrite, clearly separate original from proposed text.`;
+
+  try {
+    const response = await callLLM(PROMPTS.REPL_SYSTEM, userPrompt, token);
+
+    // Update conversation history
+    currentState.conversationHistory.push(
+      { role: 'user', content: query },
+      { role: 'assistant', content: response }
+    );
+
+    return response;
+  } catch (err: any) {
+    Logger.error('REPL query failed', err);
+    return `❌ Error processing query: ${err.message}`;
+  }
+}
+
+/**
+ * Builds a compressed analysis context string for REPL queries.
+ */
+function buildREPLContext(result: FullAnalysisResult): string {
+  const qa = result.layer3_quality_audit;
+  const ss = result.layer2_structural_synthesis;
+
+  const parts: string[] = [
+    `DOCUMENT ANALYSIS CONTEXT:`,
+    `File: ${result.metadata.filename} | Chunks: ${result.metadata.total_chunks} | Chars: ${result.metadata.total_characters}`,
+    ``,
+    `SCORES: Sanity=${qa.sanity_score}/100, Readability=${qa.readability_score}/100, Completeness=${qa.completeness_score}/100`,
+    `FLOW: ${ss.global_flow_assessment} | Arc: ${ss.narrative_arc} | Audience: ${ss.audience_alignment}`,
+    ``,
+    `DOCUMENT OUTLINE:`,
+    ...ss.document_outline.map(s => `  [${s.weight}] ${s.section} (${s.role}) chunks ${s.chunk_range[0]+1}-${s.chunk_range[1]+1} ${s.issues.length > 0 ? '⚠' + s.issues.length : '✅'}`),
+    ``,
+    `CHUNK SUMMARIES:`
+  ];
+
+  for (const ca of result.layer1_chunk_analyses) {
+    const issueStr = ca.issues_detected.length > 0
+      ? ` | Issues: ${ca.issues_detected.map(i => `[${i.severity}/${i.type}]${i.description.substring(0,60)}`).join('; ')}`
+      : '';
+    parts.push(`  Chunk ${ca.chunk_index+1} [${ca.narrative_role}]: ${ca.chunk_summary.substring(0, 200)}${issueStr}`);
+  }
+
+  if (qa.priority_fixes.length > 0) {
+    parts.push(`\nPRIORITY FIXES: ${qa.priority_fixes.join(' | ')}`);
+  }
+  if (qa.strengths.length > 0) {
+    parts.push(`STRENGTHS: ${qa.strengths.join(' | ')}`);
+  }
+  if (qa.flow_breaks.length > 0) {
+    parts.push(`FLOW BREAKS: ${qa.flow_breaks.map(fb => `[${fb.severity}]${fb.location}:${fb.reason}`).join(' | ')}`);
+  }
+  if (qa.story_gaps.length > 0) {
+    parts.push(`STORY GAPS: ${qa.story_gaps.join(' | ')}`);
+  }
+  if (result.layer4_visualization_plan.visual_recommendations.length > 0) {
+    parts.push(`VIZ RECS: ${result.layer4_visualization_plan.visual_recommendations.map(v => `${v.type}@${v.location}`).join(', ')}`);
+  }
+
+  if (Object.keys(result.cross_reference_map).length > 0) {
+    parts.push(`\nCROSS-REFS: ${Object.entries(result.cross_reference_map).slice(0, 15).map(([k,v]) => `"${k}"→${v.join(',')}`).join(' | ')}`);
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Run interactive REPL in VS Code QuickInput.
+ */
+export async function runInteractiveREPL(): Promise<void> {
+  if (!isREPLActive()) {
+    vscode.window.showWarningMessage('No analysis loaded. Run analysis first.');
+    return;
+  }
+
+  const tokenSource = new vscode.CancellationTokenSource();
+
+  while (true) {
+    const query = await vscode.window.showInputBox({
+      prompt: '🔄 REPL Query (type "exit" to quit)',
+      placeHolder: 'Ask about the analysis: "What are the critical issues?" / "Rewrite section 3" / "Compare chunk 2 and 5"',
+      ignoreFocusOut: true
+    });
+
+    if (!query || query.toLowerCase() === 'exit' || query.toLowerCase() === 'quit') {
+      vscode.window.showInformationMessage('REPL session ended.');
+      break;
+    }
+
+    const response = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'REPL: Processing...', cancellable: true },
+      async (_, cancelToken) => {
+        return processREPLQuery(query, cancelToken);
+      }
+    );
+
+    // Show response in output channel
+    const channel = Logger.init();
+    channel.appendLine(`\n${'─'.repeat(60)}`);
+    channel.appendLine(`REPL Q: ${query}`);
+    channel.appendLine(`${'─'.repeat(60)}`);
+    channel.appendLine(response);
+    channel.show(true);
+  }
+
+  tokenSource.dispose();
+}
+File 12: src/extension.ts
+TypeScript
+
+// ============================================================
+// extension.ts — Entry point: commands, chat participant, orchestration
+// ============================================================
+
+import * as vscode from 'vscode';
+import * as path from 'path';
+import { parseWordDocument, chunkDocument } from './parser';
+import { runRLMPipeline } from './rlmPipeline';
+import { initREPL, isREPLActive, processREPLQuery, runInteractiveREPL } from './repl';
+import { Logger, ProgressTracker, writeTextReport, writeExcelReport, renderMarkdown } from './utils';
+import { FullAnalysisResult } from './config';
+
+let lastAnalysisResult: FullAnalysisResult | null = null;
+
+export function activate(context: vscode.ExtensionContext) {
+  Logger.init();
+  Logger.info('Document Analyzer RLM Advanced — activated');
+
+  // ══════════════════════════════════════════
+  // Command: Analyze Word Document
+  // ══════════════════════════════════════════
+  const analyzeCmd = vscode.commands.registerCommand('docAnalyzer.analyze', async (uri?: vscode.Uri) => {
+    const filePath = await resolveFilePath(uri);
+    if (!filePath) { return; }
+
+    await executeAnalysis(filePath, context);
+  });
+
+  // ══════════════════════════════════════════
+  // Command: Open REPL Session
+  // ══════════════════════════════════════════
+  const replCmd = vscode.commands.registerCommand('docAnalyzer.repl', async () => {
+    if (!isREPLActive()) {
+      const choice = await vscode.window.showWarningMessage(
+        'No analysis loaded. Analyze a document first?',
+        'Analyze Now', 'Cancel'
+      );
+      if (choice === 'Analyze Now') {
+        const filePath = await resolveFilePath();
+        if (filePath) { await executeAnalysis(filePath, context); }
+      }
+      return;
+    }
+    await runInteractiveREPL();
+  });
+
+  // ══════════════════════════════════════════
+  // Chat Participant: @docrlm
+  // ══════════════════════════════════════════
+  const chatHandler: vscode.ChatRequestHandler = async (
+    request: vscode.ChatRequest,
+    _chatCtx: vscode.ChatContext,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken
+  ): Promise<vscode.ChatResult> => {
+
+    // ── /analyze command ──
+    if (request.command === 'analyze') {
+      return await handleChatAnalyze(request, stream, token, context);
+    }
+
+    // ── /repl command ──
+    if (request.command === 'repl') {
+      return await handleChatREPL(request, stream, token);
+    }
+
+    // ── Default: if analysis exists, use REPL; otherwise prompt ──
+    if (isREPLActive() && request.prompt.trim()) {
+      return await handleChatREPL(request, stream, token);
+    }
+
+    stream.markdown('## 📄 Document Analyzer RLM\n\n');
+    stream.markdown('**Commands:**\n');
+    stream.markdown('- `@docrlm /analyze` — Full 4-layer analysis of a Word document\n');
+    stream.markdown('- `@docrlm /repl` — Interactive Q&A on the last analysis\n');
+    stream.markdown('- `@docrlm <question>` — Ask about the last analysis\n\n');
+    stream.markdown('Start with `/analyze` to load a document.\n');
+
+    return { metadata: { command: 'help' } };
+  };
+
+  const participant = vscode.chat.createChatParticipant('doc-analyzer-rlm', chatHandler);
+  participant.iconPath = new vscode.ThemeIcon('file-text');
+
+  context.subscriptions.push(analyzeCmd, replCmd, participant);
+}
+
+// ══════════════════════════════════════════
+// Core Analysis Executor
+// ══════════════════════════════════════════
+
+async function executeAnalysis(
+  filePath: string,
+  context: vscode.ExtensionContext,
+  stream?: vscode.ChatResponseStream
+): Promise<FullAnalysisResult | null> {
+  return vscode.window.withProgress(
+    {
+      location: stream ? vscode.ProgressLocation.Notification : vscode.ProgressLocation.Notification,
+      title: 'Doc Analyzer RLM',
+      cancellable: true
+    },
+    async (progress, token) => {
+      try {
+        const tracker = new ProgressTracker(
+          (msg, inc) => progress.report({ message: msg, increment: inc }),
+          stream
+        );
+
+        // Parse
+        tracker.report('Parsing Word document...', 1);
+        stream?.markdown(`📂 **Parsing:** \`${path.basename(filePath)}\`\n\n`);
+
+        const parsed = await parseWordDocument(filePath);
+        stream?.markdown(`✅ **Parsed:** ${parsed.filename} — ${parsed.characterCount.toLocaleString()} characters (${(parsed.sizeBytes/1024).toFixed(1)} KB)\n\n`);
+
+        // Chunk
+        tracker.report('Smart chunking...', 3);
+        const chunks = chunkDocument(parsed.text);
+        stream?.markdown(`🧩 **Chunked:** ${chunks.length} chunks with overlapping context\n\n`);
+        stream?.markdown(`---\n\n⏳ **Running 4-Layer RLM Pipeline...**\n\n`);
+
+        // Run pipeline
+        const { result, context: globalCtx } = await runRLMPipeline(
+          chunks, parsed.filename, parsed.characterCount, token, tracker
+        );
+
+        // Initialize REPL with results
+        initREPL(result, globalCtx);
+        lastAnalysisResult = result;
+
+        // Generate output files
+        const outputDir = path.dirname(filePath);
+
+        tracker.report('Writing text report...', 96);
+        const txtPath = await writeTextReport(result, outputDir);
+
+        tracker.report('Writing Excel report...', 98);
+        const xlsxPath = await writeExcelReport(result, outputDir);
+
+        tracker.report('Done!', 100);
+
+        // Show in chat
+        if (stream) {
+          const md = renderMarkdown(result);
+          stream.markdown(md);
+          stream.markdown(`\n\n---\n`);
+          stream.markdown(`📝 **Text Report:** \`${path.basename(txtPath)}\`\n`);
+          stream.markdown(`📊 **Excel Report:** \`${path.basename(xlsxPath)}\`\n`);
+          stream.markdown(`🔄 **REPL Ready:** Ask follow-up questions with \`@docrlm <question>\`\n`);
+        }
+
+        // Open text report
+        const doc = await vscode.workspace.openTextDocument(txtPath);
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+
+        vscode.window.showInformationMessage(
+          `Analysis complete! Score: ${result.layer3_quality_audit.sanity_score}/100. Reports saved.`,
+          'Open Excel'
+        ).then(choice => {
+          if (choice === 'Open Excel') {
+            vscode.env.openExternal(vscode.Uri.file(xlsxPath));
+          }
+        });
+
+        return result;
+
+      } catch (err: any) {
+        const msg = err.message || 'Unknown error';
+        Logger.error('Analysis failed', err);
+        stream?.markdown(`\n\n❌ **Error:** ${msg}\n`);
+        vscode.window.showErrorMessage(`Analysis failed: ${msg}`);
+        return null;
+      }
+    }
+  );
+}
+
+// ══════════════════════════════════════════
+// Chat Handlers
+// ══════════════════════════════════════════
+
+async function handleChatAnalyze(
+  request: vscode.ChatRequest,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken,
+  context: vscode.ExtensionContext
+): Promise<vscode.ChatResult> {
+  // Try to find file path in prompt
+  let filePath: string | undefined;
+  const pathMatch = request.prompt.match(/(?:["']?)([a-zA-Z]:\\[^\s"']+\.docx?|\/[^\s"']+\.docx?)(?:["']?)/i);
+  if (pathMatch) {
+    filePath = pathMatch[1];
+  }
+
+  if (!filePath) {
+    stream.markdown('📂 Select a Word document...\n\n');
+    const uris = await vscode.window.showOpenDialog({
+      canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+      filters: { 'Word Documents': ['docx', 'doc'] },
+      title: 'Select Word Document'
+    });
+    if (!uris || uris.length === 0) {
+      stream.markdown('❌ No file selected.\n');
+      return { metadata: { command: 'analyze' } };
+    }
+    filePath = uris[0].fsPath;
+  }
+
+  await executeAnalysis(filePath, context, stream);
+  return { metadata: { command: 'analyze' } };
+}
+
+async function handleChatREPL(
+  request: vscode.ChatRequest,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken
+): Promise<vscode.ChatResult> {
+  if (!isREPLActive()) {
+    stream.markdown('❌ No analysis loaded. Use `@docrlm /analyze` first.\n');
+    return { metadata: { command: 'repl' } };
+  }
+
+  const query = request.prompt.trim();
+  if (!query) {
+    stream.markdown('🔄 **REPL Active.** Ask any question about the analysis:\n\n');
+    stream.markdown('Examples:\n');
+    stream.markdown('- "What are the critical issues?"\n');
+    stream.markdown('- "Explain the score breakdown"\n');
+    stream.markdown('- "Compare section 1 and section 3"\n');
+    stream.markdown('- "Suggest a rewrite for the introduction"\n');
+    stream.markdown('- "What visualizations would help?"\n');
+    return { metadata: { command: 'repl' } };
+  }
+
+  stream.progress('Processing REPL query...');
+  const response = await processREPLQuery(query, token);
+  stream.markdown(response);
+
+  return { metadata: { command: 'repl' } };
+}
+
+// ══════════════════════════════════════════
+// File Resolution
+// ══════════════════════════════════════════
+
+async function resolveFilePath(uri?: vscode.Uri): Promise<string | undefined> {
+  if (uri) { return uri.fsPath; }
+
+  const editor = vscode.window.activeTextEditor;
+  if (editor) {
+    const fname = editor.document.fileName;
+    if (fname.endsWith('.docx') || fname.endsWith('.doc')) {
+      return fname;
+    }
+  }
+
+  const uris = await vscode.window.showOpenDialog({
+    canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+    filters: { 'Word Documents': ['docx', 'doc'] },
+    title: 'Select Word Document to Analyze'
+  });
+
+  return uris?.[0]?.fsPath;
+}
+
+export function deactivate() {
+  Logger.info('Document Analyzer RLM Advanced — deactivated');
+}
+File 13: README.md
+Markdown
+
+# Advanced Document Analyzer RLM 📄🔍
+
+4-layer Recursive Language Model analysis with REPL, context memory, multi-format output.
+
+## Architecture
+Word Document (.docx)
+│
+▼
+┌──────────────┐
+│ Parser │ mammoth → raw text
+│ + Chunker │ paragraph-aware, overlapping
+└──────┬───────┘
+│ Chunk[]
+▼
+┌──────────────────────────────────────────────┐
+│ LAYER 1: Recursive Chunk Analysis │
+│ Each chunk receives Global Context Memory │
+│ Context flows: G₀ → G₁ → G₂ → ... → Gₙ │
+│ Prevents context collapse │
+└──────┬───────────────────────────────────────┘
+▼
+┌──────────────────────────────────────────────┐
+│ LAYER 2: Structural Synthesis │
+│ Hierarchical outline, imbalances, arc │
+└──────┬───────────────────────────────────────┘
+▼
+┌──────────────────────────────────────────────┐
+│ LAYER 3: Quality Audit │
+│ 3 scores, flow breaks, terminology, gaps │
+└──────┬───────────────────────────────────────┘
+▼
+┌──────────────────────────────────────────────┐
+│ LAYER 4: Visualization Plan │
+│ Chart/table recommendations with purpose │
+└──────┬───────────────────────────────────────┘
+▼
+┌──────────────────────────────────────────────┐
+│ OUTPUT │
+│ • .txt report (detailed) │
+│ • .xlsx report (6 sheets, color-coded) │
+│ • Markdown in Copilot Chat │
+│ • REPL for interactive follow-up │
+└──────────────────────────────────────────────┘
+
+text
+
+
+## Usage
+
+### Command Palette
+- `Doc Analyzer: Analyze Word Document` — Pick file, get reports
+- `Doc Analyzer: Open REPL Session` — Interactive Q&A
+
+### Copilot Chat
+- `@docrlm /analyze` — Full pipeline
+- `@docrlm /repl` — Q&A mode
+- `@docrlm What are the critical issues?` — Direct query
+
+## Output Files
+- **analysis_*.txt** — Full text report with scores, structure, issues
+- **analysis_*.xlsx** — 6-sheet Excel: Overview, Structure, Chunks, Issues, Audit, Visualizations
+
+## Requirements
+- VS Code 1.95+
+- GitHub Copilot Chat (signed in)
+
+## Install (Dev)
+```bash
+npm install
+npm run compile
+# F5 to launch Extension Development Host
+text
+
+
+---
+
+This complete 8-file solution provides:
+
+| Feature | Implementation |
+|---|---|
+| **RLM 4-Layer Pipeline** | `rlmPipeline.ts` — recursive chunk→synthesis→audit→viz |
+| **Context Retention** | `context.ts` — GlobalContextMemory flows G₀→G₁→...→Gₙ, prevents collapse |
+| **REPL** | `repl.ts` — conversation history + full analysis context, works in chat & quickinput |
+| **Word Input** | `parser.ts` — mammoth extraction with validation |
+| **Smart Chunking** | `parser.ts` — paragraph-aware, header-detecting, overlapping |
+| **.txt Output** | `utils.ts` — detailed scored report with ASCII bars |
+| **.xlsx Output** | `utils.ts` — 6 color-coded sheets via ExcelJS |
+| **Copilot Chat** | `extension.ts` — @docrlm /analyze and /repl |
+| **JSON Safety** | `utils.ts` — brace-balanced extraction, repair, typed fallbacks |
+| **Error Recovery** | `llm.ts` — 3 retries, exponential backoff, rate-limit handling |
