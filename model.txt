@@ -1,587 +1,3621 @@
-# Simplified AI Batch Processor Extension
+STEP 1 — STATE SYNC: Architecture & Planning
+Project Goal
+A VS Code sidebar extension called "CodeForge" that uses the Copilot LM API to handle generating, validating, and evolving large codebases (100k+ tokens) through an iterative, chunked, REPL-driven workflow with RLM (Reasoning, Long Memory, Execution) modes.
 
-## Project Structure
+Architecture Overview
+text
 
-```
-ai-batch-processor/
-├── src/
-│   └── extension.ts
+┌─────────────────────────────────────────────────┐
+│                  VS Code Extension               │
+│                                                   │
+│  ┌──────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │ Webview   │  │ Extension    │  │ File System│ │
+│  │ Chat UI   │◄─┤ Host (Core)  ├──┤ Manager    │ │
+│  │ (Sidebar) │  │              │  │            │ │
+│  └──────────┘  └──────┬───────┘  └────────────┘ │
+│                       │                           │
+│  ┌────────────────────┼────────────────────────┐ │
+│  │            RLM Engine                        │ │
+│  │  ┌──────────┐ ┌─────────┐ ┌──────────────┐ │ │
+│  │  │Reasoning │ │  Long   │ │  Execution   │ │ │
+│  │  │  Mode    │ │ Memory  │ │    Mode      │ │ │
+│  │  └──────────┘ └─────────┘ └──────────────┘ │ │
+│  └─────────────────────────────────────────────┘ │
+│                       │                           │
+│  ┌────────────────────┼────────────────────────┐ │
+│  │           REPL Controller                    │ │
+│  │  ┌──────────┐ ┌─────────┐ ┌──────────────┐ │ │
+│  │  │ Chunker  │ │Progress │ │  Validator   │ │ │
+│  │  │          │ │Tracker  │ │              │ │ │
+│  │  └──────────┘ └─────────┘ └──────────────┘ │ │
+│  └─────────────────────────────────────────────┘ │
+│                       │                           │
+│  ┌────────────────────▼────────────────────────┐ │
+│  │         Copilot LM API Adapter              │ │
+│  │    (vscode.lm.selectChatModels + streaming) │ │
+│  └─────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────┘
+File Tree (Complete)
+text
+
+codeforge/
 ├── package.json
 ├── tsconfig.json
-└── .vscodeignore
-```
+├── .vscodeignore
+├── webpack.config.js
+├── src/
+│   ├── extension.ts                    # Activation, command registration
+│   ├── types.ts                        # All shared types/interfaces
+│   ├── constants.ts                    # Constants, prompts, config
+│   ├── core/
+│   │   ├── LMAdapter.ts               # Copilot LM API wrapper
+│   │   ├── RLMEngine.ts               # Reasoning/LongMemory/Execution orchestrator
+│   │   ├── ReasoningMode.ts           # Architecture planning, decision making
+│   │   ├── LongMemoryMode.ts          # Project state persistence
+│   │   ├── ExecutionMode.ts           # Code generation, validation
+│   │   ├── REPLController.ts          # REPL loop orchestrator
+│   │   ├── Chunker.ts                 # Input/output chunking for large context
+│   │   ├── ProgressTracker.ts         # Track todos, completed files, progress
+│   │   └── Validator.ts               # Validate generated code
+│   ├── services/
+│   │   ├── FileSystemManager.ts       # Read/write/manage generated files
+│   │   └── ProjectStateManager.ts     # Serialize/deserialize project state
+│   ├── webview/
+│   │   ├── WebviewProvider.ts         # Sidebar webview provider
+│   │   ├── messageHandler.ts          # Handle messages from webview
+│   │   └── ui/
+│   │       ├── index.html             # Main webview HTML
+│   │       ├── styles.css             # Clean UI styles
+│   │       └── main.js                # Webview frontend JS
+│   └── test/
+│       └── (deferred)
+Module Dependency Order (Build Sequence)
+package.json, tsconfig.json, webpack.config.js — scaffold
+types.ts, constants.ts — shared foundations
+LMAdapter.ts — Copilot API wrapper
+Chunker.ts — chunking logic
+ProgressTracker.ts — progress/TODO tracking
+LongMemoryMode.ts — project state memory
+ReasoningMode.ts — planning/architecture
+ExecutionMode.ts — code generation
+Validator.ts — code validation
+RLMEngine.ts — orchestrator
+REPLController.ts — REPL loop
+FileSystemManager.ts — file operations
+ProjectStateManager.ts — state persistence
+WebviewProvider.ts + messageHandler.ts — webview host
+index.html, styles.css, main.js — webview UI
+extension.ts — activation/wiring
+Open Tasks
+All 16 modules above
+Completed Files
+None yet
+STEP 2 — Proceeding with Generation
+I'll now generate files in dependency order. Since you said "complete everything in one go," I'll emit all files across multiple responses. Starting now.
 
-## 1. package.json
+STEP 3 — CODE EMISSION: Batch 1 (Scaffold + Foundations)
+File 1: package.json
+JSON
 
-```json
+// codeforge/package.json
 {
-  "name": "ai-batch-processor",
-  "displayName": "AI Batch Processor",
-  "description": "Process CSV tasks with AI and generate documents",
-  "version": "1.0.0",
-  "publisher": "your-name",
+  "name": "codeforge",
+  "displayName": "CodeForge",
+  "description": "AI-powered large codebase generator using iterative REPL-driven RLM workflow with Copilot",
+  "version": "0.1.0",
+  "publisher": "codeforge",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.95.0"
   },
-  "categories": ["Other"],
-  "main": "./out/extension.js",
+  "categories": [
+    "AI",
+    "Other"
+  ],
   "activationEvents": [],
+  "main": "./dist/extension.js",
   "contributes": {
-    "commands": [
-      {
-        "command": "aiBatch.processCsv",
-        "title": "AI Batch: Process CSV with AI"
-      },
-      {
-        "command": "aiBatch.generateDocument",
-        "title": "AI Batch: Generate Document from Results"
-      },
-      {
-        "command": "aiBatch.selectAiModel",
-        "title": "AI Batch: Select AI Model"
-      }
-    ],
-    "configuration": {
-      "title": "AI Batch Processor",
-      "properties": {
-        "aiBatch.aiModel": {
-          "type": "string",
-          "default": "",
-          "description": "Preferred AI model family"
-        },
-        "aiBatch.delayBetweenRequests": {
-          "type": "number",
-          "default": 200,
-          "description": "Delay between AI requests (ms)"
-        }
-      }
-    },
-    "menus": {
-      "explorer/context": [
+    "viewsContainers": {
+      "activitybar": [
         {
-          "command": "aiBatch.processCsv",
-          "when": "resourceExtname == .csv",
-          "group": "aiBatch@1"
+          "id": "codeforge-sidebar",
+          "title": "CodeForge",
+          "icon": "$(hubot)"
         }
       ]
-    }
+    },
+    "views": {
+      "codeforge-sidebar": [
+        {
+          "type": "webview",
+          "id": "codeforge.chatView",
+          "name": "CodeForge Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeforge.startSession",
+        "title": "CodeForge: Start New Session"
+      },
+      {
+        "command": "codeforge.resetState",
+        "title": "CodeForge: Reset Project State"
+      },
+      {
+        "command": "codeforge.exportState",
+        "title": "CodeForge: Export Project State"
+      }
+    ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build",
+    "build": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "lint": "eslint src --ext ts"
   },
   "devDependencies": {
-    "@types/node": "^14.x",
-    "@types/vscode": "^1.85.0",
-    "typescript": "^5.0.0"
-  }
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.95.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4",
+    "copy-webpack-plugin": "^12.0.2"
+  },
+  "extensionDependencies": [
+    "github.copilot-chat"
+  ]
 }
-```
+File 2: tsconfig.json
+JSON
 
-## 2. extension.ts
-
-```typescript
-import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
-
-// ============================================================================
-// TYPES
-// ============================================================================
-
-interface Task {
-    id: number;
-    input: string;
-    context: string;
-    result: string;
-    rawRow: string[];
-}
-
-// ============================================================================
-// CSV PARSER - Handles commas, quotes, and newlines in fields
-// ============================================================================
-
-function parseCSVLine(line: string): string[] {
-    const result: string[] = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-        const nextChar = line[i + 1];
-
-        if (char === '"' && inQuotes && nextChar === '"') {
-            // Escaped quote
-            current += '"';
-            i++;
-        } else if (char === '"') {
-            // Toggle quote mode
-            inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-            // Field separator
-            result.push(current);
-            current = '';
-        } else {
-            current += char;
-        }
-    }
-    result.push(current);
-    return result;
-}
-
-function parseCSV(content: string): { header: string[]; tasks: Task[] } {
-    // Split by newlines but handle quoted fields with newlines
-    const rows: string[] = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (const char of content) {
-        if (char === '"') {
-            inQuotes = !inQuotes;
-            current += char;
-        } else if ((char === '\n' || char === '\r') && !inQuotes) {
-            if (current.trim()) {
-                rows.push(current);
-            }
-            current = '';
-        } else if (char !== '\r') {
-            current += char;
-        }
-    }
-    if (current.trim()) {
-        rows.push(current);
-    }
-
-    if (rows.length < 1) {
-        throw new Error('CSV file is empty');
-    }
-
-    const header = parseCSVLine(rows[0]).map(h => h.trim().toLowerCase());
-    
-    // Find column indices
-    const inputIdx = header.findIndex(h => 
-        ['input', 'search', 'query', 'prompt', 'question'].includes(h)
-    );
-    const contextIdx = header.findIndex(h => 
-        ['context', 'background'].includes(h)
-    );
-    const resultIdx = header.findIndex(h => 
-        ['result', 'output', 'answer'].includes(h)
-    );
-
-    if (inputIdx === -1) {
-        throw new Error('CSV must have "input", "search", "query", "prompt", or "question" column');
-    }
-
-    const tasks: Task[] = [];
-    for (let i = 1; i < rows.length; i++) {
-        const row = parseCSVLine(rows[i]);
-        const input = row[inputIdx]?.trim() || '';
-        
-        if (input) {
-            tasks.push({
-                id: i,
-                input,
-                context: contextIdx !== -1 ? row[contextIdx]?.trim() || '' : '',
-                result: resultIdx !== -1 ? row[resultIdx]?.trim() || '' : '',
-                rawRow: row
-            });
-        }
-    }
-
-    return { header: parseCSVLine(rows[0]), tasks };
-}
-
-function escapeCSVField(value: string): string {
-    // If field contains comma, quote, or newline, wrap in quotes
-    if (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r')) {
-        return `"${value.replace(/"/g, '""')}"`;
-    }
-    return value;
-}
-
-function toCSV(header: string[], tasks: Task[]): string {
-    const headerLower = header.map(h => h.trim().toLowerCase());
-    const resultIdx = headerLower.findIndex(h => 
-        ['result', 'output', 'answer'].includes(h)
-    );
-
-    const lines: string[] = [];
-    
-    // Add result column if not exists
-    const finalHeader = resultIdx === -1 ? [...header, 'result'] : header;
-    lines.push(finalHeader.map(escapeCSVField).join(','));
-
-    for (const task of tasks) {
-        const row = [...task.rawRow];
-        
-        // Ensure row has enough columns
-        while (row.length < finalHeader.length) {
-            row.push('');
-        }
-
-        // Set result
-        if (resultIdx !== -1) {
-            row[resultIdx] = task.result;
-        } else {
-            row[row.length - 1] = task.result;
-        }
-
-        lines.push(row.map(escapeCSVField).join(','));
-    }
-
-    return lines.join('\r\n');
-}
-
-// ============================================================================
-// AI MODEL MANAGER
-// ============================================================================
-
-async function getAIModel(): Promise<any> {
-    const config = vscode.workspace.getConfiguration('aiBatch');
-    const preferredModel = config.get<string>('aiModel');
-
-    // @ts-ignore
-    let models: any[];
-    if (preferredModel) {
-        // @ts-ignore
-        models = await vscode.lm.selectChatModels({ family: preferredModel });
-    } else {
-        // @ts-ignore
-        models = await vscode.lm.selectChatModels();
-    }
-
-    if (!models || models.length === 0) {
-        throw new Error('No AI models available. Ensure GitHub Copilot is configured.');
-    }
-
-    return models[0];
-}
-
-async function sendAIRequest(model: any, prompt: string): Promise<string> {
-    // @ts-ignore
-    const messages = [vscode.LanguageModelChatMessage.User(prompt)];
-    const response = await model.sendRequest(
-        messages, 
-        {}, 
-        new vscode.CancellationTokenSource().token
-    );
-
-    let result = '';
-    // @ts-ignore
-    for await (const fragment of response.text) {
-        result += fragment;
-    }
-    return result.trim();
-}
-
-// ============================================================================
-// UTILITIES
-// ============================================================================
-
-function delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function getUniqueFilePath(basePath: string, suffix: string, ext: string): string {
-    const dir = path.dirname(basePath);
-    const base = path.basename(basePath, ext);
-    let outPath = path.join(dir, `${base}${suffix}${ext}`);
-    let count = 1;
-
-    while (fs.existsSync(outPath)) {
-        outPath = path.join(dir, `${base}${suffix}_${count}${ext}`);
-        count++;
-    }
-    return outPath;
-}
-
-// ============================================================================
-// COMMANDS
-// ============================================================================
-
-async function processCsvCommand(uri?: vscode.Uri): Promise<void> {
-    try {
-        // Get file
-        let fileUri: vscode.Uri;
-        if (uri) {
-            fileUri = uri;
-        } else {
-            const uris = await vscode.window.showOpenDialog({
-                canSelectFiles: true,
-                canSelectMany: false,
-                filters: { 'CSV Files': ['csv'] },
-                openLabel: 'Select CSV'
-            });
-            if (!uris || uris.length === 0) return;
-            fileUri = uris[0];
-        }
-
-        // Read and parse CSV
-        const buffer = await vscode.workspace.fs.readFile(fileUri);
-        const content = Buffer.from(buffer).toString('utf8');
-        const { header, tasks } = parseCSV(content);
-
-        if (tasks.length === 0) {
-            vscode.window.showWarningMessage('No tasks found in CSV');
-            return;
-        }
-
-        vscode.window.showInformationMessage(`Found ${tasks.length} tasks`);
-
-        // Optional global context
-        const globalContext = await vscode.window.showInputBox({
-            prompt: 'Enter global context for all tasks (optional)',
-            placeHolder: 'e.g., "You are a helpful assistant..."'
-        }) || '';
-
-        // Get AI model
-        const model = await getAIModel();
-        const config = vscode.workspace.getConfiguration('aiBatch');
-        const delayMs = config.get<number>('delayBetweenRequests') || 200;
-
-        // Process with progress
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Processing CSV',
-            cancellable: true
-        }, async (progress, token) => {
-            for (let i = 0; i < tasks.length; i++) {
-                if (token.isCancellationRequested) {
-                    throw new Error('Cancelled');
-                }
-
-                const task = tasks[i];
-                progress.report({ 
-                    message: `Task ${i + 1}/${tasks.length}`,
-                    increment: 100 / tasks.length 
-                });
-
-                try {
-                    const prompt = globalContext 
-                        ? `Context: ${globalContext}\n\n${task.context ? `Additional Context: ${task.context}\n\n` : ''}Query: ${task.input}`
-                        : `${task.context ? `Context: ${task.context}\n\n` : ''}Query: ${task.input}`;
-                    
-                    task.result = await sendAIRequest(model, prompt);
-                } catch (err) {
-                    task.result = `ERROR: ${err}`;
-                }
-
-                if (i < tasks.length - 1) {
-                    await delay(delayMs);
-                }
-            }
-        });
-
-        // Save results
-        const outputPath = getUniqueFilePath(fileUri.fsPath, '_ai_result', '.csv');
-        const outputContent = toCSV(header, tasks);
-        fs.writeFileSync(outputPath, outputContent, 'utf8');
-
-        vscode.window.showInformationMessage(`Saved: ${path.basename(outputPath)}`);
-
-        // Open result file
-        const doc = await vscode.workspace.openTextDocument(outputPath);
-        await vscode.window.showTextDocument(doc);
-
-    } catch (error) {
-        vscode.window.showErrorMessage(`Error: ${error}`);
-    }
-}
-
-async function generateDocumentCommand(): Promise<void> {
-    try {
-        // Select results file
-        const uris = await vscode.window.showOpenDialog({
-            canSelectFiles: true,
-            canSelectMany: false,
-            filters: { 'CSV Files': ['csv'] },
-            openLabel: 'Select Results CSV'
-        });
-        if (!uris || uris.length === 0) return;
-
-        const buffer = await vscode.workspace.fs.readFile(uris[0]);
-        const content = Buffer.from(buffer).toString('utf8');
-        const { tasks } = parseCSV(content);
-
-        if (tasks.length === 0) {
-            vscode.window.showWarningMessage('No tasks with results found');
-            return;
-        }
-
-        // Get document context
-        const context = await vscode.window.showInputBox({
-            prompt: 'Enter document context/purpose',
-            placeHolder: 'e.g., "Q4 Sales Analysis Report"'
-        });
-        if (!context) return;
-
-        // Select template
-        const template = await vscode.window.showQuickPick([
-            { label: 'Summary', value: 'summary' },
-            { label: 'Detailed Report', value: 'report' },
-            { label: 'Analysis', value: 'analysis' }
-        ], { placeHolder: 'Select document type' });
-        if (!template) return;
-
-        // Build prompt
-        const resultsList = tasks
-            .filter(t => t.result && !t.result.startsWith('ERROR'))
-            .map((t, i) => `${i + 1}. Input: ${t.input}\n   Result: ${t.result}`)
-            .join('\n\n');
-
-        const prompts: Record<string, string> = {
-            summary: `Create an executive summary based on:\n\nContext: ${context}\n\nResults:\n${resultsList}\n\nProvide: Overview, Key Findings, Recommendations.`,
-            report: `Create a detailed report based on:\n\nContext: ${context}\n\nResults:\n${resultsList}\n\nInclude: Introduction, Methodology, Findings, Conclusion.`,
-            analysis: `Analyze these results:\n\nContext: ${context}\n\nResults:\n${resultsList}\n\nProvide: Patterns, Insights, Correlations, Actionable Items.`
-        };
-
-        // Generate document
-        const model = await getAIModel();
-        const document = await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Generating Document',
-            cancellable: false
-        }, async () => {
-            return await sendAIRequest(model, prompts[template.value]);
-        });
-
-        // Create final document
-        const finalDoc = `# ${template.label}: ${context}
-
-**Generated:** ${new Date().toLocaleString()}  
-**Source:** ${path.basename(uris[0].fsPath)}  
-**Tasks:** ${tasks.length}
-
----
-
-${document}
-`;
-
-        // Save
-        const outputPath = getUniqueFilePath(uris[0].fsPath, '_document', '.md');
-        fs.writeFileSync(outputPath, finalDoc, 'utf8');
-
-        vscode.window.showInformationMessage(`Document saved: ${path.basename(outputPath)}`);
-
-        const doc = await vscode.workspace.openTextDocument(outputPath);
-        await vscode.window.showTextDocument(doc);
-
-    } catch (error) {
-        vscode.window.showErrorMessage(`Error: ${error}`);
-    }
-}
-
-async function selectAiModelCommand(): Promise<void> {
-    try {
-        // @ts-ignore
-        const models = await vscode.lm.selectChatModels();
-
-        if (!models || models.length === 0) {
-            vscode.window.showErrorMessage('No AI models available');
-            return;
-        }
-
-        const config = vscode.workspace.getConfiguration('aiBatch');
-        const current = config.get<string>('aiModel') || '';
-
-        const items = [
-            {
-                label: '$(sparkle) Default',
-                description: 'Auto-select best model',
-                value: ''
-            },
-            ...models.map((m: any) => ({
-                label: m.family,
-                description: m.name,
-                value: m.family
-            }))
-        ];
-
-        const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: `Current: ${current || 'Default'}`
-        });
-
-        if (selected) {
-            await config.update('aiModel', selected.value, vscode.ConfigurationTarget.Global);
-            vscode.window.showInformationMessage(`Model set to: ${selected.label}`);
-        }
-    } catch (error) {
-        vscode.window.showErrorMessage(`Error: ${error}`);
-    }
-}
-
-// ============================================================================
-// ACTIVATION
-// ============================================================================
-
-export function activate(context: vscode.ExtensionContext): void {
-    context.subscriptions.push(
-        vscode.commands.registerCommand('aiBatch.processCsv', processCsvCommand),
-        vscode.commands.registerCommand('aiBatch.generateDocument', generateDocumentCommand),
-        vscode.commands.registerCommand('aiBatch.selectAiModel', selectAiModelCommand)
-    );
-
-    console.log('AI Batch Processor activated');
-}
-
-export function deactivate(): void {}
-```
-
-## 3. tsconfig.json
-
-```json
+// codeforge/tsconfig.json
 {
   "compilerOptions": {
     "module": "commonjs",
-    "target": "ES2020",
-    "outDir": "out",
-    "lib": ["ES2020"],
-    "sourceMap": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "outDir": "dist",
     "rootDir": "src",
+    "sourceMap": true,
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "moduleResolution": "node"
   },
-  "exclude": ["node_modules"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "src/webview/ui"]
 }
-```
+File 3: webpack.config.js
+JavaScript
 
-## 4. Sample CSV (sample_tasks.csv)
+// codeforge/webpack.config.js
+'use strict';
 
-```csv
-id,input,context,result
-1,"What is AI?","Technology overview",
-2,"Explain cloud computing, its benefits, and challenges","Enterprise IT",
-3,"How to ""properly"" handle errors?","Software development",
-4,"Compare React, Vue, and Angular","Frontend frameworks",
-5,"Best practices for API design","Backend development",
-```
+const path = require('path');
+const CopyPlugin = require('copy-webpack-plugin');
 
-## Usage
+/** @type {import('webpack').Configuration} */
+const extensionConfig = {
+  target: 'node',
+  mode: 'none',
+  entry: './src/extension.ts',
+  output: {
+    path: path.resolve(__dirname, 'dist'),
+    filename: 'extension.js',
+    libraryTarget: 'commonjs2',
+  },
+  externals: {
+    vscode: 'commonjs vscode',
+  },
+  resolve: {
+    extensions: ['.ts', '.js'],
+  },
+  module: {
+    rules: [
+      {
+        test: /\.ts$/,
+        exclude: /node_modules/,
+        use: [
+          {
+            loader: 'ts-loader',
+          },
+        ],
+      },
+    ],
+  },
+  plugins: [
+    new CopyPlugin({
+      patterns: [
+        {
+          from: 'src/webview/ui',
+          to: 'webview/ui',
+        },
+      ],
+    }),
+  ],
+  devtool: 'nosources-source-map',
+  infrastructureLogging: {
+    level: 'log',
+  },
+};
 
-1. **Build:**
-   ```bash
-   npm install
-   npm run compile
-   ```
+module.exports = [extensionConfig];
+File 4: .vscodeignore
+text
 
-2. **Test:** Press `F5` in VS Code
+// codeforge/.vscodeignore
+.vscode/**
+node_modules/**
+src/**
+!dist/**
+!dist/webview/ui/**
+tsconfig.json
+webpack.config.js
+**/*.map
+File 5: src/types.ts
+TypeScript
 
-3. **Commands (Ctrl+Shift+P):**
-   - `AI Batch: Process CSV with AI` - Process CSV file
-   - `AI Batch: Generate Document from Results` - Create document from processed CSV
-   - `AI Batch: Select AI Model` - Choose AI model
+// codeforge/src/types.ts
 
-4. **Right-click on CSV file** → `AI Batch: Process CSV with AI`
+import * as vscode from 'vscode';
 
-## Key Features
+// ─── RLM Mode Types ───────────────────────────────────────────────
 
-- ✅ Handles commas in fields (proper CSV quoting)
-- ✅ Handles quotes in fields (escaped as `""`)
-- ✅ Handles newlines in fields
-- ✅ Progress indicator with cancellation
-- ✅ Auto-generates unique output filenames
-- ✅ Document generation from results
-- ✅ Right-click context menu for CSV files
+export enum RLMMode {
+  REASONING = 'reasoning',
+  LONG_MEMORY = 'long_memory',
+  EXECUTION = 'execution',
+}
+
+export enum REPLStep {
+  STATE_SYNC = 'state_sync',
+  CONFIRMATION_GATE = 'confirmation_gate',
+  CODE_EMISSION = 'code_emission',
+  UPDATE_MEMORY = 'update_memory',
+}
+
+export enum TaskStatus {
+  PENDING = 'pending',
+  IN_PROGRESS = 'in_progress',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+  BLOCKED = 'blocked',
+}
+
+// ─── Project State ────────────────────────────────────────────────
+
+export interface ProjectFile {
+  path: string;
+  language: string;
+  status: TaskStatus;
+  content: string;
+  dependencies: string[];
+  publicAPIs: string[];
+  lastModified: number;
+  tokenCount: number;
+}
+
+export interface TodoItem {
+  id: string;
+  description: string;
+  status: TaskStatus;
+  relatedFiles: string[];
+  priority: number;
+  createdAt: number;
+  completedAt?: number;
+}
+
+export interface ProjectArchitecture {
+  name: string;
+  description: string;
+  targetLanguages: string[];
+  frameworks: string[];
+  fileTree: string[];
+  moduleDependencyOrder: string[];
+  designDecisions: string[];
+}
+
+export interface ProjectState {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  architecture: ProjectArchitecture;
+  files: Map<string, ProjectFile>;
+  todos: TodoItem[];
+  assumptions: string[];
+  currentREPLStep: REPLStep;
+  currentMode: RLMMode;
+  conversationHistory: ConversationMessage[];
+  totalTokensGenerated: number;
+  iterationCount: number;
+  outputDirectory: string;
+}
+
+// ─── Conversation & Messaging ─────────────────────────────────────
+
+export interface ConversationMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+  mode?: RLMMode;
+  step?: REPLStep;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChunkedRequest {
+  id: string;
+  totalChunks: number;
+  currentChunk: number;
+  content: string;
+  contextSummary: string;
+}
+
+export interface ChunkedResponse {
+  id: string;
+  totalChunks: number;
+  currentChunk: number;
+  content: string;
+  isComplete: boolean;
+  filesGenerated: string[];
+  tokensUsed: number;
+}
+
+// ─── Webview Messages ─────────────────────────────────────────────
+
+export type WebviewMessageType =
+  | 'userMessage'
+  | 'startProject'
+  | 'approveStep'
+  | 'rejectStep'
+  | 'resetState'
+  | 'exportState'
+  | 'importState'
+  | 'selectOutputDir'
+  | 'cancelGeneration'
+  | 'retryLast'
+  | 'viewFile'
+  | 'getState';
+
+export type ExtensionMessageType =
+  | 'assistantMessage'
+  | 'streamChunk'
+  | 'streamEnd'
+  | 'stateUpdate'
+  | 'progressUpdate'
+  | 'error'
+  | 'fileGenerated'
+  | 'replStepChange'
+  | 'modeChange'
+  | 'requestApproval'
+  | 'init';
+
+export interface WebviewMessage {
+  type: WebviewMessageType;
+  payload: unknown;
+}
+
+export interface ExtensionMessage {
+  type: ExtensionMessageType;
+  payload: unknown;
+}
+
+// ─── Progress ─────────────────────────────────────────────────────
+
+export interface ProgressReport {
+  totalFiles: number;
+  completedFiles: number;
+  totalTodos: number;
+  completedTodos: number;
+  totalTokensGenerated: number;
+  currentIteration: number;
+  currentMode: RLMMode;
+  currentStep: REPLStep;
+  estimatedCompletion: number; // percentage
+  activeFile?: string;
+}
+
+// ─── LM Adapter ───────────────────────────────────────────────────
+
+export interface LMRequestOptions {
+  maxTokens?: number;
+  temperature?: number;
+  stopSequences?: string[];
+  systemPrompt?: string;
+}
+
+export interface LMStreamEvent {
+  type: 'chunk' | 'end' | 'error';
+  content: string;
+  tokensUsed?: number;
+}
+
+// ─── Validation ───────────────────────────────────────────────────
+
+export interface ValidationResult {
+  isValid: boolean;
+  errors: ValidationError[];
+  warnings: ValidationWarning[];
+  suggestions: string[];
+}
+
+export interface ValidationError {
+  file: string;
+  line?: number;
+  message: string;
+  severity: 'error' | 'critical';
+}
+
+export interface ValidationWarning {
+  file: string;
+  line?: number;
+  message: string;
+}
+
+// ─── Serialization helpers ────────────────────────────────────────
+
+export interface SerializedProjectState {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  architecture: ProjectArchitecture;
+  files: Array<[string, ProjectFile]>;
+  todos: TodoItem[];
+  assumptions: string[];
+  currentREPLStep: REPLStep;
+  currentMode: RLMMode;
+  conversationHistory: ConversationMessage[];
+  totalTokensGenerated: number;
+  iterationCount: number;
+  outputDirectory: string;
+}
+File 6: src/constants.ts
+TypeScript
+
+// codeforge/src/constants.ts
+
+export const EXTENSION_ID = 'codeforge';
+export const WEBVIEW_VIEW_ID = 'codeforge.chatView';
+
+// ─── Token Limits ─────────────────────────────────────────────────
+
+export const MAX_INPUT_TOKENS = 32000;
+export const MAX_OUTPUT_TOKENS = 4096;
+export const CHUNK_OVERLAP_TOKENS = 200;
+export const TARGET_CHUNK_SIZE = 3000;
+export const CONTEXT_SUMMARY_MAX_TOKENS = 2000;
+
+// ─── System Prompts ───────────────────────────────────────────────
+
+export const SYSTEM_PROMPTS = {
+  REASONING: `You are CodeForge's Reasoning Engine. Your role is to:
+1. Analyze the user's project requirements
+2. Plan architecture, file structure, and module dependencies
+3. Decide the optimal order for code generation
+4. Identify potential issues before they arise
+5. Output structured plans in JSON format when requested
+
+Always respond with clear, actionable plans. When planning architecture:
+- List every file with its purpose
+- Define module dependency order
+- Identify public APIs for each module
+- Note assumptions and constraints
+
+Output format for architecture plans:
+{
+  "name": "project name",
+  "description": "project description",
+  "targetLanguages": ["lang1"],
+  "frameworks": ["framework1"],
+  "fileTree": ["path/to/file1.ts", "path/to/file2.ts"],
+  "moduleDependencyOrder": ["file1.ts", "file2.ts"],
+  "designDecisions": ["decision1", "decision2"]
+}`,
+
+  LONG_MEMORY: `You are CodeForge's Long Memory Engine. Your role is to:
+1. Maintain accurate project state across iterations
+2. Summarize what has been built so far
+3. Track all files, their public APIs, and dependencies
+4. Identify what needs to be built next
+5. Keep context compact but complete
+
+When summarizing project state, include:
+- Completed modules with their public API signatures
+- Pending modules and their requirements
+- Key design decisions made
+- Assumptions in effect
+- Current blockers or dependencies
+
+Keep summaries under 2000 tokens while preserving all critical information.`,
+
+  EXECUTION: `You are CodeForge's Execution Engine. Your role is to:
+1. Generate production-quality code ONLY
+2. Never use placeholders, TODOs, or stub implementations unless explicitly asked
+3. Include all imports, types, and error handling
+4. Follow idiomatic patterns for the target language
+5. Ensure code compiles and is complete
+
+Rules:
+- Every file must be self-contained and compilable
+- All imports must reference real modules in the project
+- Include comprehensive error handling
+- Use explicit, verbose implementations over clever shortcuts
+- Add JSDoc/documentation comments for public APIs
+- Handle edge cases
+
+When generating code, wrap each file in:
+\`\`\`language
+// filepath: path/to/file.ext
+<complete file content>
+\`\`\``,
+
+  VALIDATOR: `You are CodeForge's Validation Engine. Your role is to:
+1. Check generated code for correctness
+2. Verify all imports resolve to existing project files
+3. Check type consistency across modules
+4. Identify missing error handling
+5. Verify public API contracts are satisfied
+
+Output validation results as:
+{
+  "isValid": true/false,
+  "errors": [{"file": "path", "message": "description", "severity": "error|critical"}],
+  "warnings": [{"file": "path", "message": "description"}],
+  "suggestions": ["suggestion1"]
+}`,
+
+  CHUNKER: `You are processing a large codebase in chunks. 
+The current context summary describes what has been built so far.
+Continue generating from where the previous chunk left off.
+Do not repeat previously generated code.
+Maintain consistency with existing modules and APIs.`,
+};
+
+// ─── REPL Prompts ─────────────────────────────────────────────────
+
+export const REPL_PROMPTS = {
+  STATE_SYNC: (stateJson: string) =>
+    `## REPL Step 1: STATE SYNC
+
+Current Project State:
+${stateJson}
+
+Analyze the current state and report:
+1. What has been completed
+2. What is the next logical file/module to implement
+3. Any blockers or dependency issues
+4. Recommended next action
+
+Respond with a JSON object:
+{
+  "completedFiles": ["file1.ts"],
+  "nextFiles": ["file2.ts"],
+  "blockers": [],
+  "recommendation": "description of next step"
+}`,
+
+  CONFIRMATION_GATE: (nextFiles: string[], recommendation: string) =>
+    `## REPL Step 2: CONFIRMATION GATE
+
+Proposed next step: ${recommendation}
+Files to generate: ${nextFiles.join(', ')}
+
+I will now generate the above files. The implementation will:
+- Follow the architecture plan
+- Maintain consistency with existing modules
+- Include complete, production-quality code
+- Handle all imports and dependencies
+
+Proceeding with code generation.`,
+
+  CODE_EMISSION: (
+    filePath: string,
+    fileSpec: string,
+    existingAPIs: string,
+    contextSummary: string
+  ) =>
+    `## REPL Step 3: CODE EMISSION
+
+Generate the complete, production-quality implementation for:
+**File:** ${filePath}
+
+**Specification:**
+${fileSpec}
+
+**Existing APIs available:**
+${existingAPIs}
+
+**Project context:**
+${contextSummary}
+
+Requirements:
+- Complete implementation, no placeholders
+- All imports must reference existing project modules
+- Include error handling and edge cases
+- Add JSDoc comments for public APIs
+- Must compile without errors`,
+
+  UPDATE_MEMORY: (generatedFile: string, content: string) =>
+    `## REPL Step 4: UPDATE MEMORY
+
+A new file has been generated:
+**File:** ${generatedFile}
+
+Extract and return:
+{
+  "publicAPIs": ["exported function/class signatures"],
+  "dependencies": ["imported modules"],
+  "assumptions": ["any new assumptions"],
+  "newTodos": ["any follow-up tasks identified"]
+}`,
+};
+
+// ─── Language Detection ───────────────────────────────────────────
+
+export const LANGUAGE_MAP: Record<string, string> = {
+  '.ts': 'typescript',
+  '.tsx': 'typescriptreact',
+  '.js': 'javascript',
+  '.jsx': 'javascriptreact',
+  '.py': 'python',
+  '.rs': 'rust',
+  '.go': 'go',
+  '.java': 'java',
+  '.cs': 'csharp',
+  '.cpp': 'cpp',
+  '.c': 'c',
+  '.rb': 'ruby',
+  '.swift': 'swift',
+  '.kt': 'kotlin',
+  '.dart': 'dart',
+  '.vue': 'vue',
+  '.svelte': 'svelte',
+  '.html': 'html',
+  '.css': 'css',
+  '.scss': 'scss',
+  '.json': 'json',
+  '.yaml': 'yaml',
+  '.yml': 'yaml',
+  '.md': 'markdown',
+  '.sql': 'sql',
+  '.sh': 'shellscript',
+  '.dockerfile': 'dockerfile',
+};
+
+export const DEFAULT_TEMPERATURE = 0.2;
+export const DEFAULT_MAX_TOKENS = 4096;
+Now continuing with the core modules.
+
+File 7: src/core/LMAdapter.ts
+TypeScript
+
+// codeforge/src/core/LMAdapter.ts
+
+import * as vscode from 'vscode';
+import {
+  LMRequestOptions,
+  LMStreamEvent,
+  ConversationMessage,
+} from '../types';
+import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from '../constants';
+
+/**
+ * Adapter for the VS Code Language Model API (Copilot).
+ * Handles model selection, message construction, and streaming responses.
+ */
+export class LMAdapter {
+  private model: vscode.LanguageModelChat | undefined;
+  private outputChannel: vscode.OutputChannel;
+
+  constructor(outputChannel: vscode.OutputChannel) {
+    this.outputChannel = outputChannel;
+  }
+
+  /**
+   * Initialize and select the default Copilot chat model.
+   */
+  public async initialize(): Promise<void> {
+    try {
+      const models = await vscode.lm.selectChatModels({
+        vendor: 'copilot',
+      });
+
+      if (models.length === 0) {
+        throw new Error(
+          'No Copilot language models available. Ensure GitHub Copilot Chat is installed and active.'
+        );
+      }
+
+      // Prefer GPT-4 class models, fall back to whatever is available
+      this.model =
+        models.find(
+          (m) =>
+            m.id.includes('gpt-4') ||
+            m.id.includes('claude') ||
+            m.id.includes('o1')
+        ) ?? models[0];
+
+      this.outputChannel.appendLine(
+        `[LMAdapter] Selected model: ${this.model.id} (family: ${this.model.family}, maxInputTokens: ${this.model.maxInputTokens})`
+      );
+    } catch (error) {
+      this.outputChannel.appendLine(
+        `[LMAdapter] Failed to initialize: ${error}`
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get the currently selected model info.
+   */
+  public getModelInfo(): {
+    id: string;
+    family: string;
+    maxInputTokens: number;
+  } | null {
+    if (!this.model) {
+      return null;
+    }
+    return {
+      id: this.model.id,
+      family: this.model.family,
+      maxInputTokens: this.model.maxInputTokens,
+    };
+  }
+
+  /**
+   * Count tokens for a given text using the model's tokenizer.
+   */
+  public async countTokens(text: string): Promise<number> {
+    if (!this.model) {
+      // Rough estimate: ~4 chars per token
+      return Math.ceil(text.length / 4);
+    }
+    try {
+      return await this.model.countTokens(text);
+    } catch {
+      return Math.ceil(text.length / 4);
+    }
+  }
+
+  /**
+   * Send a request and collect the full response (non-streaming).
+   */
+  public async sendRequest(
+    messages: ConversationMessage[],
+    options?: LMRequestOptions,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<{ content: string; tokensUsed: number }> {
+    if (!this.model) {
+      await this.initialize();
+    }
+
+    const lmMessages = this.buildMessages(messages, options?.systemPrompt);
+    const requestOptions: vscode.LanguageModelChatRequestOptions = {
+      justification:
+        'CodeForge: Generating production code for your project.',
+    };
+
+    const token =
+      cancellationToken ?? new vscode.CancellationTokenSource().token;
+
+    try {
+      const response = await this.model!.sendRequest(
+        lmMessages,
+        requestOptions,
+        token
+      );
+
+      let fullContent = '';
+      for await (const chunk of response.text) {
+        fullContent += chunk;
+      }
+
+      const tokensUsed = await this.countTokens(fullContent);
+
+      this.outputChannel.appendLine(
+        `[LMAdapter] Response received: ${tokensUsed} tokens`
+      );
+
+      return { content: fullContent, tokensUsed };
+    } catch (error) {
+      if (error instanceof vscode.LanguageModelError) {
+        this.outputChannel.appendLine(
+          `[LMAdapter] LM Error: ${error.message} (code: ${error.code})`
+        );
+        if (
+          error.code === vscode.LanguageModelError.NoPermissions.name
+        ) {
+          throw new Error(
+            'Permission denied. Please allow CodeForge to access Copilot when prompted.'
+          );
+        }
+        if (error.code === vscode.LanguageModelError.Blocked.name) {
+          throw new Error(
+            'Request blocked by content filter. Try rephrasing.'
+          );
+        }
+        if (
+          error.code === vscode.LanguageModelError.NotFound.name
+        ) {
+          throw new Error(
+            'Model not found. Ensure Copilot Chat is installed.'
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Send a request and stream the response via a callback.
+   */
+  public async sendStreamingRequest(
+    messages: ConversationMessage[],
+    onEvent: (event: LMStreamEvent) => void,
+    options?: LMRequestOptions,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<{ content: string; tokensUsed: number }> {
+    if (!this.model) {
+      await this.initialize();
+    }
+
+    const lmMessages = this.buildMessages(messages, options?.systemPrompt);
+    const requestOptions: vscode.LanguageModelChatRequestOptions = {
+      justification:
+        'CodeForge: Generating production code for your project.',
+    };
+
+    const token =
+      cancellationToken ?? new vscode.CancellationTokenSource().token;
+
+    try {
+      const response = await this.model!.sendRequest(
+        lmMessages,
+        requestOptions,
+        token
+      );
+
+      let fullContent = '';
+      for await (const chunk of response.text) {
+        fullContent += chunk;
+        onEvent({
+          type: 'chunk',
+          content: chunk,
+        });
+      }
+
+      const tokensUsed = await this.countTokens(fullContent);
+
+      onEvent({
+        type: 'end',
+        content: '',
+        tokensUsed,
+      });
+
+      return { content: fullContent, tokensUsed };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      onEvent({
+        type: 'error',
+        content: errorMessage,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Build vscode.LanguageModelChatMessage array from our conversation format.
+   */
+  private buildMessages(
+    messages: ConversationMessage[],
+    systemPrompt?: string
+  ): vscode.LanguageModelChatMessage[] {
+    const lmMessages: vscode.LanguageModelChatMessage[] = [];
+
+    // System prompt first if provided
+    if (systemPrompt) {
+      lmMessages.push(
+        vscode.LanguageModelChatMessage.User(
+          `[SYSTEM INSTRUCTIONS]\n${systemPrompt}\n[END SYSTEM INSTRUCTIONS]`
+        )
+      );
+    }
+
+    for (const msg of messages) {
+      switch (msg.role) {
+        case 'system':
+          lmMessages.push(
+            vscode.LanguageModelChatMessage.User(
+              `[SYSTEM]\n${msg.content}\n[/SYSTEM]`
+            )
+          );
+          break;
+        case 'user':
+          lmMessages.push(
+            vscode.LanguageModelChatMessage.User(msg.content)
+          );
+          break;
+        case 'assistant':
+          lmMessages.push(
+            vscode.LanguageModelChatMessage.Assistant(msg.content)
+          );
+          break;
+      }
+    }
+
+    return lmMessages;
+  }
+
+  /**
+   * Check if the model is available and ready.
+   */
+  public isReady(): boolean {
+    return this.model !== undefined;
+  }
+
+  /**
+   * Get the maximum input token limit for context windowing.
+   */
+  public getMaxInputTokens(): number {
+    return this.model?.maxInputTokens ?? 32000;
+  }
+
+  public dispose(): void {
+    this.model = undefined;
+  }
+}
+File 8: src/core/Chunker.ts
+TypeScript
+
+// codeforge/src/core/Chunker.ts
+
+import { ChunkedRequest, ChunkedResponse, ProjectFile } from '../types';
+import {
+  TARGET_CHUNK_SIZE,
+  CHUNK_OVERLAP_TOKENS,
+  CONTEXT_SUMMARY_MAX_TOKENS,
+} from '../constants';
+import { LMAdapter } from './LMAdapter';
+
+/**
+ * Handles splitting large inputs and outputs into manageable chunks
+ * for the LM API, maintaining context across chunks.
+ */
+export class Chunker {
+  private lmAdapter: LMAdapter;
+
+  constructor(lmAdapter: LMAdapter) {
+    this.lmAdapter = lmAdapter;
+  }
+
+  /**
+   * Split a large input text into chunks that fit within the model's context window.
+   * Each chunk includes an overlap region for continuity.
+   */
+  public async chunkInput(
+    content: string,
+    contextSummary: string,
+    maxTokensPerChunk?: number
+  ): Promise<ChunkedRequest[]> {
+    const effectiveMax = maxTokensPerChunk ?? TARGET_CHUNK_SIZE;
+    const totalTokens = await this.lmAdapter.countTokens(content);
+
+    if (totalTokens <= effectiveMax) {
+      return [
+        {
+          id: this.generateId(),
+          totalChunks: 1,
+          currentChunk: 0,
+          content,
+          contextSummary,
+        },
+      ];
+    }
+
+    const chunks: ChunkedRequest[] = [];
+    const lines = content.split('\n');
+    let currentChunkLines: string[] = [];
+    let currentTokenCount = 0;
+    const batchId = this.generateId();
+
+    for (const line of lines) {
+      const lineTokens = await this.lmAdapter.countTokens(line + '\n');
+
+      if (
+        currentTokenCount + lineTokens > effectiveMax &&
+        currentChunkLines.length > 0
+      ) {
+        chunks.push({
+          id: batchId,
+          totalChunks: -1, // Will be set after all chunks created
+          currentChunk: chunks.length,
+          content: currentChunkLines.join('\n'),
+          contextSummary,
+        });
+
+        // Keep overlap lines for context continuity
+        const overlapLines = this.getOverlapLines(
+          currentChunkLines,
+          CHUNK_OVERLAP_TOKENS
+        );
+        currentChunkLines = [...overlapLines];
+        currentTokenCount = await this.lmAdapter.countTokens(
+          currentChunkLines.join('\n')
+        );
+      }
+
+      currentChunkLines.push(line);
+      currentTokenCount += lineTokens;
+    }
+
+    // Last chunk
+    if (currentChunkLines.length > 0) {
+      chunks.push({
+        id: batchId,
+        totalChunks: -1,
+        currentChunk: chunks.length,
+        content: currentChunkLines.join('\n'),
+        contextSummary,
+      });
+    }
+
+    // Update total chunk counts
+    for (const chunk of chunks) {
+      chunk.totalChunks = chunks.length;
+    }
+
+    return chunks;
+  }
+
+  /**
+   * Reassemble chunked responses into a single coherent output.
+   */
+  public reassembleChunks(chunks: ChunkedResponse[]): string {
+    const sorted = [...chunks].sort(
+      (a, b) => a.currentChunk - b.currentChunk
+    );
+    const parts: string[] = [];
+
+    for (let i = 0; i < sorted.length; i++) {
+      const chunk = sorted[i];
+      if (i === 0) {
+        parts.push(chunk.content);
+      } else {
+        // Remove overlap from subsequent chunks
+        const deduped = this.removeOverlap(
+          parts[parts.length - 1],
+          chunk.content
+        );
+        parts.push(deduped);
+      }
+    }
+
+    return parts.join('');
+  }
+
+  /**
+   * Build a compact context summary from existing project files.
+   * Stays within CONTEXT_SUMMARY_MAX_TOKENS.
+   */
+  public async buildContextSummary(
+    files: Map<string, ProjectFile>,
+    assumptions: string[],
+    currentFocus?: string
+  ): Promise<string> {
+    const sections: string[] = [];
+
+    // File inventory with public APIs
+    sections.push('## Project Files');
+    let fileSection = '';
+    for (const [path, file] of files) {
+      if (file.status === 'completed') {
+        const apiSummary =
+          file.publicAPIs.length > 0
+            ? `\n  APIs: ${file.publicAPIs.join(', ')}`
+            : '';
+        fileSection += `- [✓] ${path} (${file.tokenCount} tokens)${apiSummary}\n`;
+      } else {
+        fileSection += `- [ ] ${path} (${file.status})\n`;
+      }
+    }
+    sections.push(fileSection);
+
+    // Assumptions
+    if (assumptions.length > 0) {
+      sections.push('## Assumptions');
+      sections.push(assumptions.map((a) => `- ${a}`).join('\n'));
+    }
+
+    // Current focus
+    if (currentFocus) {
+      sections.push(`## Current Focus\n${currentFocus}`);
+    }
+
+    let summary = sections.join('\n\n');
+
+    // Trim if too long
+    const tokenCount = await this.lmAdapter.countTokens(summary);
+    if (tokenCount > CONTEXT_SUMMARY_MAX_TOKENS) {
+      summary = await this.compressSummary(summary);
+    }
+
+    return summary;
+  }
+
+  /**
+   * Extract code blocks from LM response.
+   */
+  public extractCodeBlocks(
+    response: string
+  ): Array<{ filepath: string; language: string; content: string }> {
+    const blocks: Array<{
+      filepath: string;
+      language: string;
+      content: string;
+    }> = [];
+
+    // Match ```language\n// filepath: path\ncontent\n```
+    const codeBlockRegex =
+      /```(\w+)?\n(?:\/\/\s*(?:filepath|file|path):\s*(.+?)\n)?([\s\S]*?)```/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = codeBlockRegex.exec(response)) !== null) {
+      const language = match[1] || 'plaintext';
+      const filepath = match[2]?.trim() || '';
+      const content = match[3]?.trim() || '';
+
+      if (content.length > 0) {
+        blocks.push({
+          filepath,
+          language,
+          content,
+        });
+      }
+    }
+
+    return blocks;
+  }
+
+  /**
+   * Split a file specification into chunks if the expected output is large.
+   */
+  public createFileGenerationChunks(
+    filePath: string,
+    specification: string,
+    existingContent?: string
+  ): Array<{
+    instruction: string;
+    section: string;
+    isFirst: boolean;
+    isLast: boolean;
+  }> {
+    // For files expected to be large, split the generation
+    // into logical sections
+    const sections = this.identifyLogicalSections(specification);
+
+    if (sections.length <= 1) {
+      return [
+        {
+          instruction: `Generate the complete file: ${filePath}`,
+          section: specification,
+          isFirst: true,
+          isLast: true,
+        },
+      ];
+    }
+
+    return sections.map((section, index) => ({
+      instruction:
+        index === 0
+          ? `Generate the beginning of ${filePath}, including imports and initial definitions`
+          : index === sections.length - 1
+            ? `Continue and complete ${filePath}, picking up from where the previous section ended`
+            : `Continue generating ${filePath}, section ${index + 1} of ${sections.length}`,
+      section,
+      isFirst: index === 0,
+      isLast: index === sections.length - 1,
+    }));
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────
+
+  private getOverlapLines(
+    lines: string[],
+    _maxOverlapTokens: number
+  ): string[] {
+    // Take last N lines as overlap
+    const overlapCount = Math.min(10, Math.floor(lines.length * 0.1));
+    return lines.slice(-overlapCount);
+  }
+
+  private removeOverlap(previous: string, current: string): string {
+    const prevLines = previous.split('\n');
+    const currLines = current.split('\n');
+
+    // Find the longest matching suffix of previous that is a prefix of current
+    let overlapLength = 0;
+    const maxCheck = Math.min(prevLines.length, currLines.length, 15);
+
+    for (let len = 1; len <= maxCheck; len++) {
+      const prevSuffix = prevLines.slice(-len).join('\n');
+      const currPrefix = currLines.slice(0, len).join('\n');
+
+      if (prevSuffix === currPrefix) {
+        overlapLength = len;
+      }
+    }
+
+    if (overlapLength > 0) {
+      return currLines.slice(overlapLength).join('\n');
+    }
+
+    return current;
+  }
+
+  private async compressSummary(summary: string): Promise<string> {
+    const lines = summary.split('\n');
+    // Remove detailed API listings, keep file paths and statuses
+    const compressed = lines
+      .filter((line) => !line.startsWith('  APIs:'))
+      .join('\n');
+
+    const tokenCount = await this.lmAdapter.countTokens(compressed);
+    if (tokenCount > CONTEXT_SUMMARY_MAX_TOKENS) {
+      // Further truncate by keeping only completed files
+      return compressed
+        .split('\n')
+        .filter(
+          (line) =>
+            line.startsWith('#') ||
+            line.includes('[✓]') ||
+            line.startsWith('-')
+        )
+        .slice(0, 50)
+        .join('\n');
+    }
+
+    return compressed;
+  }
+
+  private identifyLogicalSections(specification: string): string[] {
+    // Split by markdown headers or logical breaks
+    const sections = specification.split(/(?=^##\s)/m);
+    return sections.filter((s) => s.trim().length > 0);
+  }
+
+  private generateId(): string {
+    return `chunk_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  }
+}
+File 9: src/core/ProgressTracker.ts
+TypeScript
+
+// codeforge/src/core/ProgressTracker.ts
+
+import {
+  TodoItem,
+  TaskStatus,
+  ProgressReport,
+  ProjectState,
+  ProjectFile,
+  RLMMode,
+  REPLStep,
+} from '../types';
+
+/**
+ * Tracks project progress, TODOs, completed files, and provides
+ * progress reports for the UI.
+ */
+export class ProgressTracker {
+  private todos: TodoItem[] = [];
+  private files: Map<string, ProjectFile> = new Map();
+  private totalTokensGenerated: number = 0;
+  private iterationCount: number = 0;
+  private currentMode: RLMMode = RLMMode.REASONING;
+  private currentStep: REPLStep = REPLStep.STATE_SYNC;
+  private activeFile: string | undefined;
+
+  /**
+   * Load state from existing project state.
+   */
+  public loadFromState(state: ProjectState): void {
+    this.todos = [...state.todos];
+    this.files = new Map(state.files);
+    this.totalTokensGenerated = state.totalTokensGenerated;
+    this.iterationCount = state.iterationCount;
+    this.currentMode = state.currentMode;
+    this.currentStep = state.currentREPLStep;
+  }
+
+  // ─── TODO Management ───────────────────────────────────────────
+
+  public addTodo(
+    description: string,
+    relatedFiles: string[] = [],
+    priority: number = 5
+  ): TodoItem {
+    const todo: TodoItem = {
+      id: `todo_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      description,
+      status: TaskStatus.PENDING,
+      relatedFiles,
+      priority,
+      createdAt: Date.now(),
+    };
+    this.todos.push(todo);
+    return todo;
+  }
+
+  public completeTodo(todoId: string): void {
+    const todo = this.todos.find((t) => t.id === todoId);
+    if (todo) {
+      todo.status = TaskStatus.COMPLETED;
+      todo.completedAt = Date.now();
+    }
+  }
+
+  public failTodo(todoId: string): void {
+    const todo = this.todos.find((t) => t.id === todoId);
+    if (todo) {
+      todo.status = TaskStatus.FAILED;
+    }
+  }
+
+  public getTodosByStatus(status: TaskStatus): TodoItem[] {
+    return this.todos.filter((t) => t.status === status);
+  }
+
+  public getNextTodo(): TodoItem | undefined {
+    return this.todos
+      .filter((t) => t.status === TaskStatus.PENDING)
+      .sort((a, b) => a.priority - b.priority)[0];
+  }
+
+  public getAllTodos(): TodoItem[] {
+    return [...this.todos];
+  }
+
+  // ─── File Tracking ─────────────────────────────────────────────
+
+  public registerFile(path: string, file: ProjectFile): void {
+    this.files.set(path, file);
+  }
+
+  public markFileCompleted(
+    path: string,
+    content: string,
+    publicAPIs: string[],
+    tokenCount: number
+  ): void {
+    const file = this.files.get(path);
+    if (file) {
+      file.status = TaskStatus.COMPLETED;
+      file.content = content;
+      file.publicAPIs = publicAPIs;
+      file.tokenCount = tokenCount;
+      file.lastModified = Date.now();
+      this.totalTokensGenerated += tokenCount;
+    }
+  }
+
+  public markFileInProgress(path: string): void {
+    const file = this.files.get(path);
+    if (file) {
+      file.status = TaskStatus.IN_PROGRESS;
+    }
+    this.activeFile = path;
+  }
+
+  public markFileFailed(path: string): void {
+    const file = this.files.get(path);
+    if (file) {
+      file.status = TaskStatus.FAILED;
+    }
+  }
+
+  public getFile(path: string): ProjectFile | undefined {
+    return this.files.get(path);
+  }
+
+  public getFilesByStatus(status: TaskStatus): ProjectFile[] {
+    return Array.from(this.files.values()).filter(
+      (f) => f.status === status
+    );
+  }
+
+  public getCompletedFiles(): Map<string, ProjectFile> {
+    const completed = new Map<string, ProjectFile>();
+    for (const [path, file] of this.files) {
+      if (file.status === TaskStatus.COMPLETED) {
+        completed.set(path, file);
+      }
+    }
+    return completed;
+  }
+
+  public getPendingFiles(): string[] {
+    return Array.from(this.files.entries())
+      .filter(([_, file]) => file.status === TaskStatus.PENDING)
+      .map(([path]) => path);
+  }
+
+  // ─── Mode & Step Tracking ──────────────────────────────────────
+
+  public setMode(mode: RLMMode): void {
+    this.currentMode = mode;
+  }
+
+  public setStep(step: REPLStep): void {
+    this.currentStep = step;
+  }
+
+  public incrementIteration(): void {
+    this.iterationCount++;
+  }
+
+  public addTokens(count: number): void {
+    this.totalTokensGenerated += count;
+  }
+
+  // ─── Progress Report ───────────────────────────────────────────
+
+  public getProgressReport(): ProgressReport {
+    const totalFiles = this.files.size;
+    const completedFiles = Array.from(this.files.values()).filter(
+      (f) => f.status === TaskStatus.COMPLETED
+    ).length;
+    const totalTodos = this.todos.length;
+    const completedTodos = this.todos.filter(
+      (t) => t.status === TaskStatus.COMPLETED
+    ).length;
+
+    const estimatedCompletion =
+      totalFiles > 0
+        ? Math.round((completedFiles / totalFiles) * 100)
+        : 0;
+
+    return {
+      totalFiles,
+      completedFiles,
+      totalTodos,
+      completedTodos,
+      totalTokensGenerated: this.totalTokensGenerated,
+      currentIteration: this.iterationCount,
+      currentMode: this.currentMode,
+      currentStep: this.currentStep,
+      estimatedCompletion,
+      activeFile: this.activeFile,
+    };
+  }
+
+  // ─── Serialization ─────────────────────────────────────────────
+
+  public exportState(): {
+    todos: TodoItem[];
+    totalTokensGenerated: number;
+    iterationCount: number;
+  } {
+    return {
+      todos: [...this.todos],
+      totalTokensGenerated: this.totalTokensGenerated,
+      iterationCount: this.iterationCount,
+    };
+  }
+
+  public reset(): void {
+    this.todos = [];
+    this.files = new Map();
+    this.totalTokensGenerated = 0;
+    this.iterationCount = 0;
+    this.currentMode = RLMMode.REASONING;
+    this.currentStep = REPLStep.STATE_SYNC;
+    this.activeFile = undefined;
+  }
+}
+File 10: src/core/LongMemoryMode.ts
+TypeScript
+
+// codeforge/src/core/LongMemoryMode.ts
+
+import {
+  ProjectState,
+  ProjectFile,
+  TodoItem,
+  ConversationMessage,
+  ProjectArchitecture,
+  RLMMode,
+  REPLStep,
+  TaskStatus,
+  SerializedProjectState,
+} from '../types';
+import { Chunker } from './Chunker';
+import { LMAdapter } from './LMAdapter';
+import { SYSTEM_PROMPTS, REPL_PROMPTS } from '../constants';
+
+/**
+ * Long Memory Mode: Maintains canonical project state across iterations.
+ * Persists file tree, implemented modules, public APIs, assumptions, and open tasks.
+ */
+export class LongMemoryMode {
+  private state: ProjectState;
+  private chunker: Chunker;
+  private lmAdapter: LMAdapter;
+
+  constructor(lmAdapter: LMAdapter, chunker: Chunker) {
+    this.lmAdapter = lmAdapter;
+    this.chunker = chunker;
+    this.state = this.createEmptyState();
+  }
+
+  /**
+   * Initialize a new project state.
+   */
+  public initializeProject(
+    name: string,
+    outputDirectory: string,
+    architecture?: ProjectArchitecture
+  ): ProjectState {
+    this.state = {
+      id: `proj_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      architecture: architecture ?? {
+        name,
+        description: '',
+        targetLanguages: [],
+        frameworks: [],
+        fileTree: [],
+        moduleDependencyOrder: [],
+        designDecisions: [],
+      },
+      files: new Map(),
+      todos: [],
+      assumptions: [],
+      currentREPLStep: REPLStep.STATE_SYNC,
+      currentMode: RLMMode.REASONING,
+      conversationHistory: [],
+      totalTokensGenerated: 0,
+      iterationCount: 0,
+      outputDirectory,
+    };
+    return this.state;
+  }
+
+  /**
+   * Get the current project state.
+   */
+  public getState(): ProjectState {
+    return this.state;
+  }
+
+  /**
+   * Update the architecture plan.
+   */
+  public setArchitecture(architecture: ProjectArchitecture): void {
+    this.state.architecture = architecture;
+    this.state.updatedAt = Date.now();
+
+    // Register planned files
+    for (const filePath of architecture.fileTree) {
+      if (!this.state.files.has(filePath)) {
+        this.state.files.set(filePath, {
+          path: filePath,
+          language: this.detectLanguage(filePath),
+          status: TaskStatus.PENDING,
+          content: '',
+          dependencies: [],
+          publicAPIs: [],
+          lastModified: Date.now(),
+          tokenCount: 0,
+        });
+      }
+    }
+  }
+
+  /**
+   * Record a completed file in project state.
+   */
+  public recordFileCompletion(
+    filePath: string,
+    content: string,
+    publicAPIs: string[],
+    dependencies: string[],
+    tokenCount: number
+  ): void {
+    const file: ProjectFile = {
+      path: filePath,
+      language: this.detectLanguage(filePath),
+      status: TaskStatus.COMPLETED,
+      content,
+      dependencies,
+      publicAPIs,
+      lastModified: Date.now(),
+      tokenCount,
+    };
+
+    this.state.files.set(filePath, file);
+    this.state.totalTokensGenerated += tokenCount;
+    this.state.updatedAt = Date.now();
+  }
+
+  /**
+   * Mark a file as in-progress.
+   */
+  public markFileInProgress(filePath: string): void {
+    const file = this.state.files.get(filePath);
+    if (file) {
+      file.status = TaskStatus.IN_PROGRESS;
+      this.state.updatedAt = Date.now();
+    }
+  }
+
+  /**
+   * Add a conversation message.
+   */
+  public addMessage(message: ConversationMessage): void {
+    this.state.conversationHistory.push(message);
+    this.state.updatedAt = Date.now();
+  }
+
+  /**
+   * Add a TODO item.
+   */
+  public addTodo(todo: TodoItem): void {
+    this.state.todos.push(todo);
+    this.state.updatedAt = Date.now();
+  }
+
+  /**
+   * Add an assumption.
+   */
+  public addAssumption(assumption: string): void {
+    if (!this.state.assumptions.includes(assumption)) {
+      this.state.assumptions.push(assumption);
+      this.state.updatedAt = Date.now();
+    }
+  }
+
+  /**
+   * Update REPL step.
+   */
+  public setREPLStep(step: REPLStep): void {
+    this.state.currentREPLStep = step;
+    this.state.updatedAt = Date.now();
+  }
+
+  /**
+   * Update RLM mode.
+   */
+  public setMode(mode: RLMMode): void {
+    this.state.currentMode = mode;
+    this.state.updatedAt = Date.now();
+  }
+
+  /**
+   * Increment iteration count.
+   */
+  public incrementIteration(): void {
+    this.state.iterationCount++;
+    this.state.updatedAt = Date.now();
+  }
+
+  /**
+   * Get the next file(s) to generate based on dependency order.
+   */
+  public getNextFilesToGenerate(): string[] {
+    const completed = new Set<string>();
+    for (const [path, file] of this.state.files) {
+      if (file.status === TaskStatus.COMPLETED) {
+        completed.add(path);
+      }
+    }
+
+    const nextFiles: string[] = [];
+    for (const filePath of this.state.architecture.moduleDependencyOrder) {
+      if (completed.has(filePath)) {
+        continue;
+      }
+
+      // Check if all dependencies are met
+      const file = this.state.files.get(filePath);
+      if (file) {
+        const depsReady = file.dependencies.every((dep) =>
+          completed.has(dep)
+        );
+        if (depsReady || file.dependencies.length === 0) {
+          nextFiles.push(filePath);
+          if (nextFiles.length >= 2) {
+            break; // Limit to 2 files at a time
+          }
+        }
+      } else {
+        // File not yet registered but in dependency order
+        nextFiles.push(filePath);
+        if (nextFiles.length >= 2) {
+          break;
+        }
+      }
+    }
+
+    return nextFiles;
+  }
+
+  /**
+   * Build a compact context summary for use in prompts.
+   */
+  public async buildContextSummary(): Promise<string> {
+    return this.chunker.buildContextSummary(
+      this.state.files,
+      this.state.assumptions,
+      this.state.currentREPLStep
+    );
+  }
+
+  /**
+   * Get the public APIs of all completed files as a string.
+   */
+  public getExistingAPIs(): string {
+    const apis: string[] = [];
+    for (const [path, file] of this.state.files) {
+      if (
+        file.status === TaskStatus.COMPLETED &&
+        file.publicAPIs.length > 0
+      ) {
+        apis.push(`### ${path}`);
+        for (const api of file.publicAPIs) {
+          apis.push(`  - ${api}`);
+        }
+      }
+    }
+    return apis.length > 0
+      ? apis.join('\n')
+      : 'No completed modules yet.';
+  }
+
+  /**
+   * Build the state sync prompt for the LM.
+   */
+  public buildStateSyncPrompt(): string {
+    const stateJson = JSON.stringify(
+      {
+        projectName: this.state.name,
+        iteration: this.state.iterationCount,
+        totalTokensGenerated: this.state.totalTokensGenerated,
+        completedFiles: Array.from(this.state.files.entries())
+          .filter(([_, f]) => f.status === TaskStatus.COMPLETED)
+          .map(([p, f]) => ({
+            path: p,
+            apis: f.publicAPIs,
+            tokens: f.tokenCount,
+          })),
+        pendingFiles: Array.from(this.state.files.entries())
+          .filter(([_, f]) => f.status === TaskStatus.PENDING)
+          .map(([p]) => p),
+        openTodos: this.state.todos
+          .filter((t) => t.status === TaskStatus.PENDING)
+          .map((t) => t.description),
+        assumptions: this.state.assumptions,
+        architecture: {
+          fileTree: this.state.architecture.fileTree,
+          dependencyOrder:
+            this.state.architecture.moduleDependencyOrder,
+        },
+      },
+      null,
+      2
+    );
+
+    return REPL_PROMPTS.STATE_SYNC(stateJson);
+  }
+
+  /**
+   * Use the LM to update memory after code generation.
+   */
+  public async updateMemoryFromGeneration(
+    filePath: string,
+    content: string
+  ): Promise<{
+    publicAPIs: string[];
+    dependencies: string[];
+    assumptions: string[];
+    newTodos: string[];
+  }> {
+    const prompt = REPL_PROMPTS.UPDATE_MEMORY(filePath, content);
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+        mode: RLMMode.LONG_MEMORY,
+        step: REPLStep.UPDATE_MEMORY,
+      },
+    ];
+
+    try {
+      const response = await this.lmAdapter.sendRequest(messages, {
+        systemPrompt: SYSTEM_PROMPTS.LONG_MEMORY,
+      });
+
+      // Parse the JSON response
+      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          publicAPIs: parsed.publicAPIs || [],
+          dependencies: parsed.dependencies || [],
+          assumptions: parsed.assumptions || [],
+          newTodos: parsed.newTodos || [],
+        };
+      }
+    } catch {
+      // Fallback: extract basic info manually
+    }
+
+    return {
+      publicAPIs: this.extractExportsFromCode(content),
+      dependencies: this.extractImportsFromCode(content),
+      assumptions: [],
+      newTodos: [],
+    };
+  }
+
+  /**
+   * Serialize state for persistence.
+   */
+  public serialize(): SerializedProjectState {
+    return {
+      ...this.state,
+      files: Array.from(this.state.files.entries()),
+    };
+  }
+
+  /**
+   * Deserialize state from persistence.
+   */
+  public deserialize(data: SerializedProjectState): void {
+    this.state = {
+      ...data,
+      files: new Map(data.files),
+    };
+  }
+
+  /**
+   * Reset to empty state.
+   */
+  public reset(): void {
+    this.state = this.createEmptyState();
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────
+
+  private createEmptyState(): ProjectState {
+    return {
+      id: '',
+      name: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      architecture: {
+        name: '',
+        description: '',
+        targetLanguages: [],
+        frameworks: [],
+        fileTree: [],
+        moduleDependencyOrder: [],
+        designDecisions: [],
+      },
+      files: new Map(),
+      todos: [],
+      assumptions: [],
+      currentREPLStep: REPLStep.STATE_SYNC,
+      currentMode: RLMMode.REASONING,
+      conversationHistory: [],
+      totalTokensGenerated: 0,
+      iterationCount: 0,
+      outputDirectory: '',
+    };
+  }
+
+  private detectLanguage(filePath: string): string {
+    const ext = filePath.substring(filePath.lastIndexOf('.'));
+    const langMap: Record<string, string> = {
+      '.ts': 'typescript',
+      '.tsx': 'typescriptreact',
+      '.js': 'javascript',
+      '.py': 'python',
+      '.rs': 'rust',
+      '.go': 'go',
+      '.java': 'java',
+      '.json': 'json',
+      '.html': 'html',
+      '.css': 'css',
+      '.md': 'markdown',
+    };
+    return langMap[ext] || 'plaintext';
+  }
+
+  private extractExportsFromCode(content: string): string[] {
+    const exports: string[] = [];
+    const exportRegex =
+      /export\s+(?:default\s+)?(?:class|function|const|interface|type|enum)\s+(\w+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = exportRegex.exec(content)) !== null) {
+      exports.push(match[1]);
+    }
+    return exports;
+  }
+
+  private extractImportsFromCode(content: string): string[] {
+    const imports: string[] = [];
+    const importRegex = /from\s+['"](.+?)['"]/g;
+    let match: RegExpExecArray | null;
+    while ((match = importRegex.exec(content)) !== null) {
+      imports.push(match[1]);
+    }
+    return imports;
+  }
+}
+File 11: src/core/ReasoningMode.ts
+TypeScript
+
+// codeforge/src/core/ReasoningMode.ts
+
+import {
+  ProjectArchitecture,
+  ConversationMessage,
+  RLMMode,
+  REPLStep,
+} from '../types';
+import { LMAdapter } from './LMAdapter';
+import { SYSTEM_PROMPTS } from '../constants';
+
+/**
+ * Reasoning Mode: Plans architecture, file structure, dependencies,
+ * and decides what to generate next.
+ */
+export class ReasoningMode {
+  private lmAdapter: LMAdapter;
+
+  constructor(lmAdapter: LMAdapter) {
+    this.lmAdapter = lmAdapter;
+  }
+
+  /**
+   * Analyze user requirements and produce an architecture plan.
+   */
+  public async planArchitecture(
+    userRequest: string,
+    existingContext?: string
+  ): Promise<{
+    architecture: ProjectArchitecture;
+    rawResponse: string;
+    tokensUsed: number;
+  }> {
+    const prompt = this.buildArchitecturePrompt(
+      userRequest,
+      existingContext
+    );
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+        mode: RLMMode.REASONING,
+        step: REPLStep.STATE_SYNC,
+      },
+    ];
+
+    const response = await this.lmAdapter.sendRequest(messages, {
+      systemPrompt: SYSTEM_PROMPTS.REASONING,
+    });
+
+    const architecture = this.parseArchitectureResponse(
+      response.content
+    );
+
+    return {
+      architecture,
+      rawResponse: response.content,
+      tokensUsed: response.tokensUsed,
+    };
+  }
+
+  /**
+   * Decide what to generate next given current state.
+   */
+  public async decideNextStep(
+    stateSummary: string,
+    completedFiles: string[],
+    pendingFiles: string[],
+    blockers: string[]
+  ): Promise<{
+    nextFiles: string[];
+    recommendation: string;
+    tokensUsed: number;
+  }> {
+    const prompt = `## Decision Required: What to Generate Next
+
+### Current State
+${stateSummary}
+
+### Completed Files
+${completedFiles.length > 0 ? completedFiles.map((f) => `- ✓ ${f}`).join('\n') : 'None yet'}
+
+### Pending Files  
+${pendingFiles.length > 0 ? pendingFiles.map((f) => `- ○ ${f}`).join('\n') : 'All files completed'}
+
+### Known Blockers
+${blockers.length > 0 ? blockers.map((b) => `- ⚠ ${b}`).join('\n') : 'None'}
+
+Based on the dependency order and current state, which file(s) should be generated next?
+Consider:
+1. Dependency ordering (prerequisites must be done first)
+2. Logical grouping (related files together)
+3. Priority (core modules before peripheral ones)
+
+Respond with JSON:
+{
+  "nextFiles": ["path/to/file1.ts"],
+  "recommendation": "Human-readable explanation of why these files are next",
+  "fileSpecs": {
+    "path/to/file1.ts": "Brief specification of what this file should contain and implement"
+  }
+}`;
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+        mode: RLMMode.REASONING,
+      },
+    ];
+
+    const response = await this.lmAdapter.sendRequest(messages, {
+      systemPrompt: SYSTEM_PROMPTS.REASONING,
+    });
+
+    // Parse the response
+    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          nextFiles: parsed.nextFiles || pendingFiles.slice(0, 1),
+          recommendation:
+            parsed.recommendation || 'Continue with next file in order.',
+          tokensUsed: response.tokensUsed,
+        };
+      } catch {
+        // Fall through to default
+      }
+    }
+
+    // Fallback: just pick the first pending file
+    return {
+      nextFiles: pendingFiles.slice(0, 1),
+      recommendation: 'Proceeding with next file in dependency order.',
+      tokensUsed: response.tokensUsed,
+    };
+  }
+
+  /**
+   * Generate a file specification for code emission.
+   */
+  public async generateFileSpec(
+    filePath: string,
+    architecture: ProjectArchitecture,
+    existingAPIs: string,
+    contextSummary: string
+  ): Promise<{ spec: string; tokensUsed: number }> {
+    const prompt = `## Generate Detailed File Specification
+
+**File to implement:** ${filePath}
+
+**Project:** ${architecture.name}
+**Description:** ${architecture.description}
+**Languages:** ${architecture.targetLanguages.join(', ')}
+**Frameworks:** ${architecture.frameworks.join(', ')}
+
+**Full file tree:**
+${architecture.fileTree.map((f) => `  ${f}`).join('\n')}
+
+**Existing APIs available for import:**
+${existingAPIs}
+
+**Project context:**
+${contextSummary}
+
+**Design decisions:**
+${architecture.designDecisions.map((d) => `- ${d}`).join('\n')}
+
+Create a detailed specification for ${filePath} that includes:
+1. Purpose and responsibility
+2. Exports (classes, functions, types)
+3. Dependencies (what it imports from other project files)
+4. Key implementation details
+5. Error handling requirements
+6. Public API signatures
+
+Output as a structured specification.`;
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+        mode: RLMMode.REASONING,
+      },
+    ];
+
+    const response = await this.lmAdapter.sendRequest(messages, {
+      systemPrompt: SYSTEM_PROMPTS.REASONING,
+    });
+
+    return {
+      spec: response.content,
+      tokensUsed: response.tokensUsed,
+    };
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────
+
+  private buildArchitecturePrompt(
+    userRequest: string,
+    existingContext?: string
+  ): string {
+    let prompt = `## Architecture Planning Request
+
+**User's Project Description:**
+${userRequest}
+
+Please analyze this request and create a complete architecture plan.
+
+Requirements:
+1. List EVERY file needed with its full path
+2. Define the module dependency order (what must be built first)
+3. Identify target languages and frameworks
+4. Make clear design decisions
+5. Keep the plan practical and implementable
+
+Output the plan as a JSON object with this exact structure:
+{
+  "name": "project name",
+  "description": "clear project description",
+  "targetLanguages": ["typescript", "..."],
+  "frameworks": ["framework1"],
+  "fileTree": ["src/file1.ts", "src/file2.ts", "..."],
+  "moduleDependencyOrder": ["src/file1.ts", "src/file2.ts", "..."],
+  "designDecisions": ["decision 1", "decision 2"]
+}
+
+The moduleDependencyOrder MUST list files in the order they should be generated,
+respecting dependencies (a file's dependencies must appear before it in the list).`;
+
+    if (existingContext) {
+      prompt += `\n\n**Existing Context:**\n${existingContext}`;
+    }
+
+    return prompt;
+  }
+
+  private parseArchitectureResponse(
+    response: string
+  ): ProjectArchitecture {
+    // Try to extract JSON
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          name: parsed.name || 'Unnamed Project',
+          description: parsed.description || '',
+          targetLanguages: parsed.targetLanguages || [],
+          frameworks: parsed.frameworks || [],
+          fileTree: parsed.fileTree || [],
+          moduleDependencyOrder: parsed.moduleDependencyOrder || parsed.fileTree || [],
+          designDecisions: parsed.designDecisions || [],
+        };
+      } catch {
+        // Fall through to manual parsing
+      }
+    }
+
+    // Manual fallback: extract file paths from response
+    const fileRegex = /(?:src\/|lib\/|app\/)[\w/.-]+\.\w+/g;
+    const files = Array.from(
+      new Set(response.match(fileRegex) || [])
+    );
+
+    return {
+      name: 'Project',
+      description: response.substring(0, 200),
+      targetLanguages: ['typescript'],
+      frameworks: [],
+      fileTree: files,
+      moduleDependencyOrder: files,
+      designDecisions: [],
+    };
+  }
+}
+File 12: src/core/ExecutionMode.ts
+TypeScript
+
+// codeforge/src/core/ExecutionMode.ts
+
+import {
+  ConversationMessage,
+  RLMMode,
+  REPLStep,
+  LMStreamEvent,
+  ProjectArchitecture,
+} from '../types';
+import { LMAdapter } from './LMAdapter';
+import { Chunker } from './Chunker';
+import { SYSTEM_PROMPTS, REPL_PROMPTS } from '../constants';
+import * as vscode from 'vscode';
+
+export interface GenerationResult {
+  filePath: string;
+  content: string;
+  tokensUsed: number;
+  wasChunked: boolean;
+  chunksUsed: number;
+}
+
+/**
+ * Execution Mode: Generates production-quality code.
+ * Handles chunking for large file generation (3000+ tokens).
+ */
+export class ExecutionMode {
+  private lmAdapter: LMAdapter;
+  private chunker: Chunker;
+
+  constructor(lmAdapter: LMAdapter, chunker: Chunker) {
+    this.lmAdapter = lmAdapter;
+    this.chunker = chunker;
+  }
+
+  /**
+   * Generate a complete file with streaming feedback.
+   */
+  public async generateFile(
+    filePath: string,
+    fileSpec: string,
+    existingAPIs: string,
+    contextSummary: string,
+    architecture: ProjectArchitecture,
+    onStream?: (event: LMStreamEvent) => void,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<GenerationResult> {
+    const prompt = REPL_PROMPTS.CODE_EMISSION(
+      filePath,
+      fileSpec,
+      existingAPIs,
+      contextSummary
+    );
+
+    // Add architecture context
+    const fullPrompt = `${prompt}
+
+**Architecture:**
+- Project: ${architecture.name}
+- Languages: ${architecture.targetLanguages.join(', ')}
+- Frameworks: ${architecture.frameworks.join(', ')}
+
+**Important:**
+- Generate ONLY the content of ${filePath}
+- Include ALL imports, types, and implementations
+- No placeholders or TODOs
+- The file must be complete and compilable
+- Wrap the output in a code block with the filepath comment`;
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: fullPrompt,
+        timestamp: Date.now(),
+        mode: RLMMode.EXECUTION,
+        step: REPLStep.CODE_EMISSION,
+      },
+    ];
+
+    let result: { content: string; tokensUsed: number };
+
+    if (onStream) {
+      result = await this.lmAdapter.sendStreamingRequest(
+        messages,
+        onStream,
+        { systemPrompt: SYSTEM_PROMPTS.EXECUTION },
+        cancellationToken
+      );
+    } else {
+      result = await this.lmAdapter.sendRequest(
+        messages,
+        { systemPrompt: SYSTEM_PROMPTS.EXECUTION },
+        cancellationToken
+      );
+    }
+
+    // Extract the code from the response
+    const codeBlocks = this.chunker.extractCodeBlocks(result.content);
+    let fileContent: string;
+
+    if (codeBlocks.length > 0) {
+      // Use the largest code block (likely the main file)
+      fileContent = codeBlocks.reduce((best, block) =>
+        block.content.length > best.content.length ? block : best
+      ).content;
+    } else {
+      // No code blocks found, use raw content
+      fileContent = this.cleanRawContent(result.content);
+    }
+
+    return {
+      filePath,
+      content: fileContent,
+      tokensUsed: result.tokensUsed,
+      wasChunked: false,
+      chunksUsed: 1,
+    };
+  }
+
+  /**
+   * Generate a large file in multiple chunks for 3000+ token outputs.
+   */
+  public async generateLargeFile(
+    filePath: string,
+    fileSpec: string,
+    existingAPIs: string,
+    contextSummary: string,
+    architecture: ProjectArchitecture,
+    onStream?: (event: LMStreamEvent) => void,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<GenerationResult> {
+    const chunks = this.chunker.createFileGenerationChunks(
+      filePath,
+      fileSpec
+    );
+
+    if (chunks.length <= 1) {
+      return this.generateFile(
+        filePath,
+        fileSpec,
+        existingAPIs,
+        contextSummary,
+        architecture,
+        onStream,
+        cancellationToken
+      );
+    }
+
+    const generatedParts: string[] = [];
+    let totalTokens = 0;
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const previousContent = generatedParts.join('\n');
+
+      const chunkPrompt = `${chunk.instruction}
+
+**File Specification for this section:**
+${chunk.section}
+
+**Existing APIs:**
+${existingAPIs}
+
+**Context:**
+${contextSummary}
+
+${
+  previousContent
+    ? `**Previously generated content for this file (DO NOT repeat, continue from where this ends):**
+\`\`\`
+${previousContent.slice(-1500)}
+\`\`\``
+    : ''
+}
+
+${
+  chunk.isFirst
+    ? 'Start with all necessary imports and type definitions.'
+    : chunk.isLast
+      ? 'Complete the file. Include any remaining implementations and ensure the file is complete.'
+      : 'Continue the implementation. Do not repeat imports or previously generated code.'
+}`;
+
+      const messages: ConversationMessage[] = [
+        {
+          id: `msg_${Date.now()}_chunk_${i}`,
+          role: 'user',
+          content: chunkPrompt,
+          timestamp: Date.now(),
+          mode: RLMMode.EXECUTION,
+          step: REPLStep.CODE_EMISSION,
+        },
+      ];
+
+      if (onStream) {
+        onStream({
+          type: 'chunk',
+          content: `\n--- Generating chunk ${i + 1}/${chunks.length} ---\n`,
+        });
+      }
+
+      const result = await this.lmAdapter.sendStreamingRequest(
+        messages,
+        onStream ?? (() => {}),
+        { systemPrompt: SYSTEM_PROMPTS.EXECUTION },
+        cancellationToken
+      );
+
+      const codeBlocks = this.chunker.extractCodeBlocks(result.content);
+      if (codeBlocks.length > 0) {
+        generatedParts.push(
+          codeBlocks.reduce((best, block) =>
+            block.content.length > best.content.length ? block : best
+          ).content
+        );
+      } else {
+        generatedParts.push(this.cleanRawContent(result.content));
+      }
+
+      totalTokens += result.tokensUsed;
+    }
+
+    // Reassemble and deduplicate
+    const finalContent = this.assembleChunkedFile(generatedParts);
+
+    return {
+      filePath,
+      content: finalContent,
+      tokensUsed: totalTokens,
+      wasChunked: true,
+      chunksUsed: chunks.length,
+    };
+  }
+
+  /**
+   * Continue/evolve an existing file with modifications.
+   */
+  public async evolveFile(
+    filePath: string,
+    existingContent: string,
+    modifications: string,
+    existingAPIs: string,
+    contextSummary: string,
+    onStream?: (event: LMStreamEvent) => void,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<GenerationResult> {
+    const prompt = `## Evolve Existing File
+
+**File:** ${filePath}
+
+**Current content:**
+\`\`\`
+${existingContent}
+\`\`\`
+
+**Required modifications:**
+${modifications}
+
+**Existing APIs:**
+${existingAPIs}
+
+**Context:**
+${contextSummary}
+
+Generate the COMPLETE updated file with all modifications applied.
+Do not omit any existing functionality unless explicitly asked to remove it.
+The output must be the complete file, not a diff or partial update.`;
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+        mode: RLMMode.EXECUTION,
+      },
+    ];
+
+    const result = await this.lmAdapter.sendStreamingRequest(
+      messages,
+      onStream ?? (() => {}),
+      { systemPrompt: SYSTEM_PROMPTS.EXECUTION },
+      cancellationToken
+    );
+
+    const codeBlocks = this.chunker.extractCodeBlocks(result.content);
+    const fileContent =
+      codeBlocks.length > 0
+        ? codeBlocks.reduce((best, block) =>
+            block.content.length > best.content.length ? block : best
+          ).content
+        : this.cleanRawContent(result.content);
+
+    return {
+      filePath,
+      content: fileContent,
+      tokensUsed: result.tokensUsed,
+      wasChunked: false,
+      chunksUsed: 1,
+    };
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────
+
+  private cleanRawContent(content: string): string {
+    // Remove markdown formatting if present
+    let cleaned = content.trim();
+
+    // Remove leading/trailing ``` if the whole content is a code block
+    if (cleaned.startsWith('```')) {
+      const firstNewline = cleaned.indexOf('\n');
+      cleaned = cleaned.substring(firstNewline + 1);
+    }
+    if (cleaned.endsWith('```')) {
+      cleaned = cleaned.substring(0, cleaned.lastIndexOf('```'));
+    }
+
+    return cleaned.trim();
+  }
+
+  private assembleChunkedFile(parts: string[]): string {
+    if (parts.length === 0) {
+      return '';
+    }
+    if (parts.length === 1) {
+      return parts[0];
+    }
+
+    // Smart assembly: avoid duplicate imports and declarations
+    const importLines = new Set<string>();
+    const bodyLines: string[] = [];
+    let pastImports = false;
+
+    for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+      const lines = parts[partIndex].split('\n');
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Collect imports (dedup)
+        if (
+          trimmed.startsWith('import ') ||
+          trimmed.startsWith('from ') ||
+          trimmed.startsWith('require(')
+        ) {
+          importLines.add(line);
+          continue;
+        }
+
+        // Skip file path comments in subsequent chunks
+        if (
+          partIndex > 0 &&
+          (trimmed.startsWith('// filepath:') ||
+            trimmed.startsWith('// file:'))
+        ) {
+          continue;
+        }
+
+        if (!pastImports && trimmed.length > 0 && !trimmed.startsWith('//')) {
+          pastImports = true;
+        }
+
+        bodyLines.push(line);
+      }
+    }
+
+    const allImports = Array.from(importLines);
+    return [...allImports, '', ...bodyLines].join('\n');
+  }
+}
+File 13: src/core/Validator.ts
+TypeScript
+
+// codeforge/src/core/Validator.ts
+
+import {
+  ValidationResult,
+  ValidationError,
+  ValidationWarning,
+  ProjectFile,
+  ConversationMessage,
+  RLMMode,
+} from '../types';
+import { LMAdapter } from './LMAdapter';
+import { SYSTEM_PROMPTS } from '../constants';
+
+/**
+ * Validates generated code for correctness, completeness,
+ * and consistency with the project.
+ */
+export class Validator {
+  private lmAdapter: LMAdapter;
+
+  constructor(lmAdapter: LMAdapter) {
+    this.lmAdapter = lmAdapter;
+  }
+
+  /**
+   * Perform static validation checks on generated code.
+   * These are fast, local checks without LM calls.
+   */
+  public staticValidate(
+    filePath: string,
+    content: string,
+    existingFiles: Map<string, ProjectFile>
+  ): ValidationResult {
+    const errors: ValidationError[] = [];
+    const warnings: ValidationWarning[] = [];
+    const suggestions: string[] = [];
+
+    // Check 1: Non-empty content
+    if (content.trim().length === 0) {
+      errors.push({
+        file: filePath,
+        message: 'File is empty',
+        severity: 'critical',
+      });
+      return { isValid: false, errors, warnings, suggestions };
+    }
+
+    // Check 2: No placeholder patterns
+    const placeholderPatterns = [
+      /\/\/\s*TODO:\s*implement/i,
+      /throw new Error\(['"]not implemented['"]\)/i,
+      /\/\/\s*\.\.\./,
+      /pass\s*#\s*placeholder/i,
+      /\/\*\s*placeholder\s*\*\//i,
+    ];
+
+    for (const pattern of placeholderPatterns) {
+      const match = content.match(pattern);
+      if (match) {
+        warnings.push({
+          file: filePath,
+          message: `Possible placeholder found: "${match[0]}"`,
+        });
+      }
+    }
+
+    // Check 3: Import resolution (for TypeScript/JavaScript)
+    if (
+      filePath.endsWith('.ts') ||
+      filePath.endsWith('.tsx') ||
+      filePath.endsWith('.js')
+    ) {
+      const importResults = this.validateImports(
+        filePath,
+        content,
+        existingFiles
+      );
+      errors.push(...importResults.errors);
+      warnings.push(...importResults.warnings);
+    }
+
+    // Check 4: Basic syntax checks
+    const syntaxResults = this.basicSyntaxCheck(filePath, content);
+    errors.push(...syntaxResults.errors);
+    warnings.push(...syntaxResults.warnings);
+
+    // Check 5: File size sanity
+    if (content.length < 50) {
+      warnings.push({
+        file: filePath,
+        message:
+          'File seems unusually small. May be incomplete.',
+      });
+    }
+
+    // Check 6: Has exports (for module files)
+    if (
+      (filePath.endsWith('.ts') || filePath.endsWith('.js')) &&
+      !content.includes('export ')
+    ) {
+      warnings.push({
+        file: filePath,
+        message: 'File has no exports. Is this intentional?',
+      });
+    }
+
+    return {
+      isValid: errors.filter((e) => e.severity === 'critical').length === 0,
+      errors,
+      warnings,
+      suggestions,
+    };
+  }
+
+  /**
+   * Perform deep validation using the LM to check logic and consistency.
+   */
+  public async deepValidate(
+    filePath: string,
+    content: string,
+    existingFiles: Map<string, ProjectFile>,
+    contextSummary: string
+  ): Promise<ValidationResult> {
+    // First do static validation
+    const staticResult = this.staticValidate(
+      filePath,
+      content,
+      existingFiles
+    );
+
+    // If critical errors found, return immediately
+    if (!staticResult.isValid) {
+      return staticResult;
+    }
+
+    // Build context of related files
+    const relatedAPIs = this.getRelatedAPIs(content, existingFiles);
+
+    const prompt = `## Validate Generated Code
+
+**File:** ${filePath}
+
+**Generated Code:**
+\`\`\`
+${content}
+\`\`\`
+
+**Related module APIs:**
+${relatedAPIs}
+
+**Project Context:**
+${contextSummary}
+
+Validate this code for:
+1. Correctness: Does the logic make sense?
+2. Completeness: Are all functions fully implemented?
+3. Imports: Do all imports reference real project modules?
+4. Types: Are types consistent with imported modules?
+5. Error handling: Are edge cases handled?
+6. API contracts: Does it satisfy the expected public API?
+
+Respond with JSON:
+{
+  "isValid": true/false,
+  "errors": [{"file": "path", "message": "description", "severity": "error|critical"}],
+  "warnings": [{"file": "path", "message": "description"}],
+  "suggestions": ["suggestion1"]
+}`;
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: prompt,
+        timestamp: Date.now(),
+        mode: RLMMode.EXECUTION,
+      },
+    ];
+
+    try {
+      const response = await this.lmAdapter.sendRequest(messages, {
+        systemPrompt: SYSTEM_PROMPTS.VALIDATOR,
+      });
+
+      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          isValid: parsed.isValid ?? true,
+          errors: [
+            ...staticResult.errors,
+            ...(parsed.errors || []),
+          ],
+          warnings: [
+            ...staticResult.warnings,
+            ...(parsed.warnings || []),
+          ],
+          suggestions: [
+            ...staticResult.suggestions,
+            ...(parsed.suggestions || []),
+          ],
+        };
+      }
+    } catch {
+      // If LM validation fails, fall back to static results
+    }
+
+    return staticResult;
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────
+
+  private validateImports(
+    filePath: string,
+    content: string,
+    existingFiles: Map<string, ProjectFile>
+  ): { errors: ValidationError[]; warnings: ValidationWarning[] } {
+    const errors: ValidationError[] = [];
+    const warnings: ValidationWarning[] = [];
+
+    const importRegex =
+      /import\s+.*?\s+from\s+['"](\.[^'"]+)['"]/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = importRegex.exec(content)) !== null) {
+      const importPath = match[1];
+      const resolvedPath = this.resolveImportPath(
+        filePath,
+        importPath
+      );
+
+      if (resolvedPath && !existingFiles.has(resolvedPath)) {
+        // Check common extensions
+        const variations = [
+          resolvedPath,
+          resolvedPath + '.ts',
+          resolvedPath + '.tsx',
+          resolvedPath + '.js',
+          resolvedPath + '/index.ts',
+        ];
+
+        const found = variations.some((v) => existingFiles.has(v));
+        if (!found) {
+          warnings.push({
+            file: filePath,
+            message: `Import "${importPath}" may not resolve to an existing project file`,
+          });
+        }
+      }
+    }
+
+    return { errors, warnings };
+  }
+
+  private basicSyntaxCheck(
+    filePath: string,
+    content: string
+  ): { errors: ValidationError[]; warnings: ValidationWarning[] } {
+    const errors: ValidationError[] = [];
+    const warnings: ValidationWarning[] = [];
+
+    if (filePath.endsWith('.ts') || filePath.endsWith('.js')) {
+      // Check balanced braces
+      let braceCount = 0;
+      let parenCount = 0;
+      let bracketCount = 0;
+      let inString = false;
+      let stringChar = '';
+
+      for (let i = 0; i < content.length; i++) {
+        const char = content[i];
+        const prevChar = i > 0 ? content[i - 1] : '';
+
+        if (inString) {
+          if (char === stringChar && prevChar !== '\\') {
+            inString = false;
+          }
+          continue;
+        }
+
+        if (
+          (char === '"' || char === "'" || char === '`') &&
+          prevChar !== '\\'
+        ) {
+          inString = true;
+          stringChar = char;
+          continue;
+        }
+
+        switch (char) {
+          case '{':
+            braceCount++;
+            break;
+          case '}':
+            braceCount--;
+            break;
+          case '(':
+            parenCount++;
+            break;
+          case ')':
+            parenCount--;
+            break;
+          case '[':
+            bracketCount++;
+            break;
+          case ']':
+            bracketCount--;
+            break;
+        }
+      }
+
+      if (braceCount !== 0) {
+        errors.push({
+          file: filePath,
+          message: `Unbalanced braces: ${braceCount > 0 ? 'missing ' + braceCount + ' closing' : 'extra ' + Math.abs(braceCount) + ' closing'} brace(s)`,
+          severity: 'error',
+        });
+      }
+
+      if (parenCount !== 0) {
+        errors.push({
+          file: filePath,
+          message: `Unbalanced parentheses: ${parenCount > 0 ? 'missing closing' : 'extra closing'}`,
+          severity: 'error',
+        });
+      }
+
+      if (bracketCount !== 0) {
+        warnings.push({
+          file: filePath,
+          message: `Unbalanced brackets: ${bracketCount > 0 ? 'missing closing' : 'extra closing'}`,
+        });
+      }
+    }
+
+    if (filePath.endsWith('.json')) {
+      try {
+        JSON.parse(content);
+      } catch (e) {
+        errors.push({
+          file: filePath,
+          message: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+          severity: 'critical',
+        });
+      }
+    }
+
+    return { errors, warnings };
+  }
+
+  private resolveImportPath(
+    fromFile: string,
+    importPath: string
+  ): string | null {
+    if (!importPath.startsWith('.')) {
+      return null; // External package
+    }
+
+    const fromDir = fromFile.substring(
+      0,
+      fromFile.lastIndexOf('/')
+    );
+    const parts = importPath.split('/');
+    const dirParts = fromDir.split('/');
+
+    for (const part of parts) {
+      if (part === '.') {
+        continue;
+      } else if (part === '..') {
+        dirParts.pop();
+      } else {
+        dirParts.push(part);
+      }
+    }
+
+    return dirParts.join('/');
+  }
+
+  private getRelatedAPIs(
+    content: string,
+    existingFiles: Map<string, ProjectFile>
+  ): string {
+    const apis: string[] = [];
+    const importRegex = /from\s+['"](\.[^'"]+)['"]/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = importRegex.exec(content)) !== null) {
+      for (const [path, file] of existingFiles) {
+        if (
+          path.includes(match[1].replace('./', '')) &&
+          file.publicAPIs.length > 0
+        ) {
+          apis.push(`### ${path}`);
+          apis.push(
+            file.publicAPIs.map((a) => `  - ${a}`).join('\n')
+          );
+        }
+      }
+    }
+
+    return apis.length > 0
+      ? apis.join('\n')
+      : 'No related APIs found.';
+  }
+}
+File 14: src/core/RLMEngine.ts
+TypeScript
+
+// codeforge/src/core/RLMEngine.ts
+
+import * as vscode from 'vscode';
+import {
+  RLMMode,
+  REPLStep,
+  ConversationMessage,
+  ProjectArchitecture,
+  LMStreamEvent,
+  TaskStatus,
+  ProgressReport,
+} from '../types';
+import { LMAdapter } from './LMAdapter';
+import { ReasoningMode } from './ReasoningMode';
+import { LongMemoryMode } from './LongMemoryMode';
+import { ExecutionMode, GenerationResult } from './ExecutionMode';
+import { Validator } from './Validator';
+import { Chunker } from './Chunker';
+import { ProgressTracker } from './ProgressTracker';
+
+/**
+ * RLM Engine: Orchestrates Reasoning, Long Memory, and Execution modes.
+ * Manages the REPL loop and coordinates all subsystems.
+ */
+export class RLMEngine {
+  private lmAdapter: LMAdapter;
+  private reasoningMode: ReasoningMode;
+  private longMemoryMode: LongMemoryMode;
+  private executionMode: ExecutionMode;
+  private validator: Validator;
+  private chunker: Chunker;
+  private progressTracker: ProgressTracker;
+  private outputChannel: vscode.OutputChannel;
+  private currentCancellation: vscode.CancellationTokenSource | undefined;
+
+  // Event emitters for UI updates
+  private readonly _onProgress =
+    new vscode.EventEmitter<ProgressReport>();
+  public readonly onProgress = this._onProgress.event;
+
+  private readonly _onMessage =
+    new vscode.EventEmitter<ConversationMessage>();
+  public readonly onMessage = this._onMessage.event;
+
+  private readonly _onStream = new vscode.EventEmitter<LMStreamEvent>();
+  public readonly onStream = this._onStream.event;
+
+  private readonly _onFileGenerated = new vscode.EventEmitter<{
+    path: string;
+    content: string;
+  }>();
+  public readonly onFileGenerated = this._onFileGenerated.event;
+
+  private readonly _onModeChange = new vscode.EventEmitter<RLMMode>();
+  public readonly onModeChange = this._onModeChange.event;
+
+  private readonly _onStepChange = new vscode.EventEmitter<REPLStep>();
+  public readonly onStepChange = this._onStepChange.event;
+
+  constructor(outputChannel: vscode.OutputChannel) {
+    this.outputChannel = outputChannel;
+    this.lmAdapter = new LMAdapter(outputChannel);
+    this.chunker = new Chunker(this.lmAdapter);
+    this.reasoningMode = new ReasoningMode(this.lmAdapter);
+    this.longMemoryMode = new LongMemoryMode(
+      this.lmAdapter,
+      this.chunker
+    );
+    this.executionMode = new ExecutionMode(this.lmAdapter, this.chunker);
+    this.validator = new Validator(this.lmAdapter);
+    this.progressTracker = new ProgressTracker();
+  }
+
+  /**
+   * Initialize the engine, including LM model selection.
+   */
+  public async initialize(): Promise<void> {
+    await this.lmAdapter.initialize();
+    this.outputChannel.appendLine('[RLMEngine] Initialized');
+  }
+
+  /**
+   * Start a new project from a user's description.
+   * This kicks off the full REPL loop.
+   */
+  public async startProject(
+    description: string,
+    outputDirectory: string
+  ): Promise<void> {
+    this.outputChannel.appendLine(
+      `[RLMEngine] Starting project: ${description.substring(0, 100)}...`
+    );
+
+    // Phase 1: REASONING — Plan architecture
+    await this.setMode(RLMMode.REASONING);
+    await this.setStep(REPLStep.STATE_SYNC);
+
+    this.emitAssistantMessage(
+      '🔍 **Reasoning Mode**: Analyzing your requirements and planning architecture...'
+    );
+
+    const architectureResult =
+      await this.reasoningMode.planArchitecture(description);
+
+    // Initialize project state
+    this.longMemoryMode.initializeProject(
+      architectureResult.architecture.name,
+      outputDirectory,
+      architectureResult.architecture
+    );
+
+    this.progressTracker.reset();
+    const state = this.longMemoryMode.getState();
+
+    // Register all planned files in progress tracker
+    for (const filePath of architectureResult.architecture.fileTree) {
+      const file = state.files.get(filePath);
+      if (file) {
+        this.progressTracker.registerFile(filePath, file);
+      }
+    }
+
+    // Emit architecture summary to user
+    this.emitAssistantMessage(
+      this.formatArchitectureSummary(architectureResult.architecture)
+    );
+
+    this.emitProgress();
+  }
+
+  /**
+   * Execute the next REPL iteration.
+   * Called when user approves or the auto-loop continues.
+   */
+  public async executeNextIteration(): Promise<{
+    completed: boolean;
+    filesGenerated: string[];
+  }> {
+    this.currentCancellation = new vscode.CancellationTokenSource();
+    const filesGenerated: string[] = [];
+
+    try {
+      this.longMemoryMode.incrementIteration();
+      this.progressTracker.incrementIteration();
+
+      // ── Step 1: STATE SYNC ──
+      await this.setMode(RLMMode.LONG_MEMORY);
+      await this.setStep(REPLStep.STATE_SYNC);
+
+      const contextSummary =
+        await this.longMemoryMode.buildContextSummary();
+      const state = this.longMemoryMode.getState();
+      const completedPaths = Array.from(state.files.entries())
+        .filter(([_, f]) => f.status === TaskStatus.COMPLETED)
+        .map(([p]) => p);
+      const pendingPaths = this.progressTracker.getPendingFiles();
+
+      if (pendingPaths.length === 0) {
+        this.emitAssistantMessage(
+          '✅ **All files have been generated!** Project is complete.'
+        );
+        return { completed: true, filesGenerated: [] };
+      }
+
+      // ── Step 2: CONFIRMATION GATE ──
+      await this.setMode(RLMMode.REASONING);
+      await this.setStep(REPLStep.CONFIRMATION_GATE);
+
+      const decision = await this.reasoningMode.decideNextStep(
+        contextSummary,
+        completedPaths,
+        pendingPaths,
+        []
+      );
+
+      this.emitAssistantMessage(
+        `📋 **Next Step**: ${decision.recommendation}\n\nFiles to generate: ${decision.nextFiles.map((f) => `\`${f}\``).join(', ')}`
+      );
+
+      // ── Step 3: CODE EMISSION ──
+      await this.setMode(RLMMode.EXECUTION);
+      await this.setStep(REPLStep.CODE_EMISSION);
+
+      for (const filePath of decision.nextFiles) {
+        if (this.currentCancellation.token.isCancellationRequested) {
+          this.emitAssistantMessage('⏹️ Generation cancelled.');
+          break;
+        }
+
+        this.emitAssistantMessage(
+          `⚡ **Generating**: \`${filePath}\`...`
+        );
+        this.progressTracker.markFileInProgress(filePath);
+        this.longMemoryMode.markFileInProgress(filePath);
+        this.emitProgress();
+
+        try {
+          // Generate file specification
+          const existingAPIs =
+            this.longMemoryMode.getExistingAPIs();
+          const fileSpec = await this.reasoningMode.generateFileSpec(
+            filePath,
+            state.architecture,
+            existingAPIs,
+            contextSummary
+          );
+
+          // Generate the actual code
+          const result = await this.executionMode.generateFile(
+            filePath,
+            fileSpec.spec,
+            existingAPIs,
+            contextSummary,
+            state.architecture,
+            (event) => this._onStream.fire(event),
+            this.currentCancellation.token
+          );
+
+          // Validate
+          const validationResult = this.validator.staticValidate(
+            filePath,
+            result.content,
+            state.files
+          );
+
+          if (!validationResult.isValid) {
+            this.emitAssistantMessage(
+              `⚠️ Validation issues in \`${filePath}\`:\n${validationResult.errors.map((e) => `- ${e.message}`).join('\n')}\n\nRegenerating...`
+            );
+
+            // Retry once
+            const retryResult =
+              await this.executionMode.generateFile(
+                filePath,
+                fileSpec.spec +
+                  '\n\nFix these issues:\n' +
+                  validationResult.errors
+                    .map((e) => e.message)
+                    .join('\n'),
+                existingAPIs,
+                contextSummary,
+                state.architecture,
+                (event) => this._onStream.fire(event),
+                this.currentCancellation.token
+              );
+
+            await this.recordGeneratedFile(
+              filePath,
+              retryResult
+            );
+          } else {
+            await this.recordGeneratedFile(filePath, result);
+          }
+
+          if (validationResult.warnings.length > 0) {
+            this.emitAssistantMessage(
+              `⚡ Warnings for \`${filePath}\`:\n${validationResult.warnings.map((w) => `- ${w.message}`).join('\n')}`
+            );
+          }
+
+          filesGenerated.push(filePath);
+          this._onFileGenerated.fire({
+            path: filePath,
+            content: result.content,
+          });
+        } catch (error) {
+          const msg =
+            error instanceof Error
+              ? error.message
+              : String(error);
+          this.emitAssistantMessage(
+            `❌ Failed to generate \`${filePath}\`: ${msg}`
+          );
+          this.progressTracker.markFileFailed(filePath);
+        }
+      }
+
+      // ── Step 4: UPDATE MEMORY ──
+      await this.setMode(RLMMode.LONG_MEMORY);
+      await this.setStep(REPLStep.UPDATE_MEMORY);
+
+      this.emitProgress();
+
+      const progress = this.progressTracker.getProgressReport();
+      this.emitAssistantMessage(
+        `📊 **Progress**: ${progress.completedFiles}/${progress.totalFiles} files complete (${progress.estimatedCompletion}%) | ${progress.totalTokensGenerated} tokens generated | Iteration ${progress.currentIteration}`
+      );
+
+      return {
+        completed: pendingPaths.length <= decision.nextFiles.length,
+        filesGenerated,
+      };
+    } finally {
+      this.currentCancellation?.dispose();
+      this.currentCancellation = undefined;
+    }
+  }
+
+  /**
+   * Run the full REPL loop automatically until completion.
+   */
+  public async runFullLoop(): Promise<void> {
+    let completed = false;
+    let maxIterations = 100; // Safety limit
+
+    while (!completed && maxIterations > 0) {
+      const result = await this.executeNextIteration();
+      completed = result.completed;
+      maxIterations--;
+
+      if (!completed) {
+        // Small delay between iterations
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    if (maxIterations <= 0) {
+      this.emitAssistantMessage(
+        '⚠️ **Max iterations reached**. Some files may not have been generated.'
+      );
+    }
+  }
+
+  /**
+   * Handle a free-form user message during the REPL loop.
+   */
+  public async handleUserMessage(
+    message: string
+  ): Promise<string> {
+    const state = this.longMemoryMode.getState();
+
+    // Record user message
+    this.longMemoryMode.addMessage({
+      id: `msg_${Date.now()}`,
+      role: 'user',
+      content: message,
+      timestamp: Date.now(),
+    });
+
+    // Determine intent
+    const lowerMessage = message.toLowerCase();
+
+    if (
+      lowerMessage.includes('start') ||
+      lowerMessage.includes('create') ||
+      lowerMessage.includes('build') ||
+      lowerMessage.includes('generate')
+    ) {
+      if (state.architecture.fileTree.length === 0) {
+        // New project
+        const outputDir =
+          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        await this.startProject(message, outputDir);
+        return 'Project architecture planned. Use "Continue" to start generating files, or "Auto" to run the full loop.';
+      }
+    }
+
+    if (
+      lowerMessage === 'continue' ||
+      lowerMessage === 'next' ||
+      lowerMessage === 'go'
+    ) {
+      const result = await this.executeNextIteration();
+      return result.completed
+        ? 'All files generated!'
+        : `Generated ${result.filesGenerated.length} file(s). Continue?`;
+    }
+
+    if (lowerMessage === 'auto' || lowerMessage === 'run all') {
+      await this.runFullLoop();
+      return 'Full generation loop completed.';
+    }
+
+    if (
+      lowerMessage === 'status' ||
+      lowerMessage === 'progress'
+    ) {
+      return this.formatProgressReport();
+    }
+
+    // General conversation — use reasoning mode
+    const contextSummary =
+      await this.longMemoryMode.buildContextSummary();
+    const existingAPIs = this.longMemoryMode.getExistingAPIs();
+
+    const messages: ConversationMessage[] = [
+      {
+        id: `msg_${Date.now()}`,
+        role: 'system',
+        content: `You are CodeForge, an AI code generation assistant. Current project state:\n${contextSummary}\n\nAvailable APIs:\n${existingAPIs}`,
+        timestamp: Date.now(),
+      },
+      {
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: message,
+        timestamp: Date.now(),
+      },
+    ];
+
+    const response = await this.lmAdapter.sendStreamingRequest(
+      messages,
+      (event) => this._onStream.fire(event)
+    );
+
+    this.longMemoryMode.addMessage({
+      id: `msg_${Date.now()}`,
+      role: 'assistant',
+      content: response.content,
+      timestamp: Date.now(),
+    });
+
+    return response.content;
+  }
+
+  /**
+   * Cancel any ongoing generation.
+   */
+  public cancel(): void {
+    this.currentCancellation?.cancel();
+  }
+
+  /**
+   * Get current progress report.
+   */
+  public getProgress(): ProgressReport {
+    return this.progressTracker.getProgressReport();
+  }
+
+  /**
+   * Get the serialized project state for persistence.
+   */
+  public getSerializedState(): string {
+    return JSON.stringify(this.longMemoryMode.serialize(), null, 2);
+  }
+
+  /**
+   * Load project state from serialized data.
+   */
+  public loadState(serializedData: string): void {
+    const data = JSON.parse(serializedData);
+    this.longMemoryMode.deserialize(data);
+    this.progressTracker.loadFromState(
+      this.longMemoryMode.getState()
+    );
+    this.emitProgress();
+  }
+
+  /**
+   * Reset all state.
+   */
+  public reset(): void {
+    this.longMemoryMode.reset();
+    this.progressTracker.reset();
+    this.emitProgress();
+  }
+
+  /**
+   * Check if the LM adapter is ready.
+   */
+  public isReady(): boolean {
+    return this.lmAdapter.isReady();
+  }
+
+  /**
+   * Get model info.
+   */
+  public getModelInfo(): {
+    id: string;
+    family: string;
+    maxInputTokens: number;
+  } | null {
+    return this.lmAdapter.getModelInfo();
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────
+
+  private async recordGeneratedFile(
+    filePath: string,
+    result: GenerationResult
+  ): Promise<void> {
+    // Use LM to extract metadata
+    const metadata =
+      await this.longMemoryMode.updateMemoryFromGeneration(
+        filePath,
+        result.content
+      );
+
+    // Record in long memory
+    this.longMemoryMode.recordFileCompletion(
+      filePath,
+      result.content,
+      metadata.publicAPIs,
+      metadata.dependencies,
+      result.tokensUsed
+    );
+
+    // Update progress tracker
+    this.progressTracker.markFileCompleted(
+      filePath,
+      result.content,
+      metadata.publicAPIs,
+      result.tokensUsed
+    );
+
+    // Add any new assumptions
+    for (const assumption of metadata.assumptions) {
+      this.longMemoryMode.addAssumption(assumption);
+    }
+
+    // Add any new TODOs
+    for (const todoDesc of metadata.newTodos) {
+      const todo = this.progressTracker.addTodo(todoDesc, [filePath]);
+      this.longMemoryMode.addTodo(todo);
+    }
+
+    this.emitAssistantMessage(
+      `✅ **Generated**: \`${filePath}\` (${result.tokensUsed} tokens${result.wasChunked ? `, ${result.chunksUsed} chunks` : ''})`
+    );
+  }
+
+  private async setMode(mode: RLMMode): Promise<void> {
+    this.longMemoryMode.setMode(mode);
+    this.progressTracker.setMode(mode);
+    this._onModeChange.fire(mode);
+  }
+
+  private async setStep(step: REPLStep): Promise<void> {
+    this.longMemoryMode.setREPLStep(step);
+    this.progressTracker.setStep(step);
+    this._onStepChange.fire(step);
+  }
+
+  private emitAssistantMessage(content: string): void {
+    const message: ConversationMessage = {
+      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      role: 'assistant',
+      content,
+      timestamp: Date.now(),
+      mode: this.longMemoryMode.getState().currentMode,
+      step: this.longMemoryMode.getState().currentREPLStep,
+    };
+    this.longMemoryMode.addMessage(message);
+    this._onMessage.fire(message);
+  }
+
+  private emitProgress(): void {
+    this._onProgress.fire(this.progressTracker.getProgressReport());
+  }
+
+  private formatArchitectureSummary(
+    arch: ProjectArchitecture
+  ): string {
+    return `## 📐 Architecture Plan: ${arch.name}
+
+**Description:** ${arch.description}
+
+**Languages:** ${arch.targetLanguages.join(', ')}
+**Frameworks:** ${arch.frameworks.join(', ') || 'None'}
+
+### File Tree (${arch.fileTree.length} files)
+${arch.fileTree.map((f) => `- \`${f}\``).join('\n')}
+
+### Build Order
+${arch.moduleDependencyOrder.map((f, i) => `${i + 1}. \`${f}\``).join('\n')}
+
+### Design Decisions
+${arch.designDecisions.map((d) => `- ${d}`).join('\n')}
+
+---
+Type **"continue"** to generate files one iteration at a time, or **"auto"** to run the full generation loop.`;
+  }
+
+  private formatProgressReport(): string {
+    const p = this.progressTracker.getProgressReport();
+    const state = this.longMemoryMode.getState();
+
+    const completedFiles = Array.from(state.files.entries())
+      .filter(([_, f]) => f.status === TaskStatus.COMPLETED)
+      .map(([path, f]) => `
