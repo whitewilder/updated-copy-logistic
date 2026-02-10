@@ -2227,3 +2227,20 @@ This complete 8-file solution provides:
 | **Copilot Chat** | `extension.ts` — @docrlm /analyze and /repl |
 | **JSON Safety** | `utils.ts` — brace-balanced extraction, repair, typed fallbacks |
 | **Error Recovery** | `llm.ts` — 3 retries, exponential backoff, rate-limit handling |
+
+doc-analyzer/
+├── package.json
+├── tsconfig.json
+├── webpack.config.js
+├── .vscodeignore
+├── README.md
+└── src/
+    ├── extension.ts        // Entry point + VS Code commands
+    ├── config.ts           // Types + constants + prompts
+    ├── parser.ts           // Document parsing + chunking
+    ├── context.ts          // Global context memory + inconsistency tracking
+    ├── llm.ts              // Copilot / LLM interface
+    ├── rlmPipeline.ts      // Recursive orchestration (core brain)
+    ├── repl.ts             // Interactive REPL loop
+    └── utils.ts            // Logger, progress, JSON validation, output
+
